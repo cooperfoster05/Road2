@@ -92,6 +92,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	bool  viewerLoop = true;
 	float viewerSpeed = 1.0f;
 	float viewerPlayhead = 0.0f;       // fractional tick
+	float savedGameSpeed = 1.0f;
 	std::vector<Frame> viewerFrames;
 	RepListItem viewerRep;
 	std::string viewerStatus;
@@ -113,6 +114,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void ViewerExit();                         // game thread
 	void ViewerSeek(float tick);               // game thread
 	void ViewerTick(CarWrapper& car);          // game thread, every physics tick
+	void OverrideViewerInput(CarWrapper& car, void* params); // game thread, before the game reads input
 	void RefreshRepList();                     // render thread
 	void DrawViewerPaths(CanvasWrapper& canvas);
 

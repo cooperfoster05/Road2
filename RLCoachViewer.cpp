@@ -20,6 +20,18 @@ namespace
 
 	float Lerp(float a, float b, float t) { return a + (b - a) * t; }
 
+	// Smooth curve between two ticks using each tick's position and velocity (cubic Hermite).
+	// Straight-line blending looks kinked in slow motion; this follows the real arc.
+	// v0, v1 are in units per second; frames are 1/120 s apart.
+	void Hermite(float p0, float v0, float p1, float v1, float t, float& pos, float& velPerSec)
+	{
+		const float m0 = v0 / 120.0f, m1 = v1 / 120.0f;
+		const float t2 = t * t, t3 = t2 * t;
+		pos = (2 * t3 - 3 * t2 + 1) * p0 + (t3 - 2 * t2 + t) * m0 + (-2 * t3 + 3 * t2) * p1 + (t3 - t2) * m1;
+		float dPerTick = (6 * t2 - 6 * t) * p0 + (3 * t2 - 4 * t + 1) * m0 + (-6 * t2 + 6 * t) * p1 + (3 * t2 - 2 * t) * m1;
+		velPerSec = dPerTick * 120.0f;
+	}
+
 	// Rotations wrap at 65536 units, so blend along the shorter way around
 	int LerpAngle(int a, int b, float t)
 	{
@@ -56,6 +68,10 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 	state = RepState::Idle;
 	havePrev = false;
 
+	// Remember the game speed so it can be put back when you stop watching
+	ServerWrapper server = gameWrapper->GetGameEventAsServer();
+	if (!viewerActive) savedGameSpeed = server.IsNull() ? 1.0f : server.GetGameSpeed();
+
 	viewerFrames = std::move(loaded);
 	viewerRep = item;
 	viewerPlayhead = 0.0f;
@@ -77,6 +93,9 @@ void RLCoach::ViewerExit()
 	viewerFrames.clear();
 	uiViewerActive = false;
 	uiViewerPlaying = false;
+
+	ServerWrapper server = gameWrapper->GetGameEventAsServer();
+	if (!server.IsNull()) server.SetGameSpeed(savedGameSpeed);
 
 	CarWrapper car = gameWrapper->GetLocalCar();
 	if (!car.IsNull())
@@ -113,10 +132,14 @@ void RLCoach::ViewerTick(CarWrapper& car)
 	BallWrapper ball = server.GetBall();
 	if (ball.IsNull()) return;
 
+	// Slow motion uses the game's own speed setting, so the game smooths motion between ticks itself.
+	// The replay always advances exactly one recorded tick per game tick.
+	if (std::fabs(server.GetGameSpeed() - viewerSpeed) > 0.001f) server.SetGameSpeed(viewerSpeed);
+
 	const float last = static_cast<float>(viewerFrames.size() - 1);
 	if (viewerPlaying)
 	{
-		viewerPlayhead += viewerSpeed;
+		viewerPlayhead += 1.0f;
 		if (viewerPlayhead > last)
 		{
 			if (viewerLoop) viewerPlayhead = 0.0f;
@@ -130,18 +153,32 @@ void RLCoach::ViewerTick(CarWrapper& car)
 	const Frame& f0 = viewerFrames[i0];
 	const Frame& f1 = viewerFrames[i1];
 
-	// While playing, give things their recorded velocity (scaled to playback speed) so they look natural.
-	// While paused, hold them perfectly still.
-	float vScale = viewerPlaying ? viewerSpeed : 0.0f;
+	// While playing, give things their recorded velocity so the game's own motion between ticks lines up
+	// with where we put them next. While paused, hold them still.
+	float vScale = viewerPlaying ? 1.0f : 0.0f;
 
-	car.SetLocation(Vector(Lerp(f0.carX, f1.carX, a), Lerp(f0.carY, f1.carY, a), Lerp(f0.carZ, f1.carZ, a)));
+	float cx, cy, cz, cvx, cvy, cvz;
+	Hermite(f0.carX, f0.carVX, f1.carX, f1.carVX, a, cx, cvx);
+	Hermite(f0.carY, f0.carVY, f1.carY, f1.carVY, a, cy, cvy);
+	Hermite(f0.carZ, f0.carVZ, f1.carZ, f1.carVZ, a, cz, cvz);
+	car.SetLocation(Vector(cx, cy, cz));
 	car.SetRotation(Rotator(LerpAngle(f0.carPitch, f1.carPitch, a), LerpAngle(f0.carYaw, f1.carYaw, a), LerpAngle(f0.carRoll, f1.carRoll, a)));
-	car.SetVelocity(Vector(f0.carVX * vScale, f0.carVY * vScale, f0.carVZ * vScale));
-	car.SetAngularVelocity(Vector(f0.carAVX * vScale, f0.carAVY * vScale, f0.carAVZ * vScale), false);
+	car.SetVelocity(Vector(cvx * vScale, cvy * vScale, cvz * vScale));
+	car.SetAngularVelocity(Vector(Lerp(f0.carAVX, f1.carAVX, a) * vScale, Lerp(f0.carAVY, f1.carAVY, a) * vScale,
+		Lerp(f0.carAVZ, f1.carAVZ, a) * vScale), false);
 	BoostWrapper boostComp = car.GetBoostComponent();
-	if (!boostComp.IsNull()) boostComp.SetCurrentBoostAmount(f0.boostAmount / 100.0f);
+	if (!boostComp.IsNull()) boostComp.SetCurrentBoostAmount(std::fmax(f0.boostAmount, f0.boost ? 1.0f : 0.0f) / 100.0f);
 
-	float bx = Lerp(f0.ballX, f1.ballX, a), by = Lerp(f0.ballY, f1.ballY, a), bz = Lerp(f0.ballZ, f1.ballZ, a);
+	float bx, by, bz, bvx, bvy, bvz;
+	Hermite(f0.ballX, f0.ballVX, f1.ballX, f1.ballVX, a, bx, bvx);
+	Hermite(f0.ballY, f0.ballVY, f1.ballY, f1.ballVY, a, by, bvy);
+	Hermite(f0.ballZ, f0.ballVZ, f1.ballZ, f1.ballVZ, a, bz, bvz);
+	// A touch changes the ball's velocity within one tick, so the curve can overshoot there: use a straight line instead
+	if (f1.touch)
+	{
+		bx = Lerp(f0.ballX, f1.ballX, a); by = Lerp(f0.ballY, f1.ballY, a); bz = Lerp(f0.ballZ, f1.ballZ, a);
+		bvx = f1.ballVX; bvy = f1.ballVY; bvz = f1.ballVZ;
+	}
 	bool inGoalMouth = std::fabs(bx) < kGoalHalfWidth && bz < kGoalHeight;
 	bool guarded = inGoalMouth && std::fabs(by) > kGoalLineY;
 	if (guarded) by = std::copysign(kGoalLineY, by);
@@ -149,11 +186,28 @@ void RLCoach::ViewerTick(CarWrapper& car)
 	if (guarded)
 		ball.SetVelocity(Vector(0.0f, 0.0f, 0.0f));
 	else
-		ball.SetVelocity(Vector(f0.ballVX * vScale, f0.ballVY * vScale, f0.ballVZ * vScale));
-	ball.SetAngularVelocity(Vector(f0.ballAVX * vScale, f0.ballAVY * vScale, f0.ballAVZ * vScale), false);
+		ball.SetVelocity(Vector(bvx * vScale, bvy * vScale, bvz * vScale));
+	ball.SetAngularVelocity(Vector(Lerp(f0.ballAVX, f1.ballAVX, a) * vScale, Lerp(f0.ballAVY, f1.ballAVY, a) * vScale,
+		Lerp(f0.ballAVZ, f1.ballAVZ, a) * vScale), false);
 
 	uiViewerPlayhead = viewerPlayhead;
 	uiViewerPlaying = viewerPlaying;
+}
+
+void RLCoach::OverrideViewerInput(CarWrapper& car, void* params)
+{
+	if (!viewerActive || !params || viewerFrames.empty() || car.IsNull()) return;
+	CarWrapper local = gameWrapper->GetLocalCar();
+	if (local.IsNull() || local.memory_address != car.memory_address) return;
+
+	// Replace your controller input with the recorded boost only: the boost flame shows when you
+	// boosted, and stray jumps or stick movement can't twitch the car while you watch.
+	int i = std::min(static_cast<int>(viewerPlayhead), static_cast<int>(viewerFrames.size()) - 1);
+	ControllerInput* in = reinterpret_cast<ControllerInput*>(params);
+	ControllerInput replay{};
+	replay.ActivateBoost = viewerFrames[i].boost ? 1 : 0;
+	replay.HoldingBoost = replay.ActivateBoost;
+	*in = replay;
 }
 
 void RLCoach::DrawViewerPaths(CanvasWrapper& canvas)

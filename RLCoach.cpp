@@ -104,6 +104,10 @@ void RLCoach::onLoad()
 
 	writer = std::make_unique<RepWriter>(std::filesystem::path(gameWrapper->GetDataFolderW()) / "RLCoach");
 
+	// Every physics tick, before the game reads the car's input (the viewer replaces it)
+	gameWrapper->HookEventWithCaller<CarWrapper>("Function TAGame.Car_TA.SetVehicleInput",
+		[this](CarWrapper car, void* params, std::string) { OverrideViewerInput(car, params); });
+
 	// Every physics tick, after the car's input for that tick is set
 	gameWrapper->HookEventWithCallerPost<CarWrapper>("Function TAGame.Car_TA.SetVehicleInput",
 		[this](CarWrapper car, void*, std::string) { OnVehicleInput(car); });
