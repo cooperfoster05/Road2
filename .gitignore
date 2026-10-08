@@ -1,0 +1,10 @@
+# Visual Studio and build output (rebuilt every time, never commit)
+.vs/
+build/
+plugins/
+x64/
+*.user
+*.aps
+
+# Local backups
+_template_originals/
