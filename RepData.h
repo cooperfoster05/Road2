@@ -46,4 +46,7 @@ struct RepSummary
 	int   ticks = 0;
 	int   touches = 0;
 	bool  goal = false;
+	int   eventTick = 0;          // tick where the goal / floor hit / timeout happened (frames after it are recovery)
+	bool  floorBeforeGoal = false;// ball bounced on the floor before going in
+	std::string shotKey;          // starting ball and car position, to group attempts at the same shot
 };

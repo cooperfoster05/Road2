@@ -25,6 +25,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::shared_ptr<bool>  recordingEnabled;  // rlcoach_recording (data farming on/off, starts off every session)
 	std::shared_ptr<float> maxRepSeconds;     // rlcoach_max_rep_seconds
 	std::shared_ptr<bool>  useNumpad;         // rlcoach_rate_numpad (rate with numpad 1-5 instead of number row)
+	std::shared_ptr<float> postRollSeconds;   // rlcoach_postroll_seconds (keep recording after the shot, for recovery)
 
 	// ---- Rep detection ----
 	enum class RepState { Idle, WaitReset, Armed, Recording };
@@ -39,6 +40,12 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	Vector touchLoc;
 	int   touchCount = 0;
 	int   lastTouchTick = -1000;
+	std::string pendingEndReason;   // set when the shot is over but recovery is still being recorded
+	int   eventTick = -1;
+	bool  floorBeforeGoal = false;
+	Vector armedCarLoc, armedBallLoc;
+	int   armedTicks = 0;
+	int   queuedRating = 0;         // rating pressed during a rep, applied when it saves
 
 	// ---- Saving and rating ----
 	std::unique_ptr<RepWriter> writer;
@@ -64,11 +71,13 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	Frame Capture(CarWrapper& car, BallWrapper& ball, const ControllerInput& in);
 	void FinishRep(const std::string& reason);
 	void SetRecording(bool on);                // game thread only
+	void EnterArmed();
 	bool IsOfflinePractice();
 
 	// ---- Rating ----
 	void UpdateRatingKeys();
 	void RateLastRep(int rating);
+	void HandleRatingPress(int rating);
 	void LoadRatingKeys();
 
 	// ---- Test tools ----

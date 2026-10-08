@@ -65,11 +65,12 @@ bool RepWriter::SaveRep(const std::vector<Frame>& frames, RepSummary& summary)
 	out.close();
 
 	std::ofstream index = OpenAppend(root / "reps_index.csv",
-		"file,saved_at,mode,map,end_reason,duration_s,ticks,touches,goal");
+		"file,saved_at,mode,map,end_reason,duration_s,ticks,touches,goal,event_tick,floor_before_goal,shot_key");
 	if (!index) return false;
-	index << std::format("{},{},{},{},{},{:.3f},{},{},{}\n",
+	index << std::format("{},{},{},{},{},{:.3f},{},{},{},{},{},{}\n",
 		summary.fileName, summary.savedAt, summary.mode, summary.map, summary.endReason,
-		summary.durationS, summary.ticks, summary.touches, (int)summary.goal);
+		summary.durationS, summary.ticks, summary.touches, (int)summary.goal,
+		summary.eventTick, (int)summary.floorBeforeGoal, summary.shotKey);
 	return static_cast<bool>(index);
 }
 

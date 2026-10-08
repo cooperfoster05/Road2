@@ -58,6 +58,7 @@ void RLCoach::onLoad()
 	recordingEnabled = std::make_shared<bool>(false);
 	maxRepSeconds = std::make_shared<float>(10.0f);
 	useNumpad = std::make_shared<bool>(false);
+	postRollSeconds = std::make_shared<float>(1.5f);
 
 	cvarManager->registerCvar("rlcoach_hud", "1", "Show the RL Coach panel", true, true, 0, true, 1)
 		.bindTo(hudEnabled);
@@ -70,6 +71,9 @@ void RLCoach::onLoad()
 	cvarManager->registerCvar("rlcoach_max_rep_seconds", "10", "Longest a rep runs before it ends as a timeout", true, true, 2, true, 60)
 		.bindTo(maxRepSeconds);
 
+	cvarManager->registerCvar("rlcoach_postroll_seconds", "1.5", "Keep recording this long after the shot ends, to capture recovery and late goals", true, true, 0, true, 5)
+		.bindTo(postRollSeconds);
+
 	CVarWrapper numpad = cvarManager->registerCvar("rlcoach_rate_numpad", "0", "Rate reps with numpad 1-5 instead of the number row", true, true, 0, true, 1);
 	numpad.bindTo(useNumpad);
 	numpad.addOnValueChanged([this](std::string, CVarWrapper) { LoadRatingKeys(); });
@@ -80,15 +84,11 @@ void RLCoach::onLoad()
 
 	cvarManager->registerNotifier("rlcoach_rate", [this](std::vector<std::string> args) {
 		if (args.size() < 2) return;
-		try { RateLastRep(std::stoi(args[1])); } catch (...) {}
+		try { HandleRatingPress(std::stoi(args[1])); } catch (...) {}
 	}, "Rate the last rep 1-5", PERMISSION_ALL);
 
 	cvarManager->registerNotifier("rlcoach_rearm", [this](std::vector<std::string>) {
-		if (*recordingEnabled && state != RepState::Recording)
-		{
-			state = RepState::Armed;
-			statusMessage = "Armed: rep starts on your next input";
-		}
+		if (*recordingEnabled && state != RepState::Recording) EnterArmed();
 	}, "Arm the recorder without resetting the ball", PERMISSION_ALL);
 
 	cvarManager->registerNotifier("rlcoach_test_setstate", [this](std::vector<std::string>) {
@@ -135,6 +135,8 @@ void RLCoach::SetRecording(bool on)
 	havePrev = false;
 	goalPending = false;
 	touchPending = false;
+	pendingEndReason.clear();
+	queuedRating = 0;
 	if (on)
 	{
 		state = RepState::WaitReset;
@@ -145,6 +147,13 @@ void RLCoach::SetRecording(bool on)
 		state = RepState::Idle;
 		statusMessage = "Recording off";
 	}
+}
+
+void RLCoach::EnterArmed()
+{
+	state = RepState::Armed;
+	armedTicks = 0;
+	statusMessage = "Armed: rep starts on your first input";
 }
 
 void RLCoach::OnVehicleInput(CarWrapper car)
@@ -182,55 +191,90 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 	switch (state)
 	{
 	case RepState::WaitReset:
-		if (teleported)
-		{
-			state = RepState::Armed;
-			statusMessage = "Armed: rep starts on your first input";
-		}
+		if (teleported) EnterArmed();
 		break;
 
 	case RepState::Armed:
-		if (InputActive(in))
+	{
+		// For the first few ticks after arming, remember where things sit. In a training pack the car and
+		// ball are frozen until the shot starts, so any movement after that means the attempt began,
+		// even if the stick was only nudged below our input deadzone.
+		if (teleported || armedTicks < 6)
+		{
+			if (teleported) armedTicks = 0;
+			armedCarLoc = carLoc;
+			armedBallLoc = ballLoc;
+			armedTicks++;
+			if (!InputActive(in)) break;
+		}
+		bool movedInPack = gameWrapper->IsInCustomTraining()
+			&& (Dist(carLoc, armedCarLoc) > 5.0f || Dist(ballLoc, armedBallLoc) > 5.0f);
+
+		if (InputActive(in) || movedInPack)
 		{
 			frames.clear();
-			frames.reserve(static_cast<size_t>(kTickRate * 12));
+			frames.reserve(static_cast<size_t>(kTickRate * 14));
 			touchCount = 0;
 			lastTouchTick = -1000;
 			goalPending = false;
 			touchPending = false;
+			pendingEndReason.clear();
+			eventTick = -1;
+			floorBeforeGoal = false;
+			queuedRating = 0;
 			repStartTime = std::chrono::steady_clock::now();
 			state = RepState::Recording;
 			frames.push_back(Capture(car, ball, in));
 			statusMessage = "Recording rep";
 		}
 		break;
+	}
 
 	case RepState::Recording:
 	{
 		if (teleported)
 		{
-			// Shot or ball was reset mid-rep: save as abandoned, and the new shot is ready to go
-			FinishRep("reset");
-			state = RepState::Armed;
+			// Shot or ball was reset. If the shot had already ended, keep that result; otherwise it's a bail.
+			FinishRep(pendingEndReason.empty() ? "reset" : pendingEndReason);
+			EnterArmed();
 			break;
 		}
 
 		frames.push_back(Capture(car, ball, in));
+		int tick = frames.back().tick;
 		float elapsed = frames.back().t;
 
 		if (goalPending)
 		{
-			FinishRep("goal");
-			state = RepState::WaitReset;
+			goalPending = false;
+			if (pendingEndReason != "goal")
+			{
+				// A goal right after a floor bounce still counts as a goal
+				if (pendingEndReason == "floor") floorBeforeGoal = true;
+				pendingEndReason = "goal";
+				eventTick = tick;
+			}
 		}
-		else if (hadPrev && static_cast<int>(frames.size()) > kMinTicksBeforeFloor && ballLoc.Z < kFloorZ && prevBallZ >= kFloorZ)
+		else if (pendingEndReason.empty())
 		{
-			FinishRep("floor");
-			state = RepState::WaitReset;
+			if (hadPrev && static_cast<int>(frames.size()) > kMinTicksBeforeFloor && ballLoc.Z < kFloorZ && prevBallZ >= kFloorZ)
+			{
+				pendingEndReason = "floor";
+				eventTick = tick;
+			}
+			else if (elapsed >= *maxRepSeconds)
+			{
+				eventTick = tick;
+				FinishRep("timeout");
+				state = RepState::WaitReset;
+				break;
+			}
 		}
-		else if (elapsed >= *maxRepSeconds)
+
+		// Keep recording for the post-roll window so recovery (and late goals) are captured
+		if (!pendingEndReason.empty() && (tick - eventTick) >= static_cast<int>(*postRollSeconds * kTickRate))
 		{
-			FinishRep("timeout");
+			FinishRep(pendingEndReason);
 			state = RepState::WaitReset;
 		}
 		break;
@@ -320,6 +364,9 @@ void RLCoach::FinishRep(const std::string& reason)
 	if (reason == "reset" && frames.size() < 24)
 	{
 		frames.clear();
+		pendingEndReason.clear();
+		eventTick = -1;
+		queuedRating = 0;
 		return;
 	}
 
@@ -331,9 +378,23 @@ void RLCoach::FinishRep(const std::string& reason)
 	s.durationS = frames.empty() ? 0.0f : frames.back().t;
 	s.touches = touchCount;
 	s.goal = (reason == "goal");
+	s.eventTick = eventTick >= 0 ? eventTick : (s.ticks > 0 ? s.ticks - 1 : 0);
+	s.floorBeforeGoal = floorBeforeGoal;
+	if (!frames.empty())
+	{
+		// Starting ball and car spots, rounded to 50 units, so attempts at the same shot group together
+		auto r50 = [](float v) { return static_cast<int>(std::lround(v / 50.0f)) * 50; };
+		const Frame& f0 = frames.front();
+		s.shotKey = std::format("{}_{}_{}_{}_{}", r50(f0.ballX), r50(f0.ballY), r50(f0.ballZ), r50(f0.carX), r50(f0.carY));
+	}
 
 	bool ok = writer && writer->SaveRep(frames, s);
 	frames.clear();
+	pendingEndReason.clear();
+	eventTick = -1;
+	floorBeforeGoal = false;
+	int ratingToApply = queuedRating;
+	queuedRating = 0;
 
 	if (ok)
 	{
@@ -342,6 +403,7 @@ void RLCoach::FinishRep(const std::string& reason)
 		lastRating = 0;
 		repsThisSession++;
 		statusMessage = std::format("Rep {} saved ({})", repsThisSession, reason);
+		if (ratingToApply > 0) RateLastRep(ratingToApply);
 	}
 	else
 	{
@@ -371,9 +433,24 @@ void RLCoach::UpdateRatingKeys()
 	for (int i = 0; i < 5; i++)
 	{
 		bool down = gameWrapper->IsKeyPressed(keyIndex[i]);
-		if (down && !keyWasDown[i] && *recordingEnabled && haveLastRep && IsOfflinePractice())
-			RateLastRep(i + 1);
+		if (down && !keyWasDown[i] && *recordingEnabled && IsOfflinePractice())
+			HandleRatingPress(i + 1);
 		keyWasDown[i] = down;
+	}
+}
+
+void RLCoach::HandleRatingPress(int rating)
+{
+	if (rating < 1 || rating > 5) return;
+	if (state == RepState::Recording)
+	{
+		// Pressed during a rep: it belongs to this rep, not the previous one
+		queuedRating = rating;
+		statusMessage = std::format("Rating {} ({}) saved when this rep ends", rating, RatingName(rating));
+	}
+	else
+	{
+		RateLastRep(rating);
 	}
 }
 
@@ -447,6 +524,8 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 
 	if (!*recordingEnabled)
 		add("Recording off  (F2 > Plugins > RLCoach)", 150, 150, 150);
+	else if (state == RepState::Recording && !pendingEndReason.empty())
+		add(std::format("REC  shot over ({}), recording recovery", pendingEndReason), 255, 120, 120);
 	else if (state == RepState::Recording)
 		add("REC  recording rep", 255, 70, 70);
 	else if (state == RepState::Armed)
@@ -464,6 +543,9 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 		in.Throttle, in.Steer, in.Pitch, in.Yaw, in.Roll), 180, 220, 255);
 	add(std::format("Jump {}   Boost {}   Slide {}",
 		in.Jump ? "X" : "-", (in.ActivateBoost || in.HoldingBoost) ? "X" : "-", in.Handbrake ? "X" : "-"), 180, 220, 255);
+
+	if (*recordingEnabled && state == RepState::Recording && queuedRating > 0)
+		add(std::format("This rep will be rated {}: {}", queuedRating, RatingName(queuedRating)), 120, 230, 120);
 
 	if (*recordingEnabled && haveLastRep)
 	{
@@ -519,9 +601,12 @@ void RLCoach::RenderSettings()
 	float maxS = *maxRepSeconds;
 	if (ImGui::SliderFloat("Max rep length (seconds)", &maxS, 2.0f, 30.0f, "%.0f")) setCvar("rlcoach_max_rep_seconds", maxS);
 
+	float post = *postRollSeconds;
+	if (ImGui::SliderFloat("Keep recording after the shot (seconds)", &post, 0.0f, 5.0f, "%.1f")) setCvar("rlcoach_postroll_seconds", post);
+
 	ImGui::Separator();
 	ImGui::Text("Reps saved this session: %d", repsThisSession);
-	ImGui::TextWrapped("Rating keys: 1 Missed, 2 Close, 3 Bad shot but went in, 4 Good shot went in, 5 Great shot went in.");
+	ImGui::TextWrapped("Rating keys: 1 Missed, 2 Close, 3 Bad shot but went in, 4 Good shot went in, 5 Great shot went in. Pressing during a rep rates that rep; pressing after rates the last saved rep.");
 	ImGui::TextWrapped("Controller: bind rlcoach_toggle_recording to a button in BakkesMod's Bindings tab to toggle recording.");
 	if (writer) ImGui::TextWrapped("Reps are saved in: %s", writer->Folder().string().c_str());
 
