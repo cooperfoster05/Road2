@@ -109,6 +109,8 @@
     </ClCompile>
     <ClCompile Include="RLCoach.cpp" />
     <ClCompile Include="RepWriter.cpp" />
+    <ClCompile Include="RepLibrary.cpp" />
+    <ClCompile Include="RLCoachViewer.cpp" />
     <ClCompile Include="GuiBase.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -132,6 +134,7 @@
     <ClInclude Include="RLCoach.h" />
     <ClInclude Include="RepData.h" />
     <ClInclude Include="RepWriter.h" />
+    <ClInclude Include="RepLibrary.h" />
     <ClInclude Include="version.h" />
   </ItemGroup>
   <ItemGroup>

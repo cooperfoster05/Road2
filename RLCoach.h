@@ -7,7 +7,9 @@
 
 #include "RepData.h"
 #include "RepWriter.h"
+#include "RepLibrary.h"
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -19,6 +21,7 @@ constexpr auto plugin_version = stringify(VERSION_MAJOR) "." stringify(VERSION_M
 
 class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	, public SettingsWindowBase  // adds an RLCoach tab in the F2 menu
+	, public PluginWindowBase    // the rep viewer window
 {
 	// ---- Settings (cvars) ----
 	std::shared_ptr<bool>  hudEnabled;        // rlcoach_hud
@@ -83,9 +86,40 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	// ---- Test tools ----
 	void TestSetState();
 
+	// ---- Rep viewer (game thread state) ----
+	bool  viewerActive = false;
+	bool  viewerPlaying = false;
+	bool  viewerLoop = true;
+	float viewerSpeed = 1.0f;
+	float viewerPlayhead = 0.0f;       // fractional tick
+	std::vector<Frame> viewerFrames;
+	RepListItem viewerRep;
+	std::string viewerStatus;
+
+	// Copies the viewer window can read safely from the render thread
+	std::atomic<bool>  uiViewerActive{ false };
+	std::atomic<bool>  uiViewerPlaying{ false };
+	std::atomic<int>   uiViewerTotal{ 0 };
+	std::atomic<float> uiViewerPlayhead{ 0.0f };
+	std::atomic<float> uiViewerSpeed{ 1.0f };
+
+	// Viewer window state (render thread only)
+	std::vector<RepListItem> repList;
+	bool  repListLoaded = false;
+	int   selectedRep = -1;
+	bool  uiLoop = true;
+
+	void ViewerLoad(const RepListItem& item);  // game thread
+	void ViewerExit();                         // game thread
+	void ViewerSeek(float tick);               // game thread
+	void ViewerTick(CarWrapper& car);          // game thread, every physics tick
+	void RefreshRepList();                     // render thread
+	void DrawViewerPaths(CanvasWrapper& canvas);
+
 	// ---- Drawing ----
 	void RenderHud(CanvasWrapper canvas);
 
 public:
 	void RenderSettings() override;
+	void RenderWindow() override;
 };

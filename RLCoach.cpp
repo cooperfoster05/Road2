@@ -2,6 +2,7 @@
 #include "RLCoach.h"
 #include "bakkesmod/wrappers/includes.h"
 
+#include <algorithm>
 #include <cmath>
 #include <format>
 
@@ -91,9 +92,15 @@ void RLCoach::onLoad()
 		if (*recordingEnabled && state != RepState::Recording) EnterArmed();
 	}, "Arm the recorder without resetting the ball", PERMISSION_ALL);
 
+	cvarManager->registerNotifier("rlcoach_viewer", [this](std::vector<std::string>) {
+		cvarManager->executeCommand("togglemenu " + GetMenuName());
+	}, "Open or close the rep viewer", PERMISSION_ALL);
+
 	cvarManager->registerNotifier("rlcoach_test_setstate", [this](std::vector<std::string>) {
 		TestSetState();
 	}, "Test: move the car and ball to a fixed spot", PERMISSION_ALL);
+
+	menuTitle_ = "RL Coach - Rep Viewer";
 
 	writer = std::make_unique<RepWriter>(std::filesystem::path(gameWrapper->GetDataFolderW()) / "RLCoach");
 
@@ -115,6 +122,7 @@ void RLCoach::onLoad()
 
 void RLCoach::onUnload()
 {
+	ViewerExit();
 	gameWrapper->UnregisterDrawables();
 	frames.clear();
 	state = RepState::Idle;
@@ -164,6 +172,13 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 
 	ControllerInput in = car.GetInput();
 	lastInput = in;
+
+	// While watching a rep, the viewer drives the car and ball and the recorder sits out
+	if (viewerActive)
+	{
+		ViewerTick(car);
+		return;
+	}
 
 	if (!*recordingEnabled || state == RepState::Idle) return;
 
@@ -522,6 +537,29 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 
 	add("RL COACH", 255, 255, 255, 1.25f);
 
+	if (viewerActive && !viewerFrames.empty())
+	{
+		DrawViewerPaths(canvas);
+
+		int i = std::min(static_cast<int>(viewerPlayhead), static_cast<int>(viewerFrames.size()) - 1);
+		const Frame& f = viewerFrames[i];
+		std::string when = viewerRep.savedAt.size() >= 19 ? viewerRep.savedAt.substr(5, 11) : viewerRep.savedAt;
+		add(std::format("VIEWER  {}  {}  {}", when, viewerRep.endReason,
+			viewerRep.rating > 0 ? std::format("rated {}", viewerRep.rating) : std::string("unrated")), 120, 200, 255);
+		add(std::format("{:.2f}s / {:.2f}s   {}   {}x", f.t, viewerFrames.back().t,
+			viewerPlaying ? "PLAYING" : "PAUSED", viewerSpeed));
+		float spd = std::sqrt(f.carVX * f.carVX + f.carVY * f.carVY + f.carVZ * f.carVZ);
+		add(std::format("Speed {:.0f}   Boost {:.0f}   {}{}", spd, f.boostAmount,
+			f.onGround ? "Grounded" : "Airborne", f.touch ? "   TOUCH" : ""));
+		add(std::format("Thr {:+.2f}  Str {:+.2f}  P {:+.2f}  Y {:+.2f}  R {:+.2f}",
+			f.throttle, f.steer, f.pitch, f.yaw, f.roll), 180, 220, 255);
+		add(std::format("Jump {}   Boost {}   Slide {}", f.jump ? "X" : "-", f.boost ? "X" : "-", f.handbrake ? "X" : "-"), 180, 220, 255);
+		add("Orange: ball path   Blue: car path   Green: touches", 160, 160, 160);
+		if (!viewerStatus.empty()) add(viewerStatus, 255, 200, 0);
+	}
+	else
+	{
+
 	if (!*recordingEnabled)
 		add("Recording off  (F2 > Plugins > RLCoach)", 150, 150, 150);
 	else if (state == RepState::Recording && !pendingEndReason.empty())
@@ -558,6 +596,7 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 	}
 
 	if (!statusMessage.empty()) add(statusMessage, 160, 160, 160);
+	}
 
 	// Panel
 	const float x = 30.0f, y = 180.0f, pad = 10.0f, lineH = 18.0f, width = 420.0f;
@@ -611,6 +650,11 @@ void RLCoach::RenderSettings()
 	if (writer) ImGui::TextWrapped("Reps are saved in: %s", writer->Folder().string().c_str());
 
 	ImGui::Separator();
+	if (ImGui::Button("Open rep viewer"))
+		gameWrapper->Execute([this](GameWrapper*) { cvarManager->executeCommand("togglemenu " + GetMenuName()); });
+	ImGui::SameLine();
+	ImGui::TextUnformatted("(or bind rlcoach_viewer to a key)");
+
 	if (ImGui::Button("Test: move car and ball"))
 		gameWrapper->Execute([this](GameWrapper*) { TestSetState(); });
 	ImGui::SameLine();
