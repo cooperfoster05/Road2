@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Release|x64">
@@ -108,6 +108,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="RLCoach.cpp" />
+    <ClCompile Include="RepWriter.cpp" />
     <ClCompile Include="GuiBase.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -129,6 +130,8 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="GuiBase.h" />
     <ClInclude Include="RLCoach.h" />
+    <ClInclude Include="RepData.h" />
+    <ClInclude Include="RepWriter.h" />
     <ClInclude Include="version.h" />
   </ItemGroup>
   <ItemGroup>

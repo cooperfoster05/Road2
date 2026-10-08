@@ -78,6 +78,9 @@
     <ClCompile Include="RLCoach.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
+    <ClCompile Include="RepWriter.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
     <ClCompile Include="GuiBase.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
@@ -132,6 +135,12 @@
       <Filter>PCH</Filter>
     </ClInclude>
     <ClInclude Include="RLCoach.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="RepData.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="RepWriter.h">
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="logging.h">

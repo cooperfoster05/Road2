@@ -2,83 +2,532 @@
 #include "RLCoach.h"
 #include "bakkesmod/wrappers/includes.h"
 
+#include <cmath>
+#include <format>
+
 
 BAKKESMOD_PLUGIN(RLCoach, "RL Coach: chess.com-style review for your training reps", plugin_version, PLUGINTYPE_FREEPLAY | PLUGINTYPE_CUSTOM_TRAINING)
 
 std::shared_ptr<CVarManagerWrapper> _globalCvarManager;
+
+namespace
+{
+	constexpr float kTickRate = 120.0f;
+	constexpr float kTeleportDist = 400.0f;   // a jump this big in one tick means the shot or ball was reset
+	constexpr float kFloorZ = 110.0f;         // ball center height that counts as hitting the floor (ball radius is about 93)
+	constexpr int   kMinTicksBeforeFloor = 30;
+	constexpr int   kTouchDebounceTicks = 12; // contact on back-to-back ticks counts as one touch
+
+	float Dist(const Vector& a, const Vector& b)
+	{
+		float dx = a.X - b.X, dy = a.Y - b.Y, dz = a.Z - b.Z;
+		return std::sqrt(dx * dx + dy * dy + dz * dz);
+	}
+
+	bool InputActive(const ControllerInput& in)
+	{
+		const float dz = 0.1f;
+		return std::fabs(in.Throttle) > dz || std::fabs(in.Steer) > dz || std::fabs(in.Pitch) > dz
+			|| std::fabs(in.Yaw) > dz || std::fabs(in.Roll) > dz
+			|| in.Jump || in.ActivateBoost || in.HoldingBoost || in.Handbrake;
+	}
+
+	const char* RatingName(int r)
+	{
+		switch (r)
+		{
+		case 1: return "Missed";
+		case 2: return "Close";
+		case 3: return "Bad shot, went in";
+		case 4: return "Good shot, went in";
+		case 5: return "Great shot, went in";
+		default: return "";
+		}
+	}
+}
+
+// ============================================================
+// Lifecycle
+// ============================================================
 
 void RLCoach::onLoad()
 {
 	_globalCvarManager = cvarManager;
 
 	hudEnabled = std::make_shared<bool>(true);
-	cvarManager->registerCvar("rlcoach_hud", "1", "Show the RL Coach test readout", true, true, 0, true, 1)
+	recordingEnabled = std::make_shared<bool>(false);
+	maxRepSeconds = std::make_shared<float>(10.0f);
+	useNumpad = std::make_shared<bool>(false);
+
+	cvarManager->registerCvar("rlcoach_hud", "1", "Show the RL Coach panel", true, true, 0, true, 1)
 		.bindTo(hudEnabled);
+
+	// Recording is never saved to config, so it starts OFF every session
+	CVarWrapper rec = cvarManager->registerCvar("rlcoach_recording", "0", "Record reps (data farming)", true, true, 0, true, 1, false);
+	rec.bindTo(recordingEnabled);
+	rec.addOnValueChanged([this](std::string, CVarWrapper cvar) { SetRecording(cvar.getBoolValue()); });
+
+	cvarManager->registerCvar("rlcoach_max_rep_seconds", "10", "Longest a rep runs before it ends as a timeout", true, true, 2, true, 60)
+		.bindTo(maxRepSeconds);
+
+	CVarWrapper numpad = cvarManager->registerCvar("rlcoach_rate_numpad", "0", "Rate reps with numpad 1-5 instead of the number row", true, true, 0, true, 1);
+	numpad.bindTo(useNumpad);
+	numpad.addOnValueChanged([this](std::string, CVarWrapper) { LoadRatingKeys(); });
+
+	cvarManager->registerNotifier("rlcoach_toggle_recording", [this](std::vector<std::string>) {
+		cvarManager->getCvar("rlcoach_recording").setValue(*recordingEnabled ? 0 : 1);
+	}, "Turn rep recording on or off", PERMISSION_ALL);
+
+	cvarManager->registerNotifier("rlcoach_rate", [this](std::vector<std::string> args) {
+		if (args.size() < 2) return;
+		try { RateLastRep(std::stoi(args[1])); } catch (...) {}
+	}, "Rate the last rep 1-5", PERMISSION_ALL);
+
+	cvarManager->registerNotifier("rlcoach_rearm", [this](std::vector<std::string>) {
+		if (*recordingEnabled && state != RepState::Recording)
+		{
+			state = RepState::Armed;
+			statusMessage = "Armed: rep starts on your next input";
+		}
+	}, "Arm the recorder without resetting the ball", PERMISSION_ALL);
+
+	cvarManager->registerNotifier("rlcoach_test_setstate", [this](std::vector<std::string>) {
+		TestSetState();
+	}, "Test: move the car and ball to a fixed spot", PERMISSION_ALL);
+
+	writer = std::make_unique<RepWriter>(std::filesystem::path(gameWrapper->GetDataFolderW()) / "RLCoach");
+
+	// Every physics tick, after the car's input for that tick is set
+	gameWrapper->HookEventWithCallerPost<CarWrapper>("Function TAGame.Car_TA.SetVehicleInput",
+		[this](CarWrapper car, void*, std::string) { OnVehicleInput(car); });
+
+	gameWrapper->HookEventWithCaller<CarWrapper>("Function TAGame.Car_TA.OnHitBall",
+		[this](CarWrapper car, void* params, std::string) { OnBallTouch(car, params); });
+
+	gameWrapper->HookEvent("Function TAGame.Ball_TA.OnHitGoal",
+		[this](std::string) { OnGoal(); });
 
 	gameWrapper->RegisterDrawable([this](CanvasWrapper canvas) { RenderHud(canvas); });
 
-	LOG("RL Coach loaded");
+	LoadRatingKeys();
+	LOG("RL Coach loaded. Reps save to {}", writer->Folder().string());
 }
 
 void RLCoach::onUnload()
 {
 	gameWrapper->UnregisterDrawables();
+	frames.clear();
+	state = RepState::Idle;
 }
+
+// ============================================================
+// Recorder
+// ============================================================
+
+bool RLCoach::IsOfflinePractice()
+{
+	return gameWrapper->IsInFreeplay() || gameWrapper->IsInCustomTraining();
+}
+
+void RLCoach::SetRecording(bool on)
+{
+	frames.clear();
+	havePrev = false;
+	goalPending = false;
+	touchPending = false;
+	if (on)
+	{
+		state = RepState::WaitReset;
+		statusMessage = "Recording on: reset the shot or ball to start";
+	}
+	else
+	{
+		state = RepState::Idle;
+		statusMessage = "Recording off";
+	}
+}
+
+void RLCoach::OnVehicleInput(CarWrapper car)
+{
+	if (car.IsNull()) return;
+	CarWrapper local = gameWrapper->GetLocalCar();
+	if (local.IsNull() || local.memory_address != car.memory_address) return;
+
+	ControllerInput in = car.GetInput();
+	lastInput = in;
+
+	if (!*recordingEnabled || state == RepState::Idle) return;
+
+	if (!IsOfflinePractice())
+	{
+		havePrev = false;
+		if (state == RepState::Recording) { frames.clear(); state = RepState::WaitReset; }
+		return;
+	}
+
+	ServerWrapper server = gameWrapper->GetGameEventAsServer();
+	if (server.IsNull()) return;
+	BallWrapper ball = server.GetBall();
+	if (ball.IsNull()) return;
+
+	Vector carLoc = car.GetLocation();
+	Vector ballLoc = ball.GetLocation();
+	bool hadPrev = havePrev;
+	float prevBallZ = prevBallLoc.Z;
+	bool teleported = hadPrev && (Dist(carLoc, prevCarLoc) > kTeleportDist || Dist(ballLoc, prevBallLoc) > kTeleportDist);
+	prevCarLoc = carLoc;
+	prevBallLoc = ballLoc;
+	havePrev = true;
+
+	switch (state)
+	{
+	case RepState::WaitReset:
+		if (teleported)
+		{
+			state = RepState::Armed;
+			statusMessage = "Armed: rep starts on your first input";
+		}
+		break;
+
+	case RepState::Armed:
+		if (InputActive(in))
+		{
+			frames.clear();
+			frames.reserve(static_cast<size_t>(kTickRate * 12));
+			touchCount = 0;
+			lastTouchTick = -1000;
+			goalPending = false;
+			touchPending = false;
+			repStartTime = std::chrono::steady_clock::now();
+			state = RepState::Recording;
+			frames.push_back(Capture(car, ball, in));
+			statusMessage = "Recording rep";
+		}
+		break;
+
+	case RepState::Recording:
+	{
+		if (teleported)
+		{
+			// Shot or ball was reset mid-rep: save as abandoned, and the new shot is ready to go
+			FinishRep("reset");
+			state = RepState::Armed;
+			break;
+		}
+
+		frames.push_back(Capture(car, ball, in));
+		float elapsed = frames.back().t;
+
+		if (goalPending)
+		{
+			FinishRep("goal");
+			state = RepState::WaitReset;
+		}
+		else if (hadPrev && static_cast<int>(frames.size()) > kMinTicksBeforeFloor && ballLoc.Z < kFloorZ && prevBallZ >= kFloorZ)
+		{
+			FinishRep("floor");
+			state = RepState::WaitReset;
+		}
+		else if (elapsed >= *maxRepSeconds)
+		{
+			FinishRep("timeout");
+			state = RepState::WaitReset;
+		}
+		break;
+	}
+
+	default:
+		break;
+	}
+}
+
+Frame RLCoach::Capture(CarWrapper& car, BallWrapper& ball, const ControllerInput& in)
+{
+	Frame f;
+	f.tick = static_cast<int>(frames.size());
+	f.t = f.tick / kTickRate;
+	f.wallMs = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - repStartTime).count();
+
+	f.throttle = in.Throttle;
+	f.steer = in.Steer;
+	f.pitch = in.Pitch;
+	f.yaw = in.Yaw;
+	f.roll = in.Roll;
+	f.jump = in.Jump != 0;
+	f.boost = in.ActivateBoost != 0 || in.HoldingBoost != 0;
+	f.handbrake = in.Handbrake != 0;
+
+	Vector loc = car.GetLocation();
+	Rotator rot = car.GetRotation();
+	Vector vel = car.GetVelocity();
+	Vector ang = car.GetAngularVelocity();
+	f.carX = loc.X; f.carY = loc.Y; f.carZ = loc.Z;
+	f.carPitch = rot.Pitch; f.carYaw = rot.Yaw; f.carRoll = rot.Roll;
+	f.carVX = vel.X; f.carVY = vel.Y; f.carVZ = vel.Z;
+	f.carAVX = ang.X; f.carAVY = ang.Y; f.carAVZ = ang.Z;
+
+	BoostWrapper boostComp = car.GetBoostComponent();
+	f.boostAmount = boostComp.IsNull() ? 0.0f : boostComp.GetCurrentBoostAmount() * 100.0f;
+	f.onGround = car.IsOnGround();
+	f.onWall = car.IsOnWall();
+	f.hasFlip = car.HasFlip() != 0;
+
+	Vector bLoc = ball.GetLocation();
+	Vector bVel = ball.GetVelocity();
+	Vector bAng = ball.GetAngularVelocity();
+	f.ballX = bLoc.X; f.ballY = bLoc.Y; f.ballZ = bLoc.Z;
+	f.ballVX = bVel.X; f.ballVY = bVel.Y; f.ballVZ = bVel.Z;
+	f.ballAVX = bAng.X; f.ballAVY = bAng.Y; f.ballAVZ = bAng.Z;
+
+	if (touchPending)
+	{
+		f.touch = true;
+		f.touchX = touchLoc.X; f.touchY = touchLoc.Y; f.touchZ = touchLoc.Z;
+		touchPending = false;
+	}
+	return f;
+}
+
+void RLCoach::OnBallTouch(CarWrapper car, void* params)
+{
+	if (state != RepState::Recording || car.IsNull()) return;
+	CarWrapper local = gameWrapper->GetLocalCar();
+	if (local.IsNull() || local.memory_address != car.memory_address) return;
+
+	touchPending = true;
+
+	// Game passes: ball pointer, hit location, hit normal
+	struct HitParams { uintptr_t ball; float hx, hy, hz; float nx, ny, nz; };
+	if (params)
+	{
+		const HitParams* p = reinterpret_cast<const HitParams*>(params);
+		touchLoc = Vector(p->hx, p->hy, p->hz);
+	}
+
+	int tickNow = static_cast<int>(frames.size());
+	if (tickNow - lastTouchTick > kTouchDebounceTicks) touchCount++;
+	lastTouchTick = tickNow;
+}
+
+void RLCoach::OnGoal()
+{
+	if (state == RepState::Recording) goalPending = true;
+}
+
+void RLCoach::FinishRep(const std::string& reason)
+{
+	// A reset right after starting is just noise, don't save it
+	if (reason == "reset" && frames.size() < 24)
+	{
+		frames.clear();
+		return;
+	}
+
+	RepSummary s;
+	s.mode = gameWrapper->IsInCustomTraining() ? "training" : "freeplay";
+	s.map = gameWrapper->GetCurrentMap();
+	s.endReason = reason;
+	s.ticks = static_cast<int>(frames.size());
+	s.durationS = frames.empty() ? 0.0f : frames.back().t;
+	s.touches = touchCount;
+	s.goal = (reason == "goal");
+
+	bool ok = writer && writer->SaveRep(frames, s);
+	frames.clear();
+
+	if (ok)
+	{
+		lastRep = s;
+		haveLastRep = true;
+		lastRating = 0;
+		repsThisSession++;
+		statusMessage = std::format("Rep {} saved ({})", repsThisSession, reason);
+	}
+	else
+	{
+		statusMessage = "Couldn't save the rep file";
+		LOG("RL Coach: failed to save rep to {}", writer ? writer->Folder().string() : "(no folder)");
+	}
+}
+
+// ============================================================
+// Rating
+// ============================================================
+
+void RLCoach::LoadRatingKeys()
+{
+	bool numpadKeys = cvarManager->getCvar("rlcoach_rate_numpad").getBoolValue();
+	const char* row[5] = { "One", "Two", "Three", "Four", "Five" };
+	const char* pad[5] = { "NumPadOne", "NumPadTwo", "NumPadThree", "NumPadFour", "NumPadFive" };
+	for (int i = 0; i < 5; i++)
+	{
+		keyIndex[i] = gameWrapper->GetFNameIndexByString(numpadKeys ? pad[i] : row[i]);
+		keyWasDown[i] = false;
+	}
+}
+
+void RLCoach::UpdateRatingKeys()
+{
+	for (int i = 0; i < 5; i++)
+	{
+		bool down = gameWrapper->IsKeyPressed(keyIndex[i]);
+		if (down && !keyWasDown[i] && *recordingEnabled && haveLastRep && IsOfflinePractice())
+			RateLastRep(i + 1);
+		keyWasDown[i] = down;
+	}
+}
+
+void RLCoach::RateLastRep(int rating)
+{
+	if (!haveLastRep || rating < 1 || rating > 5 || !writer) return;
+	if (writer->SaveRating(lastRep.fileName, rating))
+	{
+		lastRating = rating;
+		statusMessage = std::format("Rated rep {}: {} ({})", repsThisSession, rating, RatingName(rating));
+	}
+	else
+	{
+		statusMessage = "Couldn't save the rating";
+	}
+}
+
+// ============================================================
+// Test tools
+// ============================================================
+
+void RLCoach::TestSetState()
+{
+	ServerWrapper server = gameWrapper->GetGameEventAsServer();
+	if (server.IsNull()) { LOG("RL Coach test: not in an offline game"); return; }
+	CarWrapper car = gameWrapper->GetLocalCar();
+	BallWrapper ball = server.GetBall();
+	if (car.IsNull() || ball.IsNull()) { LOG("RL Coach test: no car or ball"); return; }
+
+	// Car near the blue goal facing the ball, ball floating mid-field drifting toward it
+	car.SetLocation(Vector(0.0f, -2500.0f, 20.0f));
+	car.SetRotation(Rotator(0, 16384, 0));
+	car.SetVelocity(Vector(0.0f, 0.0f, 0.0f));
+	car.SetAngularVelocity(Vector(0.0f, 0.0f, 0.0f), false);
+	BoostWrapper boostComp = car.GetBoostComponent();
+	if (!boostComp.IsNull()) boostComp.SetCurrentBoostAmount(0.33f);
+
+	ball.SetLocation(Vector(0.0f, 0.0f, 900.0f));
+	ball.SetVelocity(Vector(0.0f, -400.0f, 200.0f));
+	ball.SetAngularVelocity(Vector(0.0f, 0.0f, 0.0f), false);
+
+	statusMessage = "Test: car and ball moved (boost set to 33)";
+	LOG("RL Coach test: set state applied");
+}
+
+// ============================================================
+// Drawing
+// ============================================================
 
 void RLCoach::RenderHud(CanvasWrapper canvas)
 {
-	if (!*hudEnabled) return;
+	UpdateRatingKeys();
 
-	// Only run offline in free play or custom training
-	if (!gameWrapper->IsInFreeplay() && !gameWrapper->IsInCustomTraining()) return;
-
+	if (!*hudEnabled || !IsOfflinePractice()) return;
 	CarWrapper car = gameWrapper->GetLocalCar();
 	if (car.IsNull()) return;
 
-	// Speed in Unreal Units per second (supersonic is about 2200)
 	float speed = car.GetVelocity().magnitude();
-	bool supersonic = speed >= 2200.0f;
-
-	// Boost as 0-100
 	int boost = 0;
 	BoostWrapper boostComp = car.GetBoostComponent();
-	if (!boostComp.IsNull())
-		boost = static_cast<int>(boostComp.GetCurrentBoostAmount() * 100.0f + 0.5f);
+	if (!boostComp.IsNull()) boost = static_cast<int>(boostComp.GetCurrentBoostAmount() * 100.0f + 0.5f);
 
-	bool onGround = car.IsOnGround();
+	// Build the lines first so the panel can size itself
+	struct Line { std::string text; unsigned char r, g, b; float scale; };
+	std::vector<Line> lines;
+	auto add = [&](std::string text, unsigned char r = 230, unsigned char g = 230, unsigned char b = 230, float scale = 1.0f) {
+		lines.push_back({ std::move(text), r, g, b, scale });
+	};
 
-	// Ball speed, if there is a ball
-	float ballSpeed = 0.0f;
-	ServerWrapper server = gameWrapper->GetGameEventAsServer();
-	if (!server.IsNull())
+	add("RL COACH", 255, 255, 255, 1.25f);
+
+	if (!*recordingEnabled)
+		add("Recording off  (F2 > Plugins > RLCoach)", 150, 150, 150);
+	else if (state == RepState::Recording)
+		add("REC  recording rep", 255, 70, 70);
+	else if (state == RepState::Armed)
+		add("ARMED  rep starts on first input", 255, 200, 0);
+	else
+		add("WAITING  reset the shot or ball", 200, 200, 200);
+
+	if (*recordingEnabled) add(std::format("Reps saved this session: {}", repsThisSession));
+
+	add(std::format("Speed {:.0f}{}   Boost {}   {}", speed, speed >= 2200.0f ? " (SS)" : "", boost,
+		car.IsOnGround() ? "Grounded" : "Airborne"));
+
+	const ControllerInput& in = lastInput;
+	add(std::format("Thr {:+.2f}  Str {:+.2f}  P {:+.2f}  Y {:+.2f}  R {:+.2f}",
+		in.Throttle, in.Steer, in.Pitch, in.Yaw, in.Roll), 180, 220, 255);
+	add(std::format("Jump {}   Boost {}   Slide {}",
+		in.Jump ? "X" : "-", (in.ActivateBoost || in.HoldingBoost) ? "X" : "-", in.Handbrake ? "X" : "-"), 180, 220, 255);
+
+	if (*recordingEnabled && haveLastRep)
 	{
-		BallWrapper ball = server.GetBall();
-		if (!ball.IsNull())
-			ballSpeed = ball.GetVelocity().magnitude();
+		add(std::format("Last rep: {}  {:.2f}s  {} touch{}", lastRep.endReason, lastRep.durationS,
+			lastRep.touches, lastRep.touches == 1 ? "" : "es"));
+		if (lastRating == 0)
+			add("Rate it: 1 Missed  2 Close  3 Bad-in  4 Good-in  5 Great-in", 255, 200, 0);
+		else
+			add(std::format("Rated {}: {}", lastRating, RatingName(lastRating)), 120, 230, 120);
 	}
 
-	// Draw a small panel in the top-left corner
-	const int x = 40, y = 200, lineH = 22;
-	canvas.SetColor(0, 0, 0, 150);
-	canvas.SetPosition(Vector2{ x - 10, y - 10 });
-	canvas.FillBox(Vector2{ 260, lineH * 5 + 14 });
+	if (!statusMessage.empty()) add(statusMessage, 160, 160, 160);
 
-	canvas.SetColor(255, 255, 255, 255);
-	canvas.SetPosition(Vector2{ x, y });
-	canvas.DrawString("RL COACH  (test readout)", 1.2f, 1.2f);
+	// Panel
+	const float x = 30.0f, y = 180.0f, pad = 10.0f, lineH = 18.0f, width = 420.0f;
+	float height = pad * 2;
+	for (const Line& l : lines) height += lineH * l.scale;
 
-	if (supersonic) canvas.SetColor(255, 200, 0, 255);  // gold when supersonic
-	else canvas.SetColor(255, 255, 255, 255);
-	canvas.SetPosition(Vector2{ x, y + lineH * 1 });
-	canvas.DrawString(std::format("Car speed: {:.0f} uu/s{}", speed, supersonic ? "  SUPERSONIC" : ""), 1.1f, 1.1f);
+	canvas.SetColor(0, 0, 0, 160);
+	canvas.SetPosition(Vector2F{ x, y });
+	canvas.FillBox(Vector2F{ width, height });
 
-	canvas.SetColor(255, 255, 255, 255);
-	canvas.SetPosition(Vector2{ x, y + lineH * 2 });
-	canvas.DrawString(std::format("Boost: {}", boost), 1.1f, 1.1f);
+	float cy = y + pad;
+	for (const Line& l : lines)
+	{
+		canvas.SetColor(l.r, l.g, l.b, 255);
+		canvas.SetPosition(Vector2F{ x + pad, cy });
+		canvas.DrawString(l.text, l.scale, l.scale, true);
+		cy += lineH * l.scale;
+	}
+}
 
-	canvas.SetPosition(Vector2{ x, y + lineH * 3 });
-	canvas.DrawString(std::format("On ground: {}", onGround ? "yes" : "no"), 1.1f, 1.1f);
+// ============================================================
+// Settings tab (F2 > Plugins > RLCoach)
+// ============================================================
 
-	canvas.SetPosition(Vector2{ x, y + lineH * 4 });
-	canvas.DrawString(std::format("Ball speed: {:.0f} uu/s", ballSpeed), 1.1f, 1.1f);
+void RLCoach::RenderSettings()
+{
+	// This runs on the render thread, so cvar changes are handed to the game thread
+	auto setCvar = [this](const std::string& name, float value) {
+		gameWrapper->Execute([this, name, value](GameWrapper*) { cvarManager->getCvar(name).setValue(value); });
+	};
+
+	bool rec = *recordingEnabled;
+	if (ImGui::Checkbox("Record reps (data farming)", &rec)) setCvar("rlcoach_recording", rec ? 1.0f : 0.0f);
+
+	bool hud = *hudEnabled;
+	if (ImGui::Checkbox("Show RL Coach panel", &hud)) setCvar("rlcoach_hud", hud ? 1.0f : 0.0f);
+
+	bool np = *useNumpad;
+	if (ImGui::Checkbox("Rate with numpad 1-5 instead of the number row", &np)) setCvar("rlcoach_rate_numpad", np ? 1.0f : 0.0f);
+
+	float maxS = *maxRepSeconds;
+	if (ImGui::SliderFloat("Max rep length (seconds)", &maxS, 2.0f, 30.0f, "%.0f")) setCvar("rlcoach_max_rep_seconds", maxS);
+
+	ImGui::Separator();
+	ImGui::Text("Reps saved this session: %d", repsThisSession);
+	ImGui::TextWrapped("Rating keys: 1 Missed, 2 Close, 3 Bad shot but went in, 4 Good shot went in, 5 Great shot went in.");
+	ImGui::TextWrapped("Controller: bind rlcoach_toggle_recording to a button in BakkesMod's Bindings tab to toggle recording.");
+	if (writer) ImGui::TextWrapped("Reps are saved in: %s", writer->Folder().string().c_str());
+
+	ImGui::Separator();
+	if (ImGui::Button("Test: move car and ball"))
+		gameWrapper->Execute([this](GameWrapper*) { TestSetState(); });
+	ImGui::SameLine();
+	ImGui::TextUnformatted("(try it in free play AND in a training pack)");
 }
