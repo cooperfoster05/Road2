@@ -16,7 +16,7 @@ namespace
 	constexpr float kWinZLo = kBallR;
 	constexpr float kWinZHi = kGoalH - kBallR;
 	constexpr float kCarMaxSpeed = 2300.0f;
-	constexpr float kGroundShotMaxZ = 260.0f;   // ball center below this at the touch = a ground shot (jump or flip shots included)
+	constexpr float kGroundShotMaxZ = 350.0f;   // ball center below this at the touch = a ground shot (jump, flip and low aerial shots included; raised from 260 on Oct 9 ratings)
 	// Fastest average acceleration seen toward the ball in recorded reps (98th percentile = 1300).
 	constexpr float kReachAccel = 1300.0f;
 	constexpr float kReachOffset = 140.0f;         // ball radius plus about half a car

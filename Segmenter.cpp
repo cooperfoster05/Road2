@@ -135,7 +135,7 @@ RepSegments Segmenter::Split(const std::vector<Frame>& fr, int eventTick)
 std::string ShotEndTracker::Update(const Frame& f, bool hadPrev, float prevBallZ, int framesSoFar, int& eventTick)
 {
 	constexpr float kFloorZ = 110.0f;          // ball center this low = touching the floor
-	constexpr float kGroundShotMaxZ = 260.0f;  // same cutoff ShotGeometry uses to call a touch a ground shot
+	constexpr float kGroundShotMaxZ = 350.0f;  // same cutoff ShotGeometry uses to call a touch a ground shot
 	constexpr int   kAwayTicks = 45;           // 0.375 s not heading toward the goal = the shot is done
 	constexpr float kTowardSpeed = 150.0f;
 
