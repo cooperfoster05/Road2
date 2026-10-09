@@ -21,8 +21,14 @@ namespace
 	};
 	// Aerials: tuned on Coop's 361 rated reps (Oct 9), 82% exact match
 	constexpr Cutoffs kAerial{ 150.0f, 350.0f, 2800.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
-	// Ground shots: first pass, not tuned yet (needs rated ground-shot reps). Ground shots come off slower and lower.
-	constexpr Cutoffs kGround{ 150.0f, 300.0f, 2200.0f, 0.25f, 3.5f, 1.6f, 0.10f, 200.0f, 2800.0f };
+	// Ground shots: only closeMiss is used; goals are graded by height in the net (below)
+	constexpr Cutoffs kGround{ 180.0f, 300.0f, 2200.0f, 0.25f, 3.5f, 1.6f, 0.10f, 200.0f, 2800.0f };
+
+	// Ground shot goals, tuned on Coop's 45 rated ground goals (Oct 9): how high the ball crossed the line is
+	// what separated his 3s, 4s and 5s. Speed and aim barely mattered (almost every goal was fast and on line).
+	constexpr float kGroundGoodZ = 360.0f;     // ball center at the goal line: below = low shot (3)
+	constexpr float kGroundGreatZ = 500.0f;    // at or above = top shelf (5)
+	constexpr float kGroundSlow = 2000.0f;     // slower than this = a 3 whatever the height (not in the data yet)
 	const Cutoffs& For(ShotType t) { return t == ShotType::Ground ? kGround : kAerial; }
 
 	// Ground shots: how well your driving line lined up with the push the ball needed
@@ -192,6 +198,18 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 			: std::format("Missed {} by {:.0f}", shot.missDir, shot.missDist);
 		gradeSeg(resultIdx, close ? Grade::Sloppy : Grade::Costly, why);
 		g.overall = close ? 2 : 1;
+		g.overallWhy = why;
+	}
+	else if (shot.type == ShotType::Ground)
+	{
+		bool slow = shot.shotSpeed < kGroundSlow;
+		bool high = shot.reachesGoalLine && shot.crossZ >= kGroundGoodZ;
+		bool topShelf = shot.reachesGoalLine && shot.crossZ >= kGroundGreatZ;
+		std::string why = std::format("Goal, {}, {}", topShelf ? "top shelf" : high ? "mid height" : "low in the net",
+			std::format("{} ({})", slow ? "slow" : "fast", Units::Speed(shot.shotSpeed)));
+		Grade res = slow ? Grade::Sloppy : topShelf ? Grade::Clean : high ? Grade::Solid : Grade::Sloppy;
+		gradeSeg(resultIdx, res, why);
+		g.overall = slow ? 3 : topShelf ? 5 : high ? 4 : 3;
 		g.overallWhy = why;
 	}
 	else

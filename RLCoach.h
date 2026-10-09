@@ -144,6 +144,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	int   queuedRating = 0;         // rating pressed during a rep, applied when it saves
 	int   recoverRun = 0;           // ticks in a row the car has been back in control after the shot
 	ShotEndTracker endTracker;      // when the shot is over (floor for aerials, stopped heading to goal for ground shots)
+	int   predictedTouch = -1;      // the ground touch we already asked the ball predictor about
 	bool  recovered = false;
 
 	// ---- Saving and rating ----

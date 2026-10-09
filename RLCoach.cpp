@@ -290,6 +290,7 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 			recoverRun = 0;
 			recovered = false;
 			endTracker.Reset();
+			predictedTouch = -1;
 			repStartTime = std::chrono::steady_clock::now();
 			state = RepState::Recording;
 			frames.push_back(Capture(car, ball, in));
@@ -336,6 +337,22 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 		{
 			// Aerials end when the ball hits the floor; ground shots when the ball stops heading for the goal
 			std::string ended = endTracker.Update(frames.back(), hadPrev, prevBallZ, static_cast<int>(frames.size()), eventTick);
+			// Ground shot just left your car: if the simulator says it can't go in, call it a miss now,
+			// so resetting right away still keeps the rep (a goal during the post-roll still counts)
+			int lt = endTracker.LastTouchTick();
+			if (ended.empty() && endTracker.GroundPlay() && lt >= 0 && lt != predictedTouch && tick >= lt + 3 && predictor.Ready())
+			{
+				predictedTouch = lt;
+				const Frame& f = frames.back();
+				std::vector<BallSample> path;
+				if (predictor.Predict(BallSample{ f.ballX, f.ballY, f.ballZ, f.ballVX, f.ballVY, f.ballVZ },
+					f.ballAVX, f.ballAVY, f.ballAVZ, static_cast<int>(kTickRate * 3), path) && !path.empty())
+				{
+					const BallSample& last = path.back();
+					bool goes_in = std::fabs(last.y) > 5215.0f && std::fabs(last.x) < 893.0f && last.z < 643.0f;
+					if (!goes_in) { ended = "miss"; eventTick = tick; }
+				}
+			}
 			if (!ended.empty())
 			{
 				pendingEndReason = ended;

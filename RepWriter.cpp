@@ -118,7 +118,8 @@ bool RepWriter::SaveRep(const std::vector<Frame>& frames, RepSummary& summary)
 	summary.fileName = std::format("rep_{}_{:03}.csv", NowStamp("%Y-%m-%d_%H-%M-%S"), ++counter);
 
 	RepSummary s = summary;
-	bool keepRecording = s.endReason != "reset";
+	// Bailed reps (reset before touching the ball) keep only their summary; if you touched it, keep the recording
+	bool keepRecording = s.endReason != "reset" || s.touches > 0;
 	std::vector<Frame> copy = keepRecording ? frames : std::vector<Frame>{};
 	Enqueue([this, s, copy = std::move(copy), keepRecording]() {
 		if (keepRecording)

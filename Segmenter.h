@@ -50,6 +50,7 @@ public:
 	std::string Update(const Frame& f, bool hadPrev, float prevBallZ, int framesSoFar, int& eventTick);
 
 	bool GroundPlay() const { return touches > 0 && groundTouch; }
+	int  LastTouchTick() const { return touches > 0 ? touchTick : -1; }
 
 private:
 	bool carLeftFloor = false;   // jumped or drove up a wall before any touch
