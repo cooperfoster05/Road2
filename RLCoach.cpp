@@ -33,6 +33,16 @@ namespace
 			|| in.Jump || in.ActivateBoost || in.HoldingBoost || in.Handbrake;
 	}
 
+	// Colors for 1-5 grades, shared by the panel and the rep list
+	void OverallRgb(int o, unsigned char& r, unsigned char& g, unsigned char& b)
+	{
+		if (o >= 4) { r = 115; g = 230; b = 115; }
+		else if (o == 3) { r = 255; g = 204; b = 77; }
+		else if (o == 2) { r = 255; g = 160; b = 80; }
+		else if (o == 1) { r = 255; g = 115; b = 102; }
+		else { r = 160; g = 160; b = 160; }
+	}
+
 	const char* RatingName(int r)
 	{
 		switch (r)
@@ -152,6 +162,7 @@ void RLCoach::onUnload()
 {
 	ViewerExit();
 	if (shotBookThread.joinable()) shotBookThread.join();
+	if (gradeThread.joinable()) gradeThread.join();
 	gameWrapper->UnregisterDrawables();
 	frames.clear();
 	state = RepState::Idle;
@@ -429,7 +440,7 @@ void RLCoach::GradeFinishedRep(const RepSummary& s)
 	if (!writer || frames.size() < 10) return;
 	if (s.endReason == "reset")
 	{
-		lastRepGradeLines.push_back({ "Reset before the shot finished: not graded", 160, 160, 160 });
+		lastRepGradeLines.push_back({ { { "Reset before the shot finished: not graded", 160, 160, 160 } } });
 		return;
 	}
 
@@ -452,39 +463,42 @@ void RLCoach::GradeFinishedRep(const RepSummary& s)
 	auto gradeRgb = [](Grade gr, unsigned char& r, unsigned char& gg, unsigned char& b) {
 		switch (gr)
 		{
-		case Grade::Clean: case Grade::Calculated: r = 120; gg = 230; b = 120; break;
-		case Grade::Solid: r = 150; gg = 200; b = 255; break;
-		case Grade::Sloppy: r = 255; gg = 200; b = 70; break;
-		default: r = 255; gg = 110; b = 100; break;
+		case Grade::Clean: case Grade::Calculated: r = 115; gg = 230; b = 115; break;
+		case Grade::Solid: r = 153; gg = 204; b = 255; break;
+		case Grade::Sloppy: r = 255; gg = 204; b = 77; break;
+		default: r = 255; gg = 115; b = 102; break;
 		}
 	};
 
-	unsigned char orr = g.overall >= 4 ? 120 : (g.overall == 3 ? 255 : 255);
-	unsigned char og = g.overall >= 4 ? 230 : (g.overall == 3 ? 200 : 110);
-	unsigned char ob = g.overall >= 4 ? 120 : (g.overall == 3 ? 70 : 100);
-	lastRepGradeLines.push_back({ std::format("GRADE {}: {}  ({})", g.overall, Grader::OverallName(g.overall), g.overallWhy), orr, og, ob });
+	unsigned char orr, og, ob;
+	OverallRgb(g.overall, orr, og, ob);
+	lastRepGradeLines.push_back({ { { std::format("GRADE {}: {}  ({})", g.overall, Grader::OverallName(g.overall), g.overallWhy), orr, og, ob } } });
 
-	// One compact line of segment grades
-	std::string chips;
+	// One line of segment grades, each grade in its own color (same colors as the rep viewer)
+	PanelGradeLine chips;
 	for (const SegmentGrade& sgd : g.segs)
 	{
 		if (sgd.grade == Grade::None) continue;
-		if (!chips.empty()) chips += "   ";
-		chips += std::format("{} {}", Segmenter::Name(segs.segs[sgd.segIndex].kind), Grader::Name(sgd.grade));
+		unsigned char r, gg, b;
+		gradeRgb(sgd.grade, r, gg, b);
+		chips.chunks.push_back({ std::format("{}{} ", chips.chunks.empty() ? "" : "   ", Segmenter::Name(segs.segs[sgd.segIndex].kind)), 190, 190, 190 });
+		chips.chunks.push_back({ Grader::Name(sgd.grade), r, gg, b });
 	}
-	if (!chips.empty()) lastRepGradeLines.push_back({ chips, 200, 200, 200 });
+	if (!chips.chunks.empty()) lastRepGradeLines.push_back(chips);
 
 	if (g.biggestFix >= 0)
 	{
 		const SegmentGrade& fix = g.segs[g.biggestFix];
 		unsigned char r, gg, b;
 		gradeRgb(fix.grade, r, gg, b);
-		lastRepGradeLines.push_back({ std::format("Fix: {} - {}", Segmenter::Name(segs.segs[fix.segIndex].kind), fix.why), r, gg, b });
+		lastRepGradeLines.push_back({ { { std::format("Fix: {} - {}", Segmenter::Name(segs.segs[fix.segIndex].kind), fix.why), r, gg, b } } });
 	}
 	else if (g.overall >= 4)
 	{
-		lastRepGradeLines.push_back({ "Nothing to fix on this one", 120, 230, 120 });
+		lastRepGradeLines.push_back({ { { "Nothing to fix on this one", 115, 230, 115 } } });
 	}
+
+	gradeBook.TrySet(s.fileName, g.overall, s.shotKey, ref.bestFile);
 }
 
 void RLCoach::FinishRep(const std::string& reason)
@@ -645,10 +659,10 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 	if (!boostComp.IsNull()) boost = static_cast<int>(boostComp.GetCurrentBoostAmount() * 100.0f + 0.5f);
 
 	// Build the lines first so the panel can size itself
-	struct Line { std::string text; unsigned char r, g, b; float scale; };
+	struct Line { std::vector<PanelChunk> chunks; float scale; };
 	std::vector<Line> lines;
 	auto add = [&](std::string text, unsigned char r = 230, unsigned char g = 230, unsigned char b = 230, float scale = 1.0f) {
-		lines.push_back({ std::move(text), r, g, b, scale });
+		lines.push_back({ { { std::move(text), r, g, b } }, scale });
 	};
 
 	add("RL COACH", 255, 255, 255, 1.25f);
@@ -743,7 +757,7 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 	{
 		add(std::format("Last rep: {}  {:.2f}s  {} touch{}", lastRep.endReason, lastRep.durationS,
 			lastRep.touches, lastRep.touches == 1 ? "" : "es"));
-		for (const PanelGradeLine& gl : lastRepGradeLines) add(gl.text, gl.r, gl.g, gl.b);
+		for (const PanelGradeLine& gl : lastRepGradeLines) lines.push_back({ gl.chunks, 1.0f });
 		if (lastRating == 0)
 			add("Rate it: 1 Missed  2 Close  3 Bad-in  4 Good-in  5 Great-in", 255, 200, 0);
 		else
@@ -760,7 +774,9 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 	for (const Line& l : lines)
 	{
 		height += lineH * l.scale;
-		width = std::max(width, canvas.GetStringSize(l.text, l.scale, l.scale).X + pad * 2);
+		float w = 0.0f;
+		for (const PanelChunk& c : l.chunks) w += canvas.GetStringSize(c.text, l.scale, l.scale).X;
+		width = std::max(width, w + pad * 2);
 	}
 
 	canvas.SetColor(0, 0, 0, 160);
@@ -770,9 +786,14 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 	float cy = y + pad;
 	for (const Line& l : lines)
 	{
-		canvas.SetColor(l.r, l.g, l.b, 255);
-		canvas.SetPosition(Vector2F{ x + pad, cy });
-		canvas.DrawString(l.text, l.scale, l.scale, true);
+		float cx = x + pad;
+		for (const PanelChunk& c : l.chunks)
+		{
+			canvas.SetColor(c.r, c.g, c.b, 255);
+			canvas.SetPosition(Vector2F{ cx, cy });
+			canvas.DrawString(c.text, l.scale, l.scale, true);
+			cx += canvas.GetStringSize(c.text, l.scale, l.scale).X;
+		}
 		cy += lineH * l.scale;
 	}
 }

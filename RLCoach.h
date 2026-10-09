@@ -13,8 +13,10 @@
 #include "Segmenter.h"
 #include "ShotBook.h"
 #include "Grader.h"
+#include "GradeBook.h"
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 
 #include <atomic>
 #include <chrono>
@@ -51,6 +53,13 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	ShotBook shotBook;
 	std::thread shotBookThread;
 
+	// Auto grades for the rep list, filled in on a worker thread
+	GradeBook gradeBook;
+	std::thread gradeThread;
+	std::atomic<bool> gradeThreadBusy{ false };
+	std::unordered_map<std::string, int> uiAutoGrades;   // render thread copy
+	void StartGradeRefresh();
+
 	// Copy of the segments for the viewer window (render thread)
 	std::mutex uiSegMutex;
 	std::vector<Segment> uiSegs;
@@ -86,7 +95,9 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	int   repsThisSession = 0;
 	RepSummary lastRep;
 	// Grade of the last saved rep, shown on the panel in the pack
-	struct PanelGradeLine { std::string text; unsigned char r, g, b; };
+	// A panel line can mix colors (e.g. "Takeoff " gray + "Sloppy" yellow)
+	struct PanelChunk { std::string text; unsigned char r, g, b; };
+	struct PanelGradeLine { std::vector<PanelChunk> chunks; };
 	std::vector<PanelGradeLine> lastRepGradeLines;
 	void GradeFinishedRep(const RepSummary& s);
 	bool  haveLastRep = false;

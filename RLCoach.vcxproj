@@ -114,6 +114,7 @@
     <ClCompile Include="Segmenter.cpp" />
     <ClCompile Include="ShotBook.cpp" />
     <ClCompile Include="Grader.cpp" />
+    <ClCompile Include="GradeBook.cpp" />
     <ClCompile Include="RLCoachViewer.cpp" />
     <ClCompile Include="BallPredictor.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -155,6 +156,7 @@
     <ClInclude Include="Segmenter.h" />
     <ClInclude Include="ShotBook.h" />
     <ClInclude Include="Grader.h" />
+    <ClInclude Include="GradeBook.h" />
     <ClInclude Include="BallPredictor.h" />
     <ClInclude Include="version.h" />
   </ItemGroup>

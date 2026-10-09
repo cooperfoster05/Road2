@@ -83,7 +83,9 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 
 	// Grades: timing compares against your fastest goal on the same shot
 	shotBook.Update(writer->Folder());
-	viewerGrade = Grader::GradeRep(viewerFrames, viewerSegs, viewerShot, item.goal, item.floorBeforeGoal, shotBook.Get(item.shotKey));
+	ShotReference viewerRef = shotBook.Get(item.shotKey);
+	viewerGrade = Grader::GradeRep(viewerFrames, viewerSegs, viewerShot, item.goal, item.floorBeforeGoal, viewerRef);
+	gradeBook.TrySet(item.file, item.endReason == "reset" ? 0 : viewerGrade.overall, item.shotKey, viewerRef.bestFile);
 	{
 		std::lock_guard<std::mutex> lock(uiSegMutex);
 		uiSegs = viewerSegs.segs;
@@ -386,6 +388,21 @@ void RLCoach::RefreshRepList()
 	repList = writer ? RepLibrary::ListReps(writer->Folder()) : std::vector<RepListItem>{};
 	repListLoaded = true;
 	if (selectedRep >= static_cast<int>(repList.size())) selectedRep = -1;
+	StartGradeRefresh();
+}
+
+// Grades every rep in the background (only new ones, or ones whose benchmark changed)
+void RLCoach::StartGradeRefresh()
+{
+	if (!writer || gradeThreadBusy) return;
+	if (gradeThread.joinable()) gradeThread.join();
+	gradeThreadBusy = true;
+	auto root = writer->Folder();
+	gradeThread = std::thread([this, root]() {
+		shotBook.Update(root);
+		gradeBook.Refresh(root, shotBook);
+		gradeThreadBusy = false;
+	});
 }
 
 void RLCoach::RenderWindow()
@@ -401,15 +418,30 @@ void RLCoach::RenderWindow()
 	ImGui::SameLine();
 	ImGui::Text("%d reps saved (newest first). Double-click to watch.", static_cast<int>(repList.size()));
 
-	ImGui::BeginChild("replist", ImVec2(0, 230), true);
+	gradeBook.TryCopy(uiAutoGrades);   // keeps the last copy if a refresh is busy
+	if (gradeThreadBusy) { ImGui::SameLine(); ImGui::TextDisabled("(grading...)"); }
+
+	auto overallColor = [](int o) -> ImVec4 {
+		if (o >= 4) return ImVec4(0.45f, 0.9f, 0.45f, 1.0f);
+		if (o == 3) return ImVec4(1.0f, 0.8f, 0.3f, 1.0f);
+		if (o == 2) return ImVec4(1.0f, 0.63f, 0.31f, 1.0f);
+		if (o == 1) return ImVec4(1.0f, 0.45f, 0.4f, 1.0f);
+		return ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+	};
+
+	ImGui::BeginChild("replist", ImVec2(0, 260), true);
+	ImGui::Columns(6, "repcols", false);
+	ImGui::SetColumnWidth(0, 110); ImGui::SetColumnWidth(1, 70); ImGui::SetColumnWidth(2, 60);
+	ImGui::SetColumnWidth(3, 60); ImGui::SetColumnWidth(4, 70);
+	const char* heads[6] = { "When", "Ended", "Length", "Touches", "Your grade", "Auto grade" };
+	for (const char* h : heads) { ImGui::TextDisabled("%s", h); ImGui::NextColumn(); }
+	ImGui::Separator();
 	for (int i = 0; i < static_cast<int>(repList.size()); i++)
 	{
 		const RepListItem& it = repList[i];
 		std::string when = it.savedAt.size() >= 19 ? it.savedAt.substr(5, 11) : it.savedAt;
-		std::string label = std::format("{}   {:<8} {:>4.1f}s   {} touch   {}##{}",
-			when, it.endReason, it.duration, it.touches,
-			it.rating > 0 ? std::format("rated {}", it.rating) : std::string("unrated"), i);
-		if (ImGui::Selectable(label.c_str(), selectedRep == i, ImGuiSelectableFlags_AllowDoubleClick))
+		std::string label = std::format("{}##row{}", when, i);
+		if (ImGui::Selectable(label.c_str(), selectedRep == i, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
 		{
 			selectedRep = i;
 			if (ImGui::IsMouseDoubleClicked(0))
@@ -418,7 +450,20 @@ void RLCoach::RenderWindow()
 				onGame([this, pick]() { ViewerLoad(pick); });
 			}
 		}
+		ImGui::NextColumn();
+		ImGui::TextUnformatted(it.endReason.c_str()); ImGui::NextColumn();
+		ImGui::Text("%.1fs", it.duration); ImGui::NextColumn();
+		ImGui::Text("%d", it.touches); ImGui::NextColumn();
+		if (it.rating > 0) ImGui::TextColored(overallColor(it.rating), "%d", it.rating);
+		else ImGui::TextDisabled("-");
+		ImGui::NextColumn();
+		auto ag = uiAutoGrades.find(it.file);
+		if (ag == uiAutoGrades.end()) ImGui::TextDisabled("...");
+		else if (ag->second <= 0) ImGui::TextDisabled("n/a");
+		else ImGui::TextColored(overallColor(ag->second), "%d", ag->second);
+		ImGui::NextColumn();
 	}
+	ImGui::Columns(1);
 	ImGui::EndChild();
 
 	if (selectedRep >= 0 && ImGui::Button("Watch selected"))
