@@ -36,3 +36,28 @@ namespace Segmenter
 	// Back in control: wheels down (ground or wall) and nose roughly along the direction of travel
 	bool InControl(const Frame& f);
 }
+
+// Decides when a shot is over (goals come from the game, so they're handled by the caller).
+// Aerial play ends when the ball hits the floor. Ground play doesn't: a rolling or bouncing ball is normal there,
+// so it ends once the ball stops heading toward the goal (missed wide, stalled, or came back off the wall).
+class ShotEndTracker
+{
+public:
+	void Reset() { *this = ShotEndTracker(); }
+
+	// Feed every recorded frame in order. Returns "" while the shot is live, otherwise "floor" or "miss",
+	// with eventTick set to when it really ended.
+	std::string Update(const Frame& f, bool hadPrev, float prevBallZ, int framesSoFar, int& eventTick);
+
+	bool GroundPlay() const { return touches > 0 && groundTouch; }
+
+private:
+	bool carLeftFloor = false;   // jumped or drove up a wall before any touch
+	bool groundTouch = false;    // the latest touch was a ground shot
+	int  touches = 0;
+	int  touchTick = -1;
+	int  lastTouchFrame = -1000;
+	int  goalSign = 0;           // which goal the ground shot was hit toward (+1 / -1), 0 = not known yet
+	int  awayRun = 0;            // ticks in a row the ball hasn't been heading toward that goal
+};
+

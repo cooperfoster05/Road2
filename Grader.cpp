@@ -113,7 +113,8 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 	}
 
 	const int shotTouch = static_cast<int>(segs.touchTicks.size());  // segments are numbered by touch, 1-based
-	bool bounced = bouncedIn || (wentIn && shot.dipsToFloor);
+	// Bouncing in is a flaw for aerials; for ground shots the ball being on the floor is normal
+	bool bounced = shot.type == ShotType::Aerial && (bouncedIn || (wentIn && shot.dipsToFloor));
 	float myTouchSec = (shot.touchTick - shot.startTick) / 120.0f;
 	float vsBest = ref.valid ? myTouchSec - ref.touchSec : 0.0f;
 

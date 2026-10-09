@@ -131,3 +131,52 @@ RepSegments Segmenter::Split(const std::vector<Frame>& fr, int eventTick)
 	add(SegKind::Recovery, after, r.recoveredTick >= 0 ? r.recoveredTick : last);
 	return r;
 }
+
+std::string ShotEndTracker::Update(const Frame& f, bool hadPrev, float prevBallZ, int framesSoFar, int& eventTick)
+{
+	constexpr float kFloorZ = 110.0f;          // ball center this low = touching the floor
+	constexpr float kGroundShotMaxZ = 260.0f;  // same cutoff ShotGeometry uses to call a touch a ground shot
+	constexpr int   kAwayTicks = 45;           // 0.375 s not heading toward the goal = the shot is done
+	constexpr float kTowardSpeed = 150.0f;
+
+	bool carOnFloor = f.onGround && f.carZ < 100.0f;
+	if (f.carZ > 120.0f) carLeftFloor = true;
+
+	if (f.touch)
+	{
+		if (f.tick - lastTouchFrame > 12)
+		{
+			touches++;
+			groundTouch = carOnFloor || f.ballZ < kGroundShotMaxZ;
+			touchTick = f.tick;
+			goalSign = 0;
+			awayRun = 0;
+		}
+		lastTouchFrame = f.tick;
+	}
+
+	// A few ticks after a ground touch, the ball's direction says which goal it was hit at
+	if (groundTouch && touches > 0 && goalSign == 0 && f.tick >= touchTick + 4)
+		goalSign = std::fabs(f.ballVY) > 200.0f ? (f.ballVY > 0 ? 1 : -1) : (f.ballY >= 0 ? 1 : -1);
+
+	// Before any touch: only a whiff in the air ends it (ball lands while you're up in the air going for it).
+	// A bouncing ball with you still on or near the floor is normal in ground packs.
+	bool aerialPlay = touches > 0 ? !groundTouch : (carLeftFloor && f.carZ > 250.0f);
+	bool floorHit = hadPrev && framesSoFar > 30 && f.ballZ < kFloorZ && prevBallZ >= kFloorZ;
+	if (aerialPlay && floorHit)
+	{
+		eventTick = f.tick;
+		return "floor";
+	}
+
+	if (touches > 0 && groundTouch && goalSign != 0)
+	{
+		awayRun = f.ballVY * goalSign < kTowardSpeed ? awayRun + 1 : 0;
+		if (awayRun >= kAwayTicks)
+		{
+			eventTick = f.tick - kAwayTicks + 1;
+			return "miss";
+		}
+	}
+	return "";
+}

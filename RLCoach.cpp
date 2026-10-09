@@ -17,8 +17,6 @@ namespace
 {
 	constexpr float kTickRate = 120.0f;
 	constexpr float kTeleportDist = 400.0f;   // a jump this big in one tick means the shot or ball was reset
-	constexpr float kFloorZ = 110.0f;         // ball center height that counts as hitting the floor (ball radius is about 93)
-	constexpr int   kMinTicksBeforeFloor = 30;
 	constexpr int   kTouchDebounceTicks = 12; // contact on back-to-back ticks counts as one touch
 
 	float Dist(const Vector& a, const Vector& b)
@@ -291,6 +289,7 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 			queuedRating = 0;
 			recoverRun = 0;
 			recovered = false;
+			endTracker.Reset();
 			repStartTime = std::chrono::steady_clock::now();
 			state = RepState::Recording;
 			frames.push_back(Capture(car, ball, in));
@@ -335,10 +334,11 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 		}
 		else if (pendingEndReason.empty())
 		{
-			if (hadPrev && static_cast<int>(frames.size()) > kMinTicksBeforeFloor && ballLoc.Z < kFloorZ && prevBallZ >= kFloorZ)
+			// Aerials end when the ball hits the floor; ground shots when the ball stops heading for the goal
+			std::string ended = endTracker.Update(frames.back(), hadPrev, prevBallZ, static_cast<int>(frames.size()), eventTick);
+			if (!ended.empty())
 			{
-				pendingEndReason = "floor";
-				eventTick = tick;
+				pendingEndReason = ended;
 			}
 			else if (elapsed >= *maxRepSeconds)
 			{
@@ -347,6 +347,11 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 				state = RepState::WaitReset;
 				break;
 			}
+		}
+		else
+		{
+			int unused = 0;
+			endTracker.Update(frames.back(), hadPrev, prevBallZ, static_cast<int>(frames.size()), unused);
 		}
 
 		// After the shot ends, keep recording so late goals and your recovery are captured:

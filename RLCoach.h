@@ -143,6 +143,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	int   armedTicks = 0;
 	int   queuedRating = 0;         // rating pressed during a rep, applied when it saves
 	int   recoverRun = 0;           // ticks in a row the car has been back in control after the shot
+	ShotEndTracker endTracker;      // when the shot is over (floor for aerials, stopped heading to goal for ground shots)
 	bool  recovered = false;
 
 	// ---- Saving and rating ----
@@ -254,6 +255,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	bool  practiceTouchPending = false;
 	Vector practiceTouchLoc;
 	int   practiceRecoverRun = 0;
+	ShotEndTracker practiceEndTracker;
 	bool  practiceHavePrev = false;
 	Vector practicePrevCar, practicePrevBall;
 	float practiceSavedGameSpeed = 1.0f;

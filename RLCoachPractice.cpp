@@ -17,7 +17,6 @@ namespace
 {
 	constexpr int   kLeadInTicks = 30;       // start 0.25 s before the segment so you can make the decision
 	constexpr float kTeleportDist = 400.0f;
-	constexpr float kFloorZ = 110.0f;
 	constexpr int   kPostTicks = 120;        // keep going 1 s after a goal / floor hit (catches late goals)
 	constexpr int   kRecoveryMaxTicks = 480; // when practicing recovery, wait up to 4 s to land
 
@@ -265,6 +264,13 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 		practiceFloorFirst = false;
 		practiceTouchPending = false;
 		practiceRecoverRun = 0;
+		// Catch the end tracker up on the original rep before this moment (touches, jumps)
+		practiceEndTracker.Reset();
+		for (int i = 0; i < practiceStartTick && i < static_cast<int>(practiceRep.size()); i++)
+		{
+			int ignored = 0;
+			practiceEndTracker.Update(practiceRep[i], i > 0, i > 0 ? practiceRep[i - 1].ballZ : practiceRep[i].ballZ, i + 1, ignored);
+		}
 		practiceHavePrev = false;
 		practiceState = PracticeState::Live;
 		repStartTime = std::chrono::steady_clock::now();
@@ -323,11 +329,8 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 	}
 	else if (practicePending.empty())
 	{
-		if (hadPrev && liveTicks > 30 && ballLoc.Z < kFloorZ && prevBallZ >= kFloorZ)
-		{
-			practicePending = "floor";
-			practiceEventTick = tick;
-		}
+		std::string ended = practiceEndTracker.Update(f, hadPrev, prevBallZ, liveTicks, practiceEventTick);
+		if (!ended.empty()) practicePending = ended;
 		int maxTicks = static_cast<int>(practiceRep.size()) - practiceStartTick + 240;
 		if (liveTicks >= maxTicks) { practiceEventTick = tick; PracticeFinishAttempt("timeout"); return; }
 	}
