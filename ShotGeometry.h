@@ -16,7 +16,7 @@ struct ShotAnalysis
 {
 	bool  valid = false;          // false if the rep has no touch to analyze
 	int   startTick = 0;          // ball starts moving
-	int   touchTick = -1;         // first frame that reports the touch
+	int   touchTick = -1;         // frame that reports the shot touch (the last touch of the rep)
 	float goalSign = 1;           // +1 = shooting at the +Y goal
 
 	// Where the shot was headed
@@ -39,6 +39,11 @@ struct ShotAnalysis
 	// Timing
 	int   earliestTick = -1;      // earliest tick a fast, direct aerial could have reached the ball
 	float lateBy = 0;             // seconds between that and your touch
+
+	// Shot quality
+	float shotSpeed = 0;          // ball speed off your car
+	bool  dipsToFloor = false;    // on its current path the ball hits the floor before the goal line
+	float cornerDist = 0;         // distance from the nearest top corner of the goal (ball-center units)
 };
 
 namespace ShotGeometry

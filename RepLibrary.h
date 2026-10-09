@@ -17,6 +17,7 @@ struct RepListItem
 	bool  goal = false;
 	int   rating = 0;   // 0 = not rated
 	int   eventTick = -1; // tick where the shot ended (goal, floor, timeout); -1 if unknown
+	bool  floorBeforeGoal = false;
 };
 
 namespace RepLibrary

@@ -134,6 +134,12 @@ void RLCoach::onLoad()
 	LoadRatingKeys();
 	predictor.mirrorX = cvarManager->getCvar("rlcoach_pred_mirror").getBoolValue();
 	StartPredictor();
+
+	// Build the shot book in the background so the first rep you open doesn't stall
+	{
+		auto root = writer->Folder();
+		shotBookThread = std::thread([this, root]() { shotBook.Update(root); });
+	}
 	LOG("RL Coach loaded. Reps save to {}", writer->Folder().string());
 }
 
@@ -145,6 +151,7 @@ void RLCoach::StartPredictor()
 void RLCoach::onUnload()
 {
 	ViewerExit();
+	if (shotBookThread.joinable()) shotBookThread.join();
 	gameWrapper->UnregisterDrawables();
 	frames.clear();
 	state = RepState::Idle;
@@ -598,10 +605,22 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 		add(std::format("Thr {:+.2f}  Str {:+.2f}  P {:+.2f}  Y {:+.2f}  R {:+.2f}",
 			f.throttle, f.steer, f.pitch, f.yaw, f.roll), 180, 220, 255);
 		add(std::format("Jump {}   Boost {}   Slide {}", f.jump ? "X" : "-", f.boost ? "X" : "-", f.handbrake ? "X" : "-"), 180, 220, 255);
-		for (const Segment& sg : viewerSegs.segs)
+		if (viewerGrade.overall > 0)
+			add(std::format("GRADE {}: {}  ({})", viewerGrade.overall, Grader::OverallName(viewerGrade.overall), viewerGrade.overallWhy),
+				viewerGrade.overall >= 4 ? 120 : 255, viewerGrade.overall >= 4 ? 230 : (viewerGrade.overall == 3 ? 200 : 120), 120);
+		if (viewerGrade.biggestFix >= 0)
 		{
+			const SegmentGrade& fix = viewerGrade.segs[viewerGrade.biggestFix];
+			add(std::format("Biggest fix: {} ({}): {}", Segmenter::Name(viewerSegs.segs[fix.segIndex].kind), Grader::Name(fix.grade), fix.why), 255, 200, 0);
+		}
+		for (int si = 0; si < static_cast<int>(viewerSegs.segs.size()); si++)
+		{
+			const Segment& sg = viewerSegs.segs[si];
 			if (i < sg.start || i > sg.end || sg.kind == SegKind::Recovery) continue;
-			add(std::format("Segment: {}{}", Segmenter::Name(sg.kind), sg.touch > 1 ? std::format(" (touch {})", sg.touch) : std::string()), 255, 255, 255);
+			std::string gradeText;
+			for (const SegmentGrade& gs : viewerGrade.segs)
+				if (gs.segIndex == si && gs.grade != Grade::None) gradeText = std::format(": {} - {}", Grader::Name(gs.grade), gs.why);
+			add(std::format("Now: {}{}{}", Segmenter::Name(sg.kind), sg.touch > 1 ? std::format(" (touch {})", sg.touch) : std::string(), gradeText), 255, 255, 255);
 		}
 		if (viewerSegs.whiff) add("Whiff: no touch on this rep", 255, 120, 120);
 

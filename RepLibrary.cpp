@@ -114,7 +114,7 @@ std::vector<RepListItem> RepLibrary::ListReps(const std::filesystem::path& root)
 		return -1;
 	};
 	int cFile = col("file"), cSaved = col("saved_at"), cReason = col("end_reason"), cDur = col("duration_s"),
-		cTouch = col("touches"), cGoal = col("goal"), cShot = col("shot_key"), cEvent = col("event_tick");
+		cTouch = col("touches"), cGoal = col("goal"), cShot = col("shot_key"), cEvent = col("event_tick"), cBounce = col("floor_before_goal");
 
 	while (std::getline(in, line))
 	{
@@ -131,6 +131,7 @@ std::vector<RepListItem> RepLibrary::ListReps(const std::filesystem::path& root)
 		it.shotKey = get(cShot);
 		std::string ev = get(cEvent);
 		it.eventTick = ev.empty() ? -1 : std::atoi(ev.c_str());
+		it.floorBeforeGoal = get(cBounce) == "1";
 		auto r = ratings.find(it.file);
 		it.rating = r == ratings.end() ? 0 : r->second;
 		items.push_back(it);

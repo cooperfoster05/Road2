@@ -90,6 +90,12 @@
     <ClCompile Include="Segmenter.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
+    <ClCompile Include="ShotBook.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
+    <ClCompile Include="Grader.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
     <ClCompile Include="RLCoachViewer.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
@@ -165,6 +171,12 @@
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="Segmenter.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="ShotBook.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="Grader.h">
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="BallPredictor.h">

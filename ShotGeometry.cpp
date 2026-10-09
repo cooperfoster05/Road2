@@ -122,9 +122,10 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 	{
 		if (std::fabs(fr[i].ballVX) + std::fabs(fr[i].ballVY) + std::fabs(fr[i].ballVZ) > 1.0f) { s.startTick = i; break; }
 	}
+	// Grade the last touch: on multi-touch plays the earlier touches are setup
 	for (int i = 2; i < n; i++)
 	{
-		if (fr[i].touch) { s.touchTick = i; break; }
+		if (fr[i].touch && !fr[i - 1].touch && i + 2 < n) s.touchTick = i;
 	}
 	const int k = s.touchTick;
 	if (k < 2 || k + 2 >= n) return s;
@@ -137,6 +138,7 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 	s.ballCenter = Add(BallPos(pre), Mul(vin, 0.5f / 120.0f));
 	s.actualContact = Make(fr[k].touchX, fr[k].touchY, fr[k].touchZ);
 	s.shotDir = Unit(vout);
+	s.shotSpeed = Len(vout);
 	s.goalSign = (s.ballCenter.y > 0 || vout.y > 0) ? 1.0f : -1.0f;
 
 	// Where the shot was going
@@ -147,6 +149,9 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 		s.crossX = cx;
 		s.crossZ = cz;
 		s.missDist = MissDistance(cx, cz);
+		s.cornerDist = std::sqrt((std::fabs(cx) - kWinX) * (std::fabs(cx) - kWinX) + (cz - kWinZHi) * (cz - kWinZHi));
+		float tLine = (kGoalY - s.ballCenter.y * s.goalSign) / (vout.y * s.goalSign);
+		s.dipsToFloor = s.ballCenter.z + vout.z * tLine - 0.5f * kGravity * tLine * tLine < kBallR;
 		if (s.missDist > 0)
 		{
 			// Facing the goal at +Y, +X is to your left (it flips for the -Y goal)

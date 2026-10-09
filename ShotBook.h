@@ -1,0 +1,33 @@
+#pragma once
+// Remembers, for every shot (grouped by shot ID), your fastest goal: when you touched it and when you jumped.
+// Grades compare a rep's timing to that. Cached in shot_cache.csv so only new reps get scanned.
+// Plain C++, no BakkesMod code.
+
+#include <filesystem>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
+struct ShotReference
+{
+	bool  valid = false;
+	std::string bestFile;
+	float touchSec = 0;   // seconds from the ball starting to move to your shot touch
+	float jumpSec = -1;   // seconds to the jump that led into that touch (-1 if none)
+	int   attempts = 0;
+	int   goals = 0;
+};
+
+class ShotBook
+{
+public:
+	// Scans any reps not in the cache yet. Safe to call from any thread.
+	void Update(const std::filesystem::path& rlcoachFolder);
+	ShotReference Get(const std::string& shotKey);
+
+private:
+	struct Entry { std::string shot; bool goal = false; float touchSec = -1; float jumpSec = -1; };
+	std::mutex mtx;
+	std::unordered_map<std::string, Entry> entries;   // by rep file
+	bool loadedCache = false;
+};

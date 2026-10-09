@@ -11,7 +11,10 @@
 #include "BallPredictor.h"
 #include "ShotGeometry.h"
 #include "Segmenter.h"
+#include "ShotBook.h"
+#include "Grader.h"
 #include <mutex>
+#include <thread>
 
 #include <atomic>
 #include <chrono>
@@ -42,11 +45,19 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::vector<BallSample> viewerPred;    // predicted path for the rep being watched
 	ShotAnalysis viewerShot;               // shot math for the rep being watched
 	RepSegments viewerSegs;                // segments of the rep being watched
+	RepGrade viewerGrade;                  // grades for the rep being watched
+
+	// Your fastest goal on each shot, for timing grades
+	ShotBook shotBook;
+	std::thread shotBookThread;
 
 	// Copy of the segments for the viewer window (render thread)
 	std::mutex uiSegMutex;
 	std::vector<Segment> uiSegs;
 	int uiSegTotal = 0;
+	struct UiGrade { int segIndex; std::string name; std::string why; bool biggest; };
+	std::vector<UiGrade> uiGrades;
+	std::string uiOverall;
 
 	// ---- Rep detection ----
 	enum class RepState { Idle, WaitReset, Armed, Recording };

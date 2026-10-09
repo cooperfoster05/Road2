@@ -80,10 +80,23 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 
 	viewerShot = ShotGeometry::Analyze(viewerFrames);
 	viewerSegs = Segmenter::Split(viewerFrames, ViewerEventTick(item));
+
+	// Grades: timing compares against your fastest goal on the same shot
+	shotBook.Update(writer->Folder());
+	viewerGrade = Grader::GradeRep(viewerFrames, viewerSegs, viewerShot, item.goal, item.floorBeforeGoal, shotBook.Get(item.shotKey));
 	{
 		std::lock_guard<std::mutex> lock(uiSegMutex);
 		uiSegs = viewerSegs.segs;
 		uiSegTotal = static_cast<int>(viewerFrames.size());
+		uiGrades.clear();
+		for (int gi = 0; gi < static_cast<int>(viewerGrade.segs.size()); gi++)
+		{
+			const SegmentGrade& gs = viewerGrade.segs[gi];
+			uiGrades.push_back(UiGrade{ gs.segIndex, Grader::Name(gs.grade), gs.why, gi == viewerGrade.biggestFix });
+		}
+		uiOverall = viewerGrade.overall > 0
+			? std::format("{}: {}  ({})", viewerGrade.overall, Grader::OverallName(viewerGrade.overall), viewerGrade.overallWhy)
+			: std::string();
 	}
 
 	// Predicted ball path from the moment the ball starts moving, for comparing against what really happened
@@ -120,10 +133,13 @@ void RLCoach::ViewerExit()
 	viewerFrames.clear();
 	viewerPred.clear();
 	viewerSegs = RepSegments{};
+	viewerGrade = RepGrade{};
 	{
 		std::lock_guard<std::mutex> lock(uiSegMutex);
 		uiSegs.clear();
 		uiSegTotal = 0;
+		uiGrades.clear();
+		uiOverall.clear();
 	}
 	uiViewerActive = false;
 	uiViewerPlaying = false;
@@ -469,12 +485,23 @@ void RLCoach::RenderWindow()
 	int scrub = head;
 	// ---- Segment timeline: click a segment to jump to it ----
 	std::vector<Segment> segs;
+	std::vector<UiGrade> grades;
+	std::string overall;
 	int segTotal = 0;
 	{
 		std::lock_guard<std::mutex> lock(uiSegMutex);
 		segs = uiSegs;
 		segTotal = uiSegTotal;
+		grades = uiGrades;
+		overall = uiOverall;
 	}
+	auto gradeColor = [](const std::string& g) -> ImVec4 {
+		if (g == "Clean" || g == "Calculated") return ImVec4(0.45f, 0.9f, 0.45f, 1.0f);
+		if (g == "Solid") return ImVec4(0.6f, 0.8f, 1.0f, 1.0f);
+		if (g == "Sloppy") return ImVec4(1.0f, 0.8f, 0.3f, 1.0f);
+		return ImVec4(1.0f, 0.45f, 0.4f, 1.0f);
+	};
+	if (!overall.empty()) ImGui::TextWrapped("Grade %s", overall.c_str());
 	if (!segs.empty() && segTotal > 1)
 	{
 		ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -503,7 +530,11 @@ void RLCoach::RenderWindow()
 			float x0 = xOf(sg.start), x1 = std::max(xOf(sg.end + 1), x0 + 3.0f);
 			dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + rowH), colorFor(sg.kind));
 			dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y0 + rowH), IM_COL32(20, 20, 20, 255));
-			const char* label = Segmenter::Name(sg.kind);
+			std::string labelStr = Segmenter::Name(sg.kind);
+			std::string why;
+			for (const UiGrade& ug : grades)
+				if (ug.segIndex == si) { labelStr += ": " + ug.name; why = ug.why; }
+			const char* label = labelStr.c_str();
 			ImVec2 ts = ImGui::CalcTextSize(label);
 			if (x1 - x0 > ts.x + 6.0f)
 				dl->AddText(ImVec2(x0 + 4.0f, y0 + (rowH - ts.y) * 0.5f), IM_COL32(255, 255, 255, 255), label);
@@ -516,13 +547,31 @@ void RLCoach::RenderWindow()
 				onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
 			}
 			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("%s: %.2fs to %.2fs (click to jump here)", label, sg.start / 120.0f, (sg.end + 1) / 120.0f);
+				ImGui::SetTooltip("%s: %.2fs to %.2fs (click to jump here)%s%s", label, sg.start / 120.0f, (sg.end + 1) / 120.0f,
+					why.empty() ? "" : "\n", why.c_str());
 			ImGui::PopID();
 		}
 		// Playhead
 		float px = xOf(static_cast<int>(uiViewerPlayhead.load()));
 		dl->AddLine(ImVec2(px, origin.y - 2.0f), ImVec2(px, origin.y + 2 * rowH + 6.0f), IM_COL32(255, 255, 255, 255), 2.0f);
 		ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 2 * rowH + 10.0f));
+	}
+
+	// Segment grades, in order; the biggest fix is marked and clickable
+	for (const UiGrade& ug : grades)
+	{
+		if (ug.name.empty() || ug.segIndex < 0 || ug.segIndex >= static_cast<int>(segs.size())) continue;
+		const Segment& sg = segs[ug.segIndex];
+		ImGui::TextColored(gradeColor(ug.name), "%-8s", ug.name.c_str());
+		ImGui::SameLine();
+		std::string line = std::format("{}{}: {}", ug.biggest ? ">> " : "", Segmenter::Name(sg.kind), ug.why);
+		ImGui::PushID(ug.segIndex + 1000);
+		if (ImGui::Selectable(line.c_str(), ug.biggest))
+		{
+			float target = static_cast<float>(sg.start);
+			onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
+		}
+		ImGui::PopID();
 	}
 
 	ImGui::PushItemWidth(-1);

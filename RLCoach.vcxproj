@@ -112,6 +112,8 @@
     <ClCompile Include="RepLibrary.cpp" />
     <ClCompile Include="ShotGeometry.cpp" />
     <ClCompile Include="Segmenter.cpp" />
+    <ClCompile Include="ShotBook.cpp" />
+    <ClCompile Include="Grader.cpp" />
     <ClCompile Include="RLCoachViewer.cpp" />
     <ClCompile Include="BallPredictor.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -151,6 +153,8 @@
     <ClInclude Include="RepLibrary.h" />
     <ClInclude Include="ShotGeometry.h" />
     <ClInclude Include="Segmenter.h" />
+    <ClInclude Include="ShotBook.h" />
+    <ClInclude Include="Grader.h" />
     <ClInclude Include="BallPredictor.h" />
     <ClInclude Include="version.h" />
   </ItemGroup>
