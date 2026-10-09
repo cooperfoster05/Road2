@@ -20,6 +20,9 @@ struct RepListItem
 	bool  floorBeforeGoal = false;
 	bool  kept = false;          // starred: never cleaned up
 	bool  hasRecording = true;   // false once the recording is cleaned up (summary and grades stay)
+	std::string mode;            // "training", "freeplay", or "import:<from>" for reps someone shared with you
+	bool  imported = false;
+	std::string importedFrom;    // who/what file it came from
 };
 
 namespace RepLibrary

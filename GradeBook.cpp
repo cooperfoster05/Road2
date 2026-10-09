@@ -29,6 +29,7 @@ GradeRecord GradeBook::Make(const RepGrade& g, const ShotAnalysis& shot, const R
 	r.overall = bailed ? 0 : g.overall;
 	r.shotKey = shotKey;
 	r.refFile = refFile;
+	r.shotType = static_cast<int>(shot.type);
 	if (shot.valid)
 	{
 		r.aimErr = shot.aimErrDeg;
@@ -67,6 +68,8 @@ void GradeBook::Load(const std::filesystem::path& root)
 		r.refFile = p[3];
 		r.aimErr = F(p[4]); r.missDist = F(p[5]); r.shotSpeed = F(p[6]); r.crossZ = F(p[7]); r.lateBy = F(p[8]);
 		r.segGrades = p[9];
+		r.version = p.size() > 10 ? std::atoi(p[10].c_str()) : 1;
+		r.shotType = p.size() > 11 ? std::atoi(p[11].c_str()) : 0;
 		fromDisk[p[0]] = r;
 	}
 	std::lock_guard<std::mutex> lock(mtx);
@@ -88,10 +91,10 @@ void GradeBook::Save(const std::filesystem::path& root)
 	auto tmp = root / "auto_grades.csv.tmp";
 	{
 		std::ofstream out(tmp, std::ios::trunc);
-		out << "file,overall,shot_key,ref_file,aim_err,miss_dist,shot_speed,cross_z,late_by,seg_grades\n";
+		out << "file,overall,shot_key,ref_file,aim_err,miss_dist,shot_speed,cross_z,late_by,seg_grades,grader_version,shot_type\n";
 		for (const auto& [file, r] : copy)
-			out << std::format("{},{},{},{},{:.2f},{:.1f},{:.0f},{:.0f},{:.3f},{}\n", file, r.overall, r.shotKey, r.refFile,
-				r.aimErr, r.missDist, r.shotSpeed, r.crossZ, r.lateBy, r.segGrades);
+			out << std::format("{},{},{},{},{:.2f},{:.1f},{:.0f},{:.0f},{:.3f},{},{},{}\n", file, r.overall, r.shotKey, r.refFile,
+				r.aimErr, r.missDist, r.shotSpeed, r.crossZ, r.lateBy, r.segGrades, r.version, r.shotType);
 		if (!out) { std::lock_guard<std::mutex> lock(mtx); dirty = true; return; }
 	}
 	std::error_code ec;
@@ -110,7 +113,7 @@ void GradeBook::Refresh(const std::filesystem::path& root, ShotBook& book)
 		{
 			std::lock_guard<std::mutex> lock(mtx);
 			auto it = grades.find(item.file);
-			if (it != grades.end() && (bailed || it->second.refFile == ref.bestFile)) continue;
+			if (it != grades.end() && (bailed || (it->second.refFile == ref.bestFile && it->second.version == Grader::kVersion))) continue;
 			if (bailed || !item.hasRecording)
 			{
 				// Bailed reps aren't graded; a cleaned-up rep keeps whatever grade it had
@@ -150,11 +153,11 @@ void GradeBook::Copy(std::unordered_map<std::string, int>& out)
 	for (const auto& [file, e] : grades) out[file] = e.overall;
 }
 
-bool GradeBook::TryCopy(std::unordered_map<std::string, int>& out)
+bool GradeBook::TryCopy(std::unordered_map<std::string, Brief>& out)
 {
 	std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
 	if (!lock.owns_lock()) return false;
 	out.clear();
-	for (const auto& [file, e] : grades) out[file] = e.overall;
+	for (const auto& [file, e] : grades) out[file] = Brief{ e.overall, e.shotType };
 	return true;
 }

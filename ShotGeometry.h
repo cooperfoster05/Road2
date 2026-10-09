@@ -12,8 +12,12 @@ struct V3
 	float x = 0, y = 0, z = 0;
 };
 
+// Which grader a rep goes to, decided from the shot touch
+enum class ShotType { Aerial = 0, Ground = 1 };
+
 struct ShotAnalysis
 {
+	ShotType type = ShotType::Aerial;
 	bool  valid = false;          // false if the rep has no touch to analyze
 	int   startTick = 0;          // ball starts moving
 	int   touchTick = -1;         // frame that reports the shot touch (the last touch of the rep)
@@ -47,9 +51,15 @@ struct ShotAnalysis
 	float shotSpeed = 0;          // ball speed off your car
 	bool  dipsToFloor = false;    // on its current path the ball hits the floor before the goal line
 	float cornerDist = 0;         // distance from the nearest top corner of the goal (ball-center units)
+
+	// Your car at the touch
+	bool  carGrounded = false;    // wheels on the ground when you hit it
+	float carSpeed = 0;           // car speed into the touch
+	float approachAngleDeg = 0;   // angle between where your car was driving and the push the ball needed (ground view)
 };
 
 namespace ShotGeometry
 {
+	const char* TypeName(ShotType t);
 	ShotAnalysis Analyze(const std::vector<Frame>& frames);
 }

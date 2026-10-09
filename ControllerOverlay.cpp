@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "ControllerOverlay.h"
 #include "HudDraw.h"
+#include "PadShapes.h"
 
 #include <algorithm>
 #include <cmath>
@@ -9,10 +10,17 @@ using namespace HudDraw;
 
 namespace
 {
-	const Rgba kBody{ 24, 27, 35, 255 };
-	const Rgba kPart{ 40, 44, 56, 255 };
-	const Rgba kEdge{ 72, 78, 96, 255 };
-	const Rgba kDim{ 120, 126, 140, 255 };
+	struct Theme
+	{
+		Rgba body, bodyEdge, face, well, part, trig, label, cap, rim, bevel;
+	};
+	const Theme kDarkTheme{ { 30, 33, 42, 255 }, { 52, 57, 70, 255 }, { 38, 42, 53, 255 }, { 20, 22, 28, 255 }, { 48, 53, 66, 255 },
+		{ 24, 26, 33, 255 }, { 150, 158, 175, 255 }, { 58, 63, 78, 255 }, { 10, 11, 14, 255 }, { 44, 48, 60, 255 } };
+	const Theme kLightTheme{ { 232, 234, 238, 255 }, { 205, 208, 215, 255 }, { 218, 221, 228, 255 }, { 40, 43, 52, 255 }, { 60, 64, 76, 255 },
+		{ 200, 203, 210, 255 }, { 90, 96, 110, 255 }, { 70, 75, 88, 255 }, { 28, 30, 36, 255 }, { 196, 199, 207, 255 } };
+	const Rgba kAccent{ 90, 170, 255, 255 };
+	const Rgba kWhite{ 255, 255, 255, 255 };
+	const Rgba kInk{ 20, 22, 28, 255 };
 
 	// PS4 face colors (cross, circle, square, triangle) and Xbox (A, B, X, Y)
 	Rgba FaceColor(int b, PadStyle st)
@@ -36,12 +44,28 @@ namespace
 		}
 	}
 
-	Rgba Fade(Rgba c, float k) { return { c.r, c.g, c.b, static_cast<unsigned char>(c.a * k) }; }
+	// Blend two opaque colors (no see-through, so overlapping shapes never show seams)
+	Rgba Mix(Rgba a, Rgba b, float k)
+	{
+		auto m = [k](unsigned char x, unsigned char y) { return static_cast<unsigned char>(x * k + y * (1.0f - k)); };
+		return { m(a.r, b.r), m(a.g, b.g), m(a.b, b.b), 255 };
+	}
 
 	void Line(CanvasWrapper& c, float x0, float y0, float x1, float y1, float w, Rgba col)
 	{
 		SetColor(c, col);
 		c.DrawLine(Vector2F{ x0, y0 }, Vector2F{ x1, y1 }, w);
+	}
+
+	template <size_t N>
+	void Shape(CanvasWrapper& c, const float (&tris)[N][6], float x, float y, float s, Rgba col)
+	{
+		SetColor(c, col);
+		for (size_t i = 0; i < N; i++)
+		{
+			const float* t = tris[i];
+			c.FillTriangle(Vector2F{ x + t[0] * s, y + t[1] * s }, Vector2F{ x + t[2] * s, y + t[3] * s }, Vector2F{ x + t[4] * s, y + t[5] * s });
+		}
 	}
 
 	void FaceSymbol(CanvasWrapper& c, int b, PadStyle st, float cx, float cy, float s, Rgba col)
@@ -52,7 +76,7 @@ namespace
 			TextCentered(c, cx, cy, letter, 0.85f * s, col);
 			return;
 		}
-		float r = 3.6f * s, w = 1.6f * s;
+		float r = 3.4f * s, w = 1.4f * s;
 		switch (b)
 		{
 		case PB_South:
@@ -75,30 +99,6 @@ namespace
 			break;
 		}
 	}
-
-	void Stick(CanvasWrapper& c, float cx, float cy, float s, float ix, float iy, bool clicked, Rgba accent)
-	{
-		float r = 15.0f * s;
-		Disc(c, cx, cy, r, kPart);
-		Ring(c, cx, cy, r, 1.5f * s, clicked ? accent : kEdge);
-		// faint crosshair
-		Line(c, cx - r * 0.6f, cy, cx + r * 0.6f, cy, 1.0f, Fade(kEdge, 0.6f));
-		Line(c, cx, cy - r * 0.6f, cx, cy + r * 0.6f, 1.0f, Fade(kEdge, 0.6f));
-		float mag = std::sqrt(ix * ix + iy * iy);
-		if (mag > 1.0f) { ix /= mag; iy /= mag; }
-		float dx = cx + ix * 10.0f * s, dy = cy + iy * 10.0f * s;
-		bool active = mag > 0.08f;
-		if (active) Line(c, cx, cy, dx, dy, 2.0f * s, Fade(accent, 0.8f));
-		Disc(c, dx, dy, 6.0f * s, active ? Rgba{ 245, 247, 250, 255 } : kDim);
-	}
-
-	void Trigger(CanvasWrapper& c, float x, float y, float w, float h, float s, float value, Rgba fill, const char* label)
-	{
-		RoundBox(c, x, y, w, h, 4.0f * s, kPart);
-		value = std::max(0.0f, std::min(1.0f, value));
-		if (value > 0.02f) RoundBox(c, x, y, w * value, h, 4.0f * s, fill);
-		TextCentered(c, x + w * 0.5f, y + h * 0.5f, label, 0.7f * s, value > 0.5f ? Rgba{ 20, 22, 28, 255 } : kDim);
-	}
 }
 
 const char* ControllerOverlay::ButtonName(int b, PadStyle st)
@@ -118,11 +118,16 @@ const char* ControllerOverlay::ButtonName(int b, PadStyle st)
 	}
 }
 
-void ControllerOverlay::Draw(CanvasWrapper& c, const PadInput& in, PadStyle st, const PadLayout& lay, float x, float y, float s)
+void ControllerOverlay::Draw(CanvasWrapper& c, const PadInput& in, PadStyle st, PadTheme theme, const PadLayout& lay,
+	float x, float y, float s)
 {
-	bool ps = st == PadStyle::PS4;
-	const Rgba accent{ 90, 170, 255, 255 };
-	auto P = [&](float ux, float uy) { return Vector2F{ x + ux * s, y + uy * s }; };
+	const bool ps = st == PadStyle::PS4;
+	const Theme& T = theme == PadTheme::Light ? kLightTheme : kDarkTheme;
+	auto X = [&](float u) { return x + u * s; };
+	auto Y = [&](float v) { return y + v * s; };
+	auto RBox = [&](float ux, float uy, float uw, float uh, float ur, Rgba col) { RoundBox(c, X(ux), Y(uy), uw * s, uh * s, ur * s, col); };
+	auto DiscU = [&](float ux, float uy, float ur, Rgba col) { Disc(c, X(ux), Y(uy), ur * s, col); };
+	auto RingU = [&](float ux, float uy, float ur, float w, Rgba col) { Ring(c, X(ux), Y(uy), ur * s, w * s, col); };
 
 	// Which physical buttons are down, from the actions you bound to them
 	bool down[PB_Count] = {};
@@ -133,73 +138,111 @@ void ControllerOverlay::Draw(CanvasWrapper& c, const PadInput& in, PadStyle st, 
 	press(lay.rollLeft, !in.handbrake && in.roll < -0.5f);
 	press(lay.rollRight, !in.handbrake && in.roll > 0.5f);
 
-	// Triggers: throttle forward (R2/RT) and reverse (L2/LT)
-	Trigger(c, P(28, 2).X, P(28, 2).Y, 50 * s, 15 * s, s, -in.throttle, Rgba{ 255, 150, 90, 255 }, ps ? "L2" : "LT");
-	Trigger(c, P(152, 2).X, P(152, 2).Y, 50 * s, 15 * s, s, in.throttle, Rgba{ 90, 220, 140, 255 }, ps ? "R2" : "RT");
+	// Triggers behind the body, filling from the bottom: reverse (L2/LT) and throttle (R2/RT)
+	for (int side = 0; side < 2; side++)
+	{
+		bool left = side == 0;
+		float val = std::max(0.0f, std::min(1.0f, left ? -in.throttle : in.throttle));
+		float tx = ps ? (left ? 36.0f : 164.0f) : (left ? 40.0f : 160.0f);
+		float ty = ps ? 8.0f : 2.0f, tw = 40.0f, th = ps ? 30.0f : 38.0f;
+		RBox(tx - 1.5f, ty - 1.5f, tw + 3.0f, th + 3.0f, 11.5f, T.rim);
+		RBox(tx, ty, tw, th, 10.0f, T.trig);
+		if (val > 0.02f)
+		{
+			float fh = th * val;
+			RBox(tx, ty + th - fh, tw, fh, std::min(10.0f, fh * 0.5f), left ? Rgba{ 255, 150, 90, 255 } : Rgba{ 90, 220, 140, 255 });
+		}
+		const char* lbl = ps ? (left ? "L2" : "R2") : (left ? "LT" : "RT");
+		TextCentered(c, X(tx + tw * 0.5f), Y(ty + 11.0f), lbl, 0.7f * s, val > 0.5f ? kInk : T.label);
+	}
 
-	// Body with two grips
-	Disc(c, P(54, 100).X, P(54, 100).Y, 30 * s, kBody);
-	Disc(c, P(176, 100).X, P(176, 100).Y, 30 * s, kBody);
-	RoundBox(c, P(10, 24).X, P(10, 24).Y, 210 * s, 80 * s, 30 * s, kBody);
+	// Bumpers peek out above the shoulders
+	float bumpY = ps ? 30.0f : 32.0f;
+	RBox(34, bumpY, 56, 10, 5, down[PB_L1] ? kAccent : T.part);
+	RBox(150, bumpY, 56, 10, 5, down[PB_R1] ? kAccent : T.part);
 
-	// Bumpers
-	RoundBox(c, P(26, 20).X, P(26, 20).Y, 54 * s, 9 * s, 4 * s, down[PB_L1] ? accent : kEdge);
-	RoundBox(c, P(150, 20).X, P(150, 20).Y, 54 * s, 9 * s, 4 * s, down[PB_R1] ? accent : kEdge);
-	TextCentered(c, P(53, 24.5f).X, P(53, 24.5f).Y, ps ? "L1" : "LB", 0.6f * s, down[PB_L1] ? Rgba{ 20, 22, 28, 255 } : Rgba{ 190, 195, 205, 255 });
-	TextCentered(c, P(177, 24.5f).X, P(177, 24.5f).Y, ps ? "R1" : "RB", 0.6f * s, down[PB_R1] ? Rgba{ 20, 22, 28, 255 } : Rgba{ 190, 195, 205, 255 });
+	// Body: dark rim, bevel, face
+	if (ps)
+	{
+		Shape(c, kDs4Rim, x, y, s, T.rim);
+		Shape(c, kDs4Bevel, x, y, s, T.bevel);
+		Shape(c, kDs4Face, x, y, s, T.body);
+	}
+	else
+	{
+		Shape(c, kXboxRim, x, y, s, T.rim);
+		Shape(c, kXboxBevel, x, y, s, T.bevel);
+		Shape(c, kXboxFace, x, y, s, T.body);
+	}
 
-	// Where things sit differs: PS4 has the D-pad top-left, Xbox the left stick
-	float lsx = ps ? 84 : 54, lsy = ps ? 82 : 52;
-	float dpx = ps ? 54 : 84, dpy = ps ? 52 : 82;
-	float rsx = 146, rsy = 82;
-	float fx = 176, fy = 52;
+	// Layout differs: PS4 has the D-pad top-left and both sticks low; Xbox has the left stick top-left
+	float dpx, dpy, lsx, lsy, rsx, rsy, fx, fy;
+	if (ps)
+	{
+		RBox(86, 38, 68, 40, 7, T.face);              // touchpad
+		RBox(72, 42, 6, 12, 3, T.part);               // share
+		RBox(162, 42, 6, 12, 3, T.part);              // options
+		DiscU(120, 98, 6, T.part);                    // home button
+		dpx = 58; dpy = 70; lsx = 88; lsy = 106; rsx = 152; rsy = 106; fx = 182; fy = 70;
+	}
+	else
+	{
+		DiscU(120, 56, 9, T.part);                    // guide button
+		RingU(120, 56, 9, 1.2f, theme == PadTheme::Dark ? T.bevel : T.rim);
+		DiscU(120, 56, 4, T.label);
+		DiscU(105, 76, 3.5f, T.part);                 // view
+		DiscU(135, 76, 3.5f, T.part);                 // menu
+		lsx = 62; lsy = 70; dpx = 94; dpy = 106; rsx = 148; rsy = 106; fx = 180; fy = 70;
+	}
 
 	// D-pad (just for looks)
-	RoundBox(c, P(dpx - 4, dpy - 13).X, P(dpx - 4, dpy - 13).Y, 8 * s, 26 * s, 2 * s, kPart);
-	RoundBox(c, P(dpx - 13, dpy - 4).X, P(dpx - 13, dpy - 4).Y, 26 * s, 8 * s, 2 * s, kPart);
+	DiscU(dpx, dpy, 21, T.face);
+	RBox(dpx - 5, dpy - 15, 10, 30, 2.5f, T.part);
+	RBox(dpx - 15, dpy - 5, 30, 10, 2.5f, T.part);
 
-	// Middle: touchpad (PS4) or guide button (Xbox)
-	if (ps) RoundBox(c, P(94, 30).X, P(94, 30).Y, 42 * s, 24 * s, 5 * s, Rgba{ 32, 36, 46, 255 });
-	else Disc(c, P(115, 40).X, P(115, 40).Y, 7 * s, kPart);
-
-	// Sticks: left stick shows steer / yaw and pitch; right stick is the camera (not recorded)
+	// Sticks: the cap moves with the left stick (steer / yaw and pitch). The right stick is the camera, which isn't recorded.
 	float stickX = std::fabs(in.steer) >= std::fabs(in.yaw) ? in.steer : in.yaw;
-	Stick(c, P(lsx, lsy).X, P(lsx, lsy).Y, s, stickX, in.pitch, down[PB_L3], accent);
-	Stick(c, P(rsx, rsy).X, P(rsx, rsy).Y, s, 0, 0, down[PB_R3], accent);
+	auto stick = [&](float cx, float cy, float ix, float iy, bool clicked) {
+		float mag = std::sqrt(ix * ix + iy * iy);
+		if (mag > 1.0f) { ix /= mag; iy /= mag; }
+		bool on = mag > 0.08f;
+		DiscU(cx, cy, 19, T.well);
+		if (on) Line(c, X(cx), Y(cy), X(cx + ix * 13), Y(cy + iy * 13), 2.0f * s, kAccent);
+		float kx = cx + ix * 7, ky = cy + iy * 7;
+		DiscU(kx, ky, 13, T.cap);
+		RingU(kx, ky, 13, 1.4f, (on || clicked) ? kAccent : T.bodyEdge);
+		DiscU(kx, ky, 8.5f, on ? T.cap : T.part);
+		RingU(kx, ky, 8.5f, 0.8f, T.bodyEdge);
+	};
+	stick(lsx, lsy, stickX, in.pitch, down[PB_L3]);
+	stick(rsx, rsy, 0, 0, down[PB_R3]);
 
 	// Face buttons
+	DiscU(fx, fy, 24, T.face);
 	const int order[4] = { PB_North, PB_West, PB_East, PB_South };
 	const float off[4][2] = { { 0, -15 }, { -15, 0 }, { 15, 0 }, { 0, 15 } };
 	for (int i = 0; i < 4; i++)
 	{
 		int b = order[i];
-		Vector2F p = P(fx + off[i][0], fy + off[i][1]);
+		float bx = fx + off[i][0], by = fy + off[i][1];
 		Rgba col = FaceColor(b, st);
 		if (down[b])
 		{
-			Disc(c, p.X, p.Y, 8.5f * s, col);
-			FaceSymbol(c, b, st, p.X, p.Y, s, Rgba{ 255, 255, 255, 255 });
+			DiscU(bx, by, 10.5f, Mix(col, T.face, 0.45f));   // glow
+			DiscU(bx, by, 8, col);
+			FaceSymbol(c, b, st, X(bx), Y(by), s, kWhite);
 		}
 		else
 		{
-			Disc(c, p.X, p.Y, 8.5f * s, kPart);
-			FaceSymbol(c, b, st, p.X, p.Y, s, Fade(col, 0.75f));
+			DiscU(bx, by, 8, T.well);
+			FaceSymbol(c, b, st, X(bx), Y(by), s, col);
 		}
 	}
 
-	// Boost meter and air roll tag under the pad
-	float by = 126;
-	if (in.boostAmount >= 0)
-	{
-		float frac = std::max(0.0f, std::min(1.0f, in.boostAmount / 100.0f));
-		RoundBox(c, P(40, by).X, P(40, by).Y, 150 * s, 6 * s, 3 * s, kPart);
-		if (frac > 0.01f) RoundBox(c, P(40, by).X, P(40, by).Y, 150 * s * frac, 6 * s, 3 * s,
-			in.boost ? Rgba{ 255, 180, 60, 255 } : Rgba{ 230, 140, 40, 220 });
-		Text(c, P(194, by - 3).X, P(194, by - 3).Y, std::to_string(static_cast<int>(in.boostAmount + 0.5f)), 0.7f * s, Rgba{ 230, 150, 60, 255 });
-	}
+	// Air roll tag under the pad
 	if (std::fabs(in.roll) > 0.3f)
 	{
 		const char* tag = in.handbrake ? "FREE AIR ROLL" : (in.roll < 0 ? "AIR ROLL LEFT" : "AIR ROLL RIGHT");
-		TextCentered(c, P(115, 136).X, P(115, 136).Y, tag, 0.65f * s, Rgba{ 190, 150, 255, 255 }, true);
+		TextCentered(c, X(120), Y(170), tag, 0.7f * s, Rgba{ 190, 150, 255, 255 }, true);
 	}
 }

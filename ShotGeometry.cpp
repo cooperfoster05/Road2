@@ -16,6 +16,7 @@ namespace
 	constexpr float kWinZLo = kBallR;
 	constexpr float kWinZHi = kGoalH - kBallR;
 	constexpr float kCarMaxSpeed = 2300.0f;
+	constexpr float kGroundShotMaxZ = 260.0f;   // ball center below this at the touch = a ground shot (jump or flip shots included)
 	// Fastest average acceleration seen toward the ball in recorded reps (98th percentile = 1300).
 	constexpr float kReachAccel = 1300.0f;
 	constexpr float kReachOffset = 140.0f;         // ball radius plus about half a car
@@ -216,6 +217,22 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 		}
 	}
 
+	// Car at the touch, and what kind of shot this was
+	const Frame& cf = fr[k - 1];
+	// Wheels on the floor (not a wall: wall contact counts as "on ground" in the game)
+	s.carGrounded = (cf.onGround && cf.carZ < 100.0f) || (fr[k].onGround && fr[k].carZ < 100.0f);
+	V3 carVel = CarVel(cf);
+	s.carSpeed = Len(carVel);
+	V3 flatVel = Make(carVel.x, carVel.y, 0), flatPush = Make(s.idealDir.x, s.idealDir.y, 0);
+	s.approachAngleDeg = (Len(flatVel) > 200.0f && Len(flatPush) > 0.1f) ? AngleDeg(flatVel, flatPush) : 0.0f;
+	// Hit from the ground, or a low ball reached with a small jump or flip = ground shot; otherwise an aerial
+	s.type = (s.carGrounded || s.ballCenter.z < kGroundShotMaxZ) ? ShotType::Ground : ShotType::Aerial;
+
 	s.valid = true;
 	return s;
+}
+
+const char* ShotGeometry::TypeName(ShotType t)
+{
+	return t == ShotType::Ground ? "Ground shot" : "Aerial";
 }

@@ -12,6 +12,7 @@ struct PadInput
 };
 
 enum class PadStyle { PS4, Xbox };
+enum class PadTheme { Dark, Light };
 
 // Physical buttons an action can be bound to (index stored in the rlcoach_pad_* cvars)
 enum PadButton { PB_None = 0, PB_South, PB_East, PB_West, PB_North, PB_L1, PB_R1, PB_L3, PB_R3, PB_Count };
@@ -28,9 +29,10 @@ struct PadLayout
 
 namespace ControllerOverlay
 {
-	constexpr float kWidth = 230.0f;    // size at scale 1
-	constexpr float kHeight = 142.0f;
+	constexpr float kWidth = 240.0f;    // size at scale 1
+	constexpr float kHeight = 178.0f;
 
-	void Draw(CanvasWrapper& canvas, const PadInput& in, PadStyle style, const PadLayout& layout, float x, float y, float scale);
+	void Draw(CanvasWrapper& canvas, const PadInput& in, PadStyle style, PadTheme theme, const PadLayout& layout,
+		float x, float y, float scale);
 	const char* ButtonName(int button, PadStyle style);
 }

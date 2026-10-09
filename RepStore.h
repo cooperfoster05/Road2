@@ -39,6 +39,10 @@ namespace RepStore
 	int Remove(const std::filesystem::path& root, const std::unordered_set<std::string>& names,
 		const std::filesystem::path& skipBundle);
 
+	// Whole-file helpers for sharing (they don't touch the store's own bundles)
+	bool WriteBundle(const std::filesystem::path& file, const std::vector<std::pair<std::string, std::string>>& namedCsv, std::string& err);
+	bool ReadBundle(const std::filesystem::path& file, std::vector<std::pair<std::string, std::string>>& namedCsv, std::string& err);
+
 	// Moves old loose reps/*.csv files into one bundle per day. Names in `drop` are deleted instead
 	// (bailed reps keep only their summary). Returns how many files were handled.
 	int MigrateLegacy(const std::filesystem::path& root, const std::unordered_set<std::string>& drop,

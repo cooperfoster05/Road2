@@ -23,6 +23,8 @@ struct GradeRecord
 	float crossZ = -1;          // height crossing the goal line
 	float lateBy = 0;           // seconds after the earliest intercept
 	std::string segGrades;      // e.g. "Approach=Clean;Takeoff=Sloppy;..."
+	int   version = Grader::kVersion;   // grader rules it was made with
+	int   shotType = 0;         // ShotType: 0 aerial, 1 ground
 };
 
 class GradeBook
@@ -39,7 +41,8 @@ public:
 
 	// Never waits (for the game and render threads); returns false if a refresh holds the lock.
 	bool TrySet(const std::string& file, const GradeRecord& rec);
-	bool TryCopy(std::unordered_map<std::string, int>& out);
+	struct Brief { int overall = 0; int shotType = 0; };
+	bool TryCopy(std::unordered_map<std::string, Brief>& out);
 	void Copy(std::unordered_map<std::string, int>& out);   // waits briefly if a refresh is storing a grade
 
 private:

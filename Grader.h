@@ -29,6 +29,9 @@ struct RepGrade
 
 namespace Grader
 {
+	// Bump whenever the rules or cutoffs change, so saved auto grades get redone
+	inline constexpr int kVersion = 3;
+
 	RepGrade GradeRep(const std::vector<Frame>& frames, const RepSegments& segs, const ShotAnalysis& shot,
 		bool wentIn, bool bouncedIn, const ShotReference& ref);
 

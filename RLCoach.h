@@ -20,6 +20,7 @@
 #include <thread>
 #include <unordered_map>
 
+#include <algorithm>
 #include <atomic>
 #include <map>
 #include <chrono>
@@ -30,6 +31,31 @@
 #include "version.h"
 constexpr auto plugin_version = stringify(VERSION_MAJOR) "." stringify(VERSION_MINOR) "." stringify(VERSION_PATCH) "." stringify(VERSION_BUILD);
 
+
+// Running average and recent peak of how long a piece of the plugin takes (milliseconds)
+struct PerfStat
+{
+	float avgMs = 0.0f;
+	float peakMs = 0.0f;          // worst in the last second
+	float windowPeak = 0.0f;
+	std::chrono::steady_clock::time_point windowStart = std::chrono::steady_clock::now();
+	void Add(float ms)
+	{
+		avgMs = avgMs * 0.98f + ms * 0.02f;
+		windowPeak = std::max(windowPeak, ms);
+		auto now = std::chrono::steady_clock::now();
+		if (now - windowStart > std::chrono::seconds(1)) { peakMs = windowPeak; windowPeak = 0.0f; windowStart = now; }
+	}
+};
+
+// Times its own lifetime into a PerfStat
+struct PerfTimer
+{
+	PerfStat& stat;
+	std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+	explicit PerfTimer(PerfStat& s) : stat(s) {}
+	~PerfTimer() { stat.Add(std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count()); }
+};
 
 class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	, public SettingsWindowBase  // adds an RLCoach tab in the F2 menu
@@ -75,12 +101,17 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::string GetStorageMsg();
 	void RenderStorageSettings();
 	void ToggleKeep(const std::string& file);  // render thread
+	std::thread shareThread;
+	std::atomic<bool> shareBusy{ false };
+	std::atomic<bool> repListStale{ false };   // the rep list should reload (e.g. after an import)
+	void StartExport();                        // render thread; works in the background
+	void StartImport();
 
 	// Auto grades for the rep list, filled in on a worker thread
 	GradeBook gradeBook;
 	std::thread gradeThread;
 	std::atomic<bool> gradeThreadBusy{ false };
-	std::unordered_map<std::string, int> uiAutoGrades;   // render thread copy
+	std::unordered_map<std::string, GradeBook::Brief> uiAutoGrades;   // render thread copy
 	void StartGradeRefresh();
 
 	// Copy of the segments for the viewer window (render thread)
@@ -252,6 +283,10 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void DrawPracticeOverlay(CanvasWrapper& canvas);
 	Frame CaptureAt(CarWrapper& car, BallWrapper& ball, const ControllerInput& in, int tick, float wallMs);
 
+	// ---- Timing readout ----
+	std::shared_ptr<bool> showTiming;         // rlcoach_show_timing
+	PerfStat perfTick, perfInput, perfDraw;   // game thread only
+
 	// ---- Drawing (RLCoachHud.cpp) ----
 	void RenderHud(CanvasWrapper canvas);
 	void DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& pad);
@@ -263,6 +298,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::shared_ptr<int>   speedUnits;        // rlcoach_speed_units: 0 uu/s, 1 km/h, 2 mph
 	std::shared_ptr<int>   inputDisplay;      // rlcoach_input_display: 0 none, 1 text on the panel, 2 PS4, 3 Xbox
 	std::shared_ptr<float> padX, padY, padScale;   // rlcoach_pad_x / _y / _scale
+	std::shared_ptr<int>   padTheme;          // rlcoach_pad_theme: 0 dark, 1 light
 	std::shared_ptr<int>   padJump, padBoost, padSlide, padRollLeft, padRollRight;   // rlcoach_pad_<action>: button index
 	std::shared_ptr<int>   targetHitbox;      // rlcoach_target_hitbox: 0 off, 1 for your touch, 2 for the earliest intercept
 	void RegisterLookCvars();

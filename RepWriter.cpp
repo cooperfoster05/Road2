@@ -138,6 +138,20 @@ bool RepWriter::SaveRep(const std::vector<Frame>& frames, RepSummary& summary)
 	return true;
 }
 
+void RepWriter::AddIndexRow(const RepSummary& s)
+{
+	Enqueue([this, s]() {
+		std::ofstream index = OpenAppend(root / "reps_index.csv",
+			"file,saved_at,mode,map,end_reason,duration_s,ticks,touches,goal,event_tick,floor_before_goal,shot_key");
+		if (!index) { failed++; return; }
+		index << std::format("{},{},{},{},{},{:.3f},{},{},{},{},{},{}\n",
+			s.fileName, s.savedAt, s.mode, s.map, s.endReason,
+			s.durationS, s.ticks, s.touches, (int)s.goal,
+			s.eventTick, (int)s.floorBeforeGoal, s.shotKey);
+		if (!index) failed++;
+	});
+}
+
 bool RepWriter::SaveRating(const std::string& repFile, int rating)
 {
 	std::string at = NowStamp("%Y-%m-%d %H:%M:%S");

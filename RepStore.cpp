@@ -371,3 +371,45 @@ int RepStore::MigrateLegacy(const fs::path& root, const std::unordered_set<std::
 	}
 	return handled;
 }
+
+bool RepStore::WriteBundle(const fs::path& file, const std::vector<std::pair<std::string, std::string>>& namedCsv, std::string& err)
+{
+	std::error_code ec;
+	fs::create_directories(file.parent_path(), ec);
+	std::ofstream out(file, std::ios::binary | std::ios::trunc);
+	if (!out) { err = "Couldn't create " + file.filename().string(); return false; }
+	for (const auto& [name, csv] : namedCsv)
+	{
+		mz_ulong bound = mz_compressBound(static_cast<mz_ulong>(csv.size()));
+		std::string packed(bound, '\0');
+		mz_ulong packLen = bound;
+		if (mz_compress2(reinterpret_cast<unsigned char*>(packed.data()), &packLen,
+			reinterpret_cast<const unsigned char*>(csv.data()), static_cast<mz_ulong>(csv.size()), 9) != MZ_OK)
+		{
+			err = "Compression failed";
+			return false;
+		}
+		packed.resize(packLen);
+		std::string bytes = ChunkBytes(name, static_cast<uint32_t>(csv.size()), packed);
+		out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+	}
+	out.flush();
+	if (!out) { err = "Couldn't write " + file.filename().string(); return false; }
+	return true;
+}
+
+bool RepStore::ReadBundle(const fs::path& file, std::vector<std::pair<std::string, std::string>>& namedCsv, std::string& err)
+{
+	namedCsv.clear();
+	uint64_t end = 0;
+	std::vector<Chunk> chunks = ScanBundle(file, end);
+	if (chunks.empty()) { err = "No reps in " + file.filename().string(); return false; }
+	for (const Chunk& c : chunks)
+	{
+		Loc l{ file, false, c.offset, c.rawLen, c.packLen };
+		std::string packed, csv;
+		if (!ReadPacked(l, packed) || !Unpack(packed, c.rawLen, csv)) { err = "Damaged chunk " + c.name; return false; }
+		namedCsv.emplace_back(c.name, std::move(csv));
+	}
+	return true;
+}

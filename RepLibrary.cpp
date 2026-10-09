@@ -138,7 +138,7 @@ std::vector<RepListItem> RepLibrary::ListReps(const std::filesystem::path& root)
 		return -1;
 	};
 	int cFile = col("file"), cSaved = col("saved_at"), cReason = col("end_reason"), cDur = col("duration_s"),
-		cTouch = col("touches"), cGoal = col("goal"), cShot = col("shot_key"), cEvent = col("event_tick"), cBounce = col("floor_before_goal");
+		cTouch = col("touches"), cGoal = col("goal"), cShot = col("shot_key"), cEvent = col("event_tick"), cBounce = col("floor_before_goal"), cMode = col("mode");
 
 	while (std::getline(in, line))
 	{
@@ -156,6 +156,8 @@ std::vector<RepListItem> RepLibrary::ListReps(const std::filesystem::path& root)
 		std::string ev = get(cEvent);
 		it.eventTick = ev.empty() ? -1 : std::atoi(ev.c_str());
 		it.floorBeforeGoal = get(cBounce) == "1";
+		it.mode = get(cMode);
+		if (it.mode.rfind("import:", 0) == 0) { it.imported = true; it.importedFrom = it.mode.substr(7); }
 		auto r = ratings.find(it.file);
 		it.rating = r == ratings.end() ? 0 : r->second;
 		auto k = kept.find(it.file);

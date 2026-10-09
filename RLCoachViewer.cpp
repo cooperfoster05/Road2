@@ -465,7 +465,7 @@ void RLCoach::StartGradeRefresh()
 void RLCoach::RenderWindow()
 {
 	using namespace UiStyle;
-	if (!repListLoaded) RefreshRepList();
+	if (!repListLoaded || repListStale.exchange(false)) RefreshRepList();
 
 	auto onGame = [this](std::function<void()> fn) {
 		gameWrapper->Execute([fn](GameWrapper*) { fn(); });
@@ -554,7 +554,8 @@ void RLCoach::RenderWindow()
 			ImGui::TextDisabled("%s   %.1fs   %d touch%s", cur->endReason.c_str(), cur->duration, cur->touches, cur->touches == 1 ? "" : "es");
 			ImGui::SameLine();
 			auto ag = uiAutoGrades.find(cur->file);
-			if (ag != uiAutoGrades.end() && ag->second > 0) Pill(std::format("auto {}", ag->second), GradeColor(ag->second));
+			if (ag != uiAutoGrades.end() && ag->second.overall > 0) Pill(std::format("auto {}", ag->second.overall), GradeColor(ag->second.overall));
+			if (ag != uiAutoGrades.end() && ag->second.shotType == 1) { ImGui::SameLine(); Pill("ground shot", kOk); }
 			if (cur->rating > 0) { ImGui::SameLine(); Pill(std::format("you {}", cur->rating), GradeColor(cur->rating)); }
 			ImGui::SameLine();
 			bool kept = cur->kept;
@@ -765,7 +766,7 @@ void RLCoach::RenderWindow()
 
 	ImGui::BeginChild("replist", ImVec2(0, uiViewerActive ? 220.0f : 380.0f), false);
 	ImGui::Columns(7, "repcols", false);
-	ImGui::SetColumnWidth(0, 34); ImGui::SetColumnWidth(1, 110); ImGui::SetColumnWidth(2, 70); ImGui::SetColumnWidth(3, 60);
+	ImGui::SetColumnWidth(0, 34); ImGui::SetColumnWidth(1, 170); ImGui::SetColumnWidth(2, 70); ImGui::SetColumnWidth(3, 60);
 	ImGui::SetColumnWidth(4, 64); ImGui::SetColumnWidth(5, 70);
 	const char* heads[7] = { "", "When", "Ended", "Length", "Touches", "You", "Auto" };
 	for (const char* h : heads) { ImGui::TextDisabled("%s", h); ImGui::NextColumn(); }
@@ -807,6 +808,12 @@ void RLCoach::RenderWindow()
 		if (!it.hasRecording && ImGui::IsItemHovered())
 			ImGui::SetTooltip(it.endReason == "reset" ? "Bailed rep: only the summary is saved"
 				: "Recording cleaned up: summary and grades are kept");
+		if (it.imported)
+		{
+			ImGui::SameLine();
+			Pill(it.importedFrom, ImVec4(0.75f, 0.6f, 1.0f, 1.0f));
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shared with you (imported from %s)", it.importedFrom.c_str());
+		}
 		ImGui::NextColumn();
 		ImGui::TextUnformatted(it.endReason.c_str()); ImGui::NextColumn();
 		ImGui::Text("%.1fs", it.duration); ImGui::NextColumn();
@@ -817,8 +824,12 @@ void RLCoach::RenderWindow()
 		ImGui::NextColumn();
 		auto ag = uiAutoGrades.find(it.file);
 		if (ag == uiAutoGrades.end()) ImGui::TextDisabled(it.hasRecording ? "..." : "-");
-		else if (ag->second <= 0) ImGui::TextDisabled("-");
-		else Pill(std::to_string(ag->second), GradeColor(ag->second), 26.0f);
+		else if (ag->second.overall <= 0) ImGui::TextDisabled("-");
+		else
+		{
+			Pill(std::to_string(ag->second.overall), GradeColor(ag->second.overall), 26.0f);
+			if (ag->second.shotType == 1) { ImGui::SameLine(); ImGui::TextDisabled("ground"); }
+		}
 		ImGui::NextColumn();
 	}
 	ImGui::Columns(1);

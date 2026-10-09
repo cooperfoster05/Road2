@@ -77,6 +77,9 @@ void RLCoach::onLoad()
 	mirror.addOnValueChanged([this](std::string, CVarWrapper c) { predictor.mirrorX = c.getBoolValue(); });
 
 	RegisterLookCvars();
+	showTiming = std::make_shared<bool>(false);
+	cvarManager->registerCvar("rlcoach_show_timing", "0", "Show how long RL Coach's own code takes each tick and frame", true, true, 0, true, 1)
+		.bindTo(showTiming);
 
 	keepDays = std::make_shared<float>(2.0f);
 	keepRatedDays = std::make_shared<float>(180.0f);
@@ -124,11 +127,11 @@ void RLCoach::onLoad()
 
 	// Every physics tick, before the game reads the car's input (the viewer replaces it)
 	gameWrapper->HookEventWithCaller<CarWrapper>("Function TAGame.Car_TA.SetVehicleInput",
-		[this](CarWrapper car, void* params, std::string) { OverrideViewerInput(car, params); });
+		[this](CarWrapper car, void* params, std::string) { PerfTimer t(perfInput); OverrideViewerInput(car, params); });
 
 	// Every physics tick, after the car's input for that tick is set
 	gameWrapper->HookEventWithCallerPost<CarWrapper>("Function TAGame.Car_TA.SetVehicleInput",
-		[this](CarWrapper car, void*, std::string) { OnVehicleInput(car); });
+		[this](CarWrapper car, void*, std::string) { PerfTimer t(perfTick); OnVehicleInput(car); });
 
 	gameWrapper->HookEventWithCaller<CarWrapper>("Function TAGame.Car_TA.OnHitBall",
 		[this](CarWrapper car, void* params, std::string) { OnBallTouch(car, params); });
@@ -136,7 +139,7 @@ void RLCoach::onLoad()
 	gameWrapper->HookEvent("Function TAGame.Ball_TA.OnHitGoal",
 		[this](std::string) { OnGoal(); });
 
-	gameWrapper->RegisterDrawable([this](CanvasWrapper canvas) { RenderHud(canvas); });
+	gameWrapper->RegisterDrawable([this](CanvasWrapper canvas) { PerfTimer t(perfDraw); RenderHud(canvas); });
 
 	LoadRatingKeys();
 	predictor.mirrorX = cvarManager->getCvar("rlcoach_pred_mirror").getBoolValue();
@@ -159,6 +162,7 @@ void RLCoach::onUnload()
 	housekeepStop = true;
 	if (housekeepThread.joinable()) housekeepThread.join();
 	if (gradeThread.joinable()) gradeThread.join();
+	if (shareThread.joinable()) shareThread.join();
 	if (writer)
 	{
 		writer->Shutdown();   // finish any saves still queued
@@ -501,7 +505,8 @@ void RLCoach::GradeFinishedRep(const RepSummary& s)
 
 	unsigned char orr, og, ob;
 	OverallRgb(g.overall, orr, og, ob);
-	lastRepGradeLines.push_back({ { { std::format("GRADE {}: {}  ({})", g.overall, Grader::OverallName(g.overall), g.overallWhy), orr, og, ob } } });
+	lastRepGradeLines.push_back({ { { std::format("GRADE {}: {}  ({}){}", g.overall, Grader::OverallName(g.overall), g.overallWhy,
+		shot.valid && shot.type == ShotType::Ground ? "  [ground shot]" : ""), orr, og, ob } } });
 
 	// One line of segment grades, each grade in its own color (same colors as the rep viewer)
 	PanelGradeLine chips;
@@ -715,7 +720,7 @@ void RLCoach::RenderSettings()
 
 	if (ImGui::CollapsingHeader("Panel and units")) RenderLookSettings();
 	if (ImGui::CollapsingHeader("Controller overlay")) RenderPadSettings();
-	if (ImGui::CollapsingHeader("Storage")) RenderStorageSettings();
+	if (ImGui::CollapsingHeader("Storage and sharing")) RenderStorageSettings();
 
 	if (ImGui::CollapsingHeader("Ball prediction (RocketSim)"))
 	{
@@ -746,6 +751,10 @@ void RLCoach::RenderSettings()
 
 	if (ImGui::CollapsingHeader("Tools"))
 	{
+		bool st = *showTiming;
+		if (ImGui::Checkbox("Show plugin timing on the panel", &st)) setCvar("rlcoach_show_timing", st ? 1.0f : 0.0f);
+		ImGui::SameLine();
+		ImGui::TextDisabled("(how many milliseconds RL Coach adds; a 240 fps frame is 4.2 ms)");
 		if (writer) ImGui::TextWrapped("Data folder: %s", writer->Folder().string().c_str());
 		if (ImGui::Button("Test: move car and ball"))
 			gameWrapper->Execute([this](GameWrapper*) { TestSetState(); });

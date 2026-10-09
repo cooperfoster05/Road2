@@ -62,7 +62,8 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 	{
 		Vector2 screen = canvas.GetSize();
 		PadLayout layout{ *padJump, *padBoost, *padSlide, *padRollLeft, *padRollRight };
-		ControllerOverlay::Draw(canvas, pad, *inputDisplay == 3 ? PadStyle::Xbox : PadStyle::PS4, layout,
+		ControllerOverlay::Draw(canvas, pad, *inputDisplay == 3 ? PadStyle::Xbox : PadStyle::PS4,
+			*padTheme == 1 ? PadTheme::Light : PadTheme::Dark, layout,
 			*padX * screen.X, *padY * screen.Y, *padScale * (screen.Y / 1080.0f));
 	}
 
@@ -152,7 +153,8 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 		const Frame& f = viewerFrames[i];
 		std::string when = viewerRep.savedAt.size() >= 19 ? viewerRep.savedAt.substr(5, 11) : viewerRep.savedAt;
 		add(std::format("{}   {}   {}", when, viewerRep.endReason,
-			viewerRep.rating > 0 ? std::format("you rated {}", viewerRep.rating) : std::string("unrated")), 240, 244, 250);
+			viewerRep.imported ? "from " + viewerRep.importedFrom
+				: viewerRep.rating > 0 ? std::format("you rated {}", viewerRep.rating) : std::string("unrated")), 240, 244, 250);
 		add(std::format("{:.2f}s / {:.2f}s   {}   {}x", f.t, viewerFrames.back().t, viewerPlaying ? "playing" : "paused", viewerSpeed), 150, 160, 178);
 		float spd = std::sqrt(f.carVX * f.carVX + f.carVY * f.carVY + f.carVZ * f.carVZ);
 		add(std::format("{}   boost {:.0f}   {}{}", Units::Speed(spd), f.boostAmount,
@@ -165,6 +167,7 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 			unsigned char r, g, b;
 			OverallRgb(viewerGrade.overall, r, g, b);
 			add(std::format("{}  {}", viewerGrade.overall, Grader::OverallName(viewerGrade.overall)), r, g, b, false, 1.15f);
+			if (viewerShot.valid && viewerShot.type == ShotType::Ground) add("Graded as a ground shot", 150, 160, 178, true);
 			add(viewerGrade.overallWhy, 150, 160, 178, true);
 		}
 		if (viewerGrade.biggestFix >= 0)
@@ -238,6 +241,10 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 		}
 		if (!statusMessage.empty()) add(statusMessage, 130, 138, 152, true);
 	}
+
+	if (*showTiming)
+		add(std::format("Plugin cost  tick {:.3f} ms (peak {:.2f})   draw {:.2f} ms (peak {:.2f})",
+			perfTick.avgMs + perfInput.avgMs, perfTick.peakMs + perfInput.peakMs, perfDraw.avgMs, perfDraw.peakMs), 130, 200, 160);
 
 	// Compact mode drops the detail lines (and any section left empty)
 	if (*hudCompact)
@@ -338,6 +345,7 @@ void RLCoach::RegisterLookCvars()
 	padRollLeft = std::make_shared<int>(PB_None);
 	padRollRight = std::make_shared<int>(PB_None);
 	targetHitbox = std::make_shared<int>(1);
+	padTheme = std::make_shared<int>(0);
 
 	cvarManager->registerCvar("rlcoach_hud_compact", "0", "Panel shows only the essentials", true, true, 0, true, 1).bindTo(hudCompact);
 	cvarManager->registerCvar("rlcoach_hud_scale", "1", "Panel size", true, true, 0.6f, true, 2.0f).bindTo(hudScale);
@@ -348,6 +356,7 @@ void RLCoach::RegisterLookCvars()
 	cvarManager->registerCvar("rlcoach_pad_x", "0.016", "Controller overlay left edge (fraction of the screen width)", true, true, 0, true, 1).bindTo(padX);
 	cvarManager->registerCvar("rlcoach_pad_y", "0.80", "Controller overlay top edge (fraction of the screen height)", true, true, 0, true, 1).bindTo(padY);
 	cvarManager->registerCvar("rlcoach_pad_scale", "1", "Controller overlay size", true, true, 0.5f, true, 2.5f).bindTo(padScale);
+	cvarManager->registerCvar("rlcoach_pad_theme", "0", "Controller overlay color: 0 dark, 1 light", true, true, 0, true, 1).bindTo(padTheme);
 	cvarManager->registerCvar("rlcoach_pad_jump", "1", "Controller button for jump", true, true, 0, true, PB_Count - 1).bindTo(padJump);
 	cvarManager->registerCvar("rlcoach_pad_boost", "2", "Controller button for boost", true, true, 0, true, PB_Count - 1).bindTo(padBoost);
 	cvarManager->registerCvar("rlcoach_pad_slide", "3", "Controller button for powerslide / air roll", true, true, 0, true, PB_Count - 1).bindTo(padSlide);
@@ -399,6 +408,9 @@ void RLCoach::RenderPadSettings()
 	if (ImGui::Combo("Show inputs", &mode, modes, 4)) setCvar("rlcoach_input_display", static_cast<float>(mode));
 	if (mode < 2) return;
 
+	int theme = *padTheme;
+	const char* themes[2] = { "Dark", "Light" };
+	if (ImGui::Combo("Controller color", &theme, themes, 2)) setCvar("rlcoach_pad_theme", static_cast<float>(theme));
 	float sc = *padScale;
 	if (ImGui::SliderFloat("Controller size", &sc, 0.5f, 2.5f, "%.2fx")) setCvar("rlcoach_pad_scale", sc);
 	float px = *padX * 100.0f, py = *padY * 100.0f;

@@ -169,7 +169,7 @@ void RLCoach::PracticePickReference()
 	gradeBook.Copy(autos);
 	std::vector<RepListItem> same;
 	for (const RepListItem& it : RepLibrary::ListReps(writer->Folder()))   // newest first
-		if (it.shotKey == practiceItem.shotKey && it.endReason != "reset" && it.hasRecording) same.push_back(it);
+		if (it.shotKey == practiceItem.shotKey && it.endReason != "reset" && it.hasRecording && !it.imported) same.push_back(it);
 	if (same.empty()) return;
 
 	auto autoOf = [&](const RepListItem& it) { auto f = autos.find(it.file); return f == autos.end() ? 0 : f->second; };

@@ -171,6 +171,7 @@
     <ClInclude Include="RepStore.h" />
     <ClInclude Include="ControllerOverlay.h" />
     <ClInclude Include="HudDraw.h" />
+    <ClInclude Include="PadShapes.h" />
     <ClInclude Include="Overlay3D.h" />
     <ClInclude Include="Ratings.h" />
     <ClInclude Include="UiStyle.h" />

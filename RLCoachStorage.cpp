@@ -5,7 +5,15 @@
 #include <cstdio>
 #include <ctime>
 #include <format>
+#include <sstream>
+#include <thread>
 #include <unordered_set>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#include <shellapi.h>
+#endif
 
 // ============================================================
 // Storage upkeep: runs once in the background when the plugin
@@ -19,6 +27,48 @@
 
 namespace
 {
+	std::string NowStamp(const char* fmt)
+	{
+		std::time_t now = std::time(nullptr);
+		std::tm local{};
+		localtime_s(&local, &now);
+		char buf[64];
+		std::strftime(buf, sizeof(buf), fmt, &local);
+		return buf;
+	}
+
+	// Letters, digits, - and _ only, so it's safe in file names and CSV
+	std::string CleanTag(const std::string& in)
+	{
+		std::string out;
+		for (char ch : in)
+			if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_') out += ch;
+		if (out.size() > 24) out.resize(24);
+		return out.empty() ? std::string("shared") : out;
+	}
+
+	std::vector<std::string> SplitLine(const std::string& line)
+	{
+		std::vector<std::string> parts;
+		std::string cur;
+		for (char ch : line)
+		{
+			if (ch == ',') { parts.push_back(cur); cur.clear(); }
+			else if (ch != '\r' && ch != '\n') cur += ch;
+		}
+		parts.push_back(cur);
+		return parts;
+	}
+
+	void OpenFolder(const std::filesystem::path& folder)
+	{
+		std::error_code ec;
+		std::filesystem::create_directories(folder, ec);
+#ifdef _WIN32
+		ShellExecuteW(nullptr, L"open", folder.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#endif
+	}
+
 	// Age in days of a "YYYY-MM-DD HH:MM:SS" time; -1 if it can't be read
 	double AgeDays(const std::string& savedAt, std::time_t now)
 	{
@@ -138,6 +188,134 @@ int RLCoach::TrimStorage(const std::filesystem::path& root, const std::filesyste
 	return RepStore::Remove(root, drop, session);
 }
 
+// ============================================================
+// Sharing: export your starred reps to one file; import files
+// friends send you. Imported reps are starred (never cleaned up),
+// tagged with who they came from, and never become your benchmarks.
+// ============================================================
+
+void RLCoach::StartExport()
+{
+	if (!writer || shareBusy) return;
+	if (shareThread.joinable()) shareThread.join();
+	shareBusy = true;
+	auto root = writer->Folder();
+	shareThread = std::thread([this, root]() {
+		std::vector<std::pair<std::string, std::string>> chunks;
+		std::string index = "file,saved_at,mode,map,end_reason,duration_s,ticks,touches,goal,event_tick,floor_before_goal,shot_key\n";
+		int n = 0;
+		for (const RepListItem& it : RepLibrary::ListReps(root))
+		{
+			if (!it.kept || !it.hasRecording || it.imported) continue;
+			std::string csv, err;
+			if (!RepStore::Read(root, it.file, csv, err)) continue;
+			chunks.emplace_back(it.file, std::move(csv));
+			index += std::format("{},{},training,,{},{:.3f},0,{},{},{},{},{}\n", it.file, it.savedAt, it.endReason, it.duration,
+				it.touches, it.goal ? 1 : 0, it.eventTick, it.floorBeforeGoal ? 1 : 0, it.shotKey);
+			n++;
+		}
+		if (n == 0)
+		{
+			SetStorageMsg("Nothing to export yet: star the reps you want to share (the star column in the rep viewer).");
+			shareBusy = false;
+			return;
+		}
+		chunks.emplace_back("__index.csv", index);
+		auto file = root / "exports" / ("RLCoach_reps_" + NowStamp("%Y-%m-%d_%H-%M-%S") + ".rlc");
+		std::string err;
+		if (RepStore::WriteBundle(file, chunks, err))
+			SetStorageMsg(std::format("Exported {} starred rep{} to exports\\{}", n, n == 1 ? "" : "s", file.filename().string()));
+		else
+			SetStorageMsg("Export failed: " + err);
+		shareBusy = false;
+	});
+}
+
+void RLCoach::StartImport()
+{
+	if (!writer || shareBusy) return;
+	if (shareThread.joinable()) shareThread.join();
+	shareBusy = true;
+	auto root = writer->Folder();
+	shareThread = std::thread([this, root]() {
+		namespace fs = std::filesystem;
+		std::error_code ec;
+		fs::path inbox = root / "imports";
+		fs::create_directories(inbox / "done", ec);
+		int files = 0, added = 0, skipped = 0;
+		std::string problems;
+
+		std::vector<fs::path> todo;
+		for (const auto& e : fs::directory_iterator(inbox, ec))
+			if (e.is_regular_file() && e.path().extension() == ".rlc") todo.push_back(e.path());
+
+		for (const fs::path& file : todo)
+		{
+			std::vector<std::pair<std::string, std::string>> chunks;
+			std::string err;
+			if (!RepStore::ReadBundle(file, chunks, err)) { problems += " " + file.filename().string() + ": " + err + "."; continue; }
+			const std::string* index = nullptr;
+			std::unordered_map<std::string, const std::string*> byName;
+			for (const auto& [name, csv] : chunks)
+			{
+				if (name == "__index.csv") index = &csv;
+				else byName[name] = &csv;
+			}
+			if (!index) { problems += " " + file.filename().string() + ": not an RL Coach export."; continue; }
+
+			std::string tag = CleanTag(file.stem().string());
+			fs::path bundle = root / "sessions" / ("imported_" + tag + ".rlc");
+			std::istringstream lines(*index);
+			std::string line;
+			std::getline(lines, line);
+			std::vector<std::string> header = SplitLine(line);
+			auto col = [&](const char* name) { for (size_t i = 0; i < header.size(); i++) if (header[i] == name) return static_cast<int>(i); return -1; };
+			int cFile = col("file"), cSaved = col("saved_at"), cMap = col("map"), cReason = col("end_reason"), cDur = col("duration_s"),
+				cTicks = col("ticks"), cTouch = col("touches"), cGoal = col("goal"), cEvent = col("event_tick"), cBounce = col("floor_before_goal"), cShot = col("shot_key");
+			while (std::getline(lines, line))
+			{
+				std::vector<std::string> p = SplitLine(line);
+				auto get = [&](int c) { return (c >= 0 && c < static_cast<int>(p.size())) ? p[c] : std::string(); };
+				std::string orig = get(cFile);
+				auto rec = byName.find(orig);
+				if (orig.empty() || rec == byName.end()) continue;
+				std::string newName = "imp_" + tag + "_" + orig;
+				if (RepStore::Has(root, newName)) { skipped++; continue; }
+				if (!RepStore::Append(root, bundle, newName, *rec->second, err)) continue;
+
+				RepSummary s;
+				s.fileName = newName;
+				s.savedAt = get(cSaved);
+				s.mode = "import:" + tag;
+				s.map = get(cMap);
+				s.endReason = get(cReason);
+				s.durationS = std::strtof(get(cDur).c_str(), nullptr);
+				s.ticks = std::atoi(get(cTicks).c_str());
+				s.touches = std::atoi(get(cTouch).c_str());
+				s.goal = get(cGoal) == "1";
+				s.eventTick = std::atoi(get(cEvent).c_str());
+				s.floorBeforeGoal = get(cBounce) == "1";
+				s.shotKey = get(cShot);
+				writer->AddIndexRow(s);
+				writer->SetKept(newName, true);
+				added++;
+			}
+			files++;
+			fs::rename(file, inbox / "done" / file.filename(), ec);
+		}
+
+		// Let the queued index lines land before the rep list reloads
+		for (int i = 0; i < 200 && writer->Busy(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		if (todo.empty())
+			SetStorageMsg("No files to import: put .rlc files from friends in the imports folder first.");
+		else
+			SetStorageMsg(std::format("Imported {} rep{} from {} file{}{}{}", added, added == 1 ? "" : "s", files, files == 1 ? "" : "s",
+				skipped ? std::format(" ({} already here)", skipped) : std::string(), problems));
+		repListStale = true;
+		shareBusy = false;
+	});
+}
+
 void RLCoach::ToggleKeep(const std::string& file)
 {
 	if (!writer) return;
@@ -179,6 +357,24 @@ void RLCoach::RenderStorageSettings()
 	}
 	ImGui::TextWrapped("Summaries, your ratings and auto grades are kept forever. Starred reps (Keep in the rep viewer) "
 		"and your fastest goal on each shot are never cleaned up. Bailed reps keep only their summary.");
+
+	ImGui::Spacing();
+	ImGui::TextUnformatted("Sharing reps");
+	ImGui::TextDisabled("Export packs your starred reps into one file. To watch a friend's reps, put their file in the imports folder");
+	ImGui::TextDisabled("(rename it to their name first, e.g. jake.rlc) and click Import. Their reps never count as your benchmarks.");
+	bool sharing = shareBusy;
+	if (sharing) ImGui::TextDisabled("Working...");
+	else
+	{
+		if (ImGui::Button("Export starred reps")) StartExport();
+		ImGui::SameLine();
+		if (ImGui::Button("Import shared reps")) StartImport();
+		ImGui::SameLine();
+		if (ImGui::Button("Open exports folder") && writer) OpenFolder(writer->Folder() / "exports");
+		ImGui::SameLine();
+		if (ImGui::Button("Open imports folder") && writer) OpenFolder(writer->Folder() / "imports");
+	}
+	ImGui::Spacing();
 
 	bool busy = housekeepBusy;
 	if (busy) ImGui::TextDisabled("Clean up now");

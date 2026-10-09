@@ -48,7 +48,7 @@ void ShotBook::Update(const std::filesystem::path& root)
 
 	for (const RepListItem& item : RepLibrary::ListReps(root))
 	{
-		if (entries.count(item.file)) continue;
+		if (entries.count(item.file) || item.imported) continue;   // someone else's reps never set your benchmarks
 		Entry e{ item.shotKey, item.goal, -1, -1 };
 
 		std::vector<Frame> frames;

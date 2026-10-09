@@ -26,6 +26,9 @@ public:
 	// Appends a rating line to ratings.csv (the newest line for a file wins)
 	bool SaveRating(const std::string& repFile, int rating);
 
+	// Adds a summary line for a rep whose recording was already stored (used by import)
+	void AddIndexRow(const RepSummary& summary);
+
 	// Marks a rep as kept (never cleaned up) or not, in kept.csv (newest line wins)
 	void SetKept(const std::string& repFile, bool kept);
 

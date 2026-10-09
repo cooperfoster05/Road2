@@ -8,17 +8,32 @@
 
 namespace
 {
-	// ---- Thresholds (tuned on Coop's rated reps, Oct 9) ----
-	constexpr float kCloseMiss = 150.0f;       // missed by this much or less = "Close"
-	constexpr float kUpperHalfZ = 321.0f;      // ball center height at the line; above = upper half of the net
-	constexpr float kFastShot = 2500.0f;       // shot speed for a "fast" shot
-	constexpr float kEfficientSec = 0.15f;     // touch within this of your fastest goal on the shot
-	constexpr float kCleanAim = 2.5f;          // aim error for a clean touch (degrees)
-	// A 5 = everything a 4 has, and elite at something
-	constexpr float kEliteAim = 1.6f;
-	constexpr float kEliteTiming = 0.10f;
-	constexpr float kCornerDist = 200.0f;
-	constexpr float kRocketShot = 3000.0f;
+	// ---- Cutoffs for the overall 1-5, one set per shot type ----
+	struct Cutoffs
+	{
+		float closeMiss;    // missed by this much or less = "Close" (2)
+		float upperZ;       // ball center height at the goal line; above = upper half of the net
+		float fast;         // shot speed for a "fast" shot
+		float efficient;    // touch within this many seconds of your fastest goal on the shot
+		float aimPoint;     // aim error (degrees) that still earns the aim point toward a 4
+		// A 5 = everything a 4 has, and elite at something
+		float eliteAim, eliteTiming, cornerDist, rocket;
+	};
+	// Aerials: tuned on Coop's 361 rated reps (Oct 9), 82% exact match
+	constexpr Cutoffs kAerial{ 150.0f, 350.0f, 2800.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
+	// Ground shots: first pass, not tuned yet (needs rated ground-shot reps). Ground shots come off slower and lower.
+	constexpr Cutoffs kGround{ 150.0f, 300.0f, 2200.0f, 0.25f, 3.5f, 1.6f, 0.10f, 200.0f, 2800.0f };
+	const Cutoffs& For(ShotType t) { return t == ShotType::Ground ? kGround : kAerial; }
+
+	// Ground shots: how well your driving line lined up with the push the ball needed
+	Grade FromApproachAngle(float deg)
+	{
+		if (deg <= 8.0f) return Grade::Clean;
+		if (deg <= 18.0f) return Grade::Solid;
+		if (deg <= 30.0f) return Grade::Sloppy;
+		return Grade::Costly;
+	}
+	Grade Worse(Grade a, Grade b) { return static_cast<int>(a) >= static_cast<int>(b) ? a : b; }
 
 	Grade FromAim(float deg)
 	{
@@ -136,6 +151,23 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		}
 	}
 
+	// ---- Approach (ground shots): your driving line into the ball, and timing ----
+	if (shot.type == ShotType::Ground)
+	{
+		int approachIdx = findSeg(SegKind::Approach, shotTouch);
+		Grade lineGrade = FromApproachAngle(shot.approachAngleDeg);
+		std::string why = std::format("Drove in {:.0f} deg off the line the ball needed, at {}", shot.approachAngleDeg, Units::Speed(shot.carSpeed));
+		Grade grade = lineGrade;
+		if (ref.valid && !ref.bestFile.empty() && takeoffIdx < 0)
+		{
+			Grade timeGrade = vsBest < 0.0f ? Grade::Clean : FromDelay(vsBest);
+			if (static_cast<int>(timeGrade) > static_cast<int>(lineGrade))
+				why = std::format("Got there {:.2f}s later than your fastest goal on this shot ({:.0f} deg off the ideal line)", vsBest, shot.approachAngleDeg);
+			grade = Worse(lineGrade, timeGrade);
+		}
+		gradeSeg(approachIdx, grade, why);
+	}
+
 	// ---- Contact: aim error, explained by where you hit the ball ----
 	int contactIdx = findSeg(SegKind::Contact, shotTouch);
 	{
@@ -148,11 +180,12 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 
 	// ---- Result ----
 	int resultIdx = findSeg(SegKind::Result, 0);
-	bool upper = shot.reachesGoalLine && shot.crossZ >= kUpperHalfZ;
-	bool fast = shot.shotSpeed >= kFastShot;
+	const Cutoffs& C = For(shot.type);
+	bool upper = shot.reachesGoalLine && shot.crossZ >= C.upperZ;
+	bool fast = shot.shotSpeed >= C.fast;
 	if (!wentIn)
 	{
-		bool close = shot.reachesGoalLine && shot.missDist <= kCloseMiss;
+		bool close = shot.reachesGoalLine && shot.missDist <= C.closeMiss;
 		std::string why = !shot.reachesGoalLine ? "Never reached the goal line"
 			: shot.missDist <= 0 ? "Looked on target but didn't go in"
 			: std::format("Missed {} by {:.0f}", shot.missDir, shot.missDist);
@@ -174,15 +207,15 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		gradeSeg(resultIdx, res, why);
 
 		int points = 1 /* not bounced */ + (upper ? 1 : 0) + (fast ? 1 : 0)
-			+ ((!ref.valid || vsBest <= kEfficientSec) ? 1 : 0) + (shot.aimErrDeg <= kCleanAim ? 1 : 0);
+			+ ((!ref.valid || vsBest <= C.efficient) ? 1 : 0) + (shot.aimErrDeg <= C.aimPoint ? 1 : 0);
 		if (bounced) g.overall = 3;
 		else if (points < 4) g.overall = 3;
-		else if (points == 5 && shot.aimErrDeg <= kEliteAim && (!ref.valid || vsBest <= kEliteTiming)
-			&& (shot.cornerDist <= kCornerDist || shot.shotSpeed >= kRocketShot)) g.overall = 5;
+		else if (points == 5 && shot.aimErrDeg <= C.eliteAim && (!ref.valid || vsBest <= C.eliteTiming)
+			&& (shot.cornerDist <= C.cornerDist || shot.shotSpeed >= C.rocket)) g.overall = 5;
 		else g.overall = 4;
 
 		g.overallWhy = why;
-		if (g.overall == 5) g.overallWhy += shot.cornerDist <= kCornerDist ? ", top corner" : ", rocket";
+		if (g.overall == 5) g.overallWhy += shot.cornerDist <= C.cornerDist ? ", top corner" : ", rocket";
 	}
 
 	// ---- Recovery: time to get back in control, landing speed, and alignment ----

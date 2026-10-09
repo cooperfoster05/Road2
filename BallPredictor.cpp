@@ -103,7 +103,10 @@ bool BallPredictor::Predict(const BallSample& start, float avx, float avy, float
 	for (int i = 0; i < ticks; i++)
 	{
 		arena->Step(1);
-		out.push_back(FromSim(arena->ball->GetState(), mirror));
+		BallSample b = FromSim(arena->ball->GetState(), mirror);
+		out.push_back(b);
+		// Stop once it's a goal: the real game explodes the ball, the simulator would bounce it around the net
+		if (std::fabs(b.y) > 5215.0f && std::fabs(b.x) < 893.0f && b.z < 643.0f) break;
 	}
 	return true;
 }
