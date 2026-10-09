@@ -74,6 +74,22 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 
 	viewerFrames = std::move(loaded);
 	viewerRep = item;
+
+	// Predicted ball path from the moment the ball starts moving, for comparing against what really happened
+	viewerPred.clear();
+	if (predictor.Ready())
+	{
+		for (const Frame& f : viewerFrames)
+		{
+			if (std::fabs(f.ballVX) + std::fabs(f.ballVY) + std::fabs(f.ballVZ) > 1.0f)
+			{
+				int ticks = static_cast<int>(viewerFrames.size()) - f.tick;
+				predictor.Predict(BallSample{ f.ballX, f.ballY, f.ballZ, f.ballVX, f.ballVY, f.ballVZ },
+					f.ballAVX, f.ballAVY, f.ballAVZ, ticks, viewerPred);
+				break;
+			}
+		}
+	}
 	viewerPlayhead = 0.0f;
 	viewerPlaying = true;
 	viewerActive = true;
@@ -91,6 +107,7 @@ void RLCoach::ViewerExit()
 	viewerActive = false;
 	viewerPlaying = false;
 	viewerFrames.clear();
+	viewerPred.clear();
 	uiViewerActive = false;
 	uiViewerPlaying = false;
 
@@ -241,6 +258,7 @@ void RLCoach::DrawViewerPaths(CanvasWrapper& canvas)
 		}
 	};
 
+	if (!viewerPred.empty()) DrawPredictedPath(canvas, viewerPred);
 	drawPath([](const Frame& f) { return Vector(f.ballX, f.ballY, f.ballZ); }, 255, 160, 40);
 	drawPath([](const Frame& f) { return Vector(f.carX, f.carY, f.carZ); }, 90, 190, 255);
 
@@ -253,6 +271,32 @@ void RLCoach::DrawViewerPaths(CanvasWrapper& canvas)
 		canvas.SetColor(80, 255, 120, 255);
 		canvas.SetPosition(Vector2F{ s.X - 5.0f, s.Y - 5.0f });
 		canvas.FillBox(Vector2F{ 10.0f, 10.0f });
+	}
+}
+
+// Predicted ball path: dashed white line
+void RLCoach::DrawPredictedPath(CanvasWrapper& canvas, const std::vector<BallSample>& path)
+{
+	if (path.size() < 2) return;
+	CameraWrapper cam = gameWrapper->GetCamera();
+	if (cam.IsNull()) return;
+	Vector camLoc = cam.GetLocation();
+	Vector camFwd = RotatorToVector(cam.GetRotation());
+
+	Vector2F prev{};
+	bool havePrevPt = false;
+	int seg = 0;
+	for (size_t i = 0; i < path.size(); i += 3)
+	{
+		Vector2F s;
+		bool ok = ToScreen(canvas, camLoc, camFwd, Vector(path[i].x, path[i].y, path[i].z), s);
+		if (ok && havePrevPt && (seg++ % 2 == 0))
+		{
+			canvas.SetColor(255, 255, 255, 200);
+			canvas.DrawLine(prev, s, 2.0f);
+		}
+		prev = s;
+		havePrevPt = ok;
 	}
 }
 

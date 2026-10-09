@@ -111,6 +111,18 @@
     <ClCompile Include="RepWriter.cpp" />
     <ClCompile Include="RepLibrary.cpp" />
     <ClCompile Include="RLCoachViewer.cpp" />
+    <ClCompile Include="BallPredictor.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>RS_DONT_LOG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <!-- RocketSim (third_party/RocketSim, MIT license) and its bundled Bullet physics -->
+    <ClCompile Include="third_party\RocketSim\src\**\*.cpp;third_party\RocketSim\libsrc\**\*.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <SDLCheck>false</SDLCheck>
+      <ConformanceMode>false</ConformanceMode>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <PreprocessorDefinitions>RS_DONT_LOG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
     <ClCompile Include="GuiBase.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -135,6 +147,7 @@
     <ClInclude Include="RepData.h" />
     <ClInclude Include="RepWriter.h" />
     <ClInclude Include="RepLibrary.h" />
+    <ClInclude Include="BallPredictor.h" />
     <ClInclude Include="version.h" />
   </ItemGroup>
   <ItemGroup>

@@ -60,6 +60,7 @@ void RLCoach::onLoad()
 	maxRepSeconds = std::make_shared<float>(10.0f);
 	useNumpad = std::make_shared<bool>(false);
 	postRollSeconds = std::make_shared<float>(1.5f);
+	livePrediction = std::make_shared<bool>(false);
 
 	cvarManager->registerCvar("rlcoach_hud", "1", "Show the RL Coach panel", true, true, 0, true, 1)
 		.bindTo(hudEnabled);
@@ -74,6 +75,12 @@ void RLCoach::onLoad()
 
 	cvarManager->registerCvar("rlcoach_postroll_seconds", "1.5", "Keep recording this long after the shot ends, to capture recovery and late goals", true, true, 0, true, 5)
 		.bindTo(postRollSeconds);
+
+	cvarManager->registerCvar("rlcoach_live_prediction", "0", "Draw the predicted ball path while you play", true, true, 0, true, 1)
+		.bindTo(livePrediction);
+
+	CVarWrapper mirror = cvarManager->registerCvar("rlcoach_pred_mirror", "0", "Mirror X when predicting (set from the accuracy test)", true, true, 0, true, 1);
+	mirror.addOnValueChanged([this](std::string, CVarWrapper c) { predictor.mirrorX = c.getBoolValue(); });
 
 	CVarWrapper numpad = cvarManager->registerCvar("rlcoach_rate_numpad", "0", "Rate reps with numpad 1-5 instead of the number row", true, true, 0, true, 1);
 	numpad.bindTo(useNumpad);
@@ -121,7 +128,14 @@ void RLCoach::onLoad()
 	gameWrapper->RegisterDrawable([this](CanvasWrapper canvas) { RenderHud(canvas); });
 
 	LoadRatingKeys();
+	predictor.mirrorX = cvarManager->getCvar("rlcoach_pred_mirror").getBoolValue();
+	StartPredictor();
 	LOG("RL Coach loaded. Reps save to {}", writer->Folder().string());
+}
+
+void RLCoach::StartPredictor()
+{
+	if (writer) predictor.StartInit(writer->Folder() / "collision_meshes");
 }
 
 void RLCoach::onUnload()
@@ -262,6 +276,15 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 		frames.push_back(Capture(car, ball, in));
 		int tick = frames.back().tick;
 		float elapsed = frames.back().t;
+
+		// Once the ball is moving, predict where it's going (only drawn if live prediction is on)
+		if (livePred.empty() && *livePrediction && touchCount == 0 && predictor.Ready())
+		{
+			const Frame& f = frames.back();
+			if (std::fabs(f.ballVX) + std::fabs(f.ballVY) + std::fabs(f.ballVZ) > 1.0f)
+				predictor.Predict(BallSample{ f.ballX, f.ballY, f.ballZ, f.ballVX, f.ballVY, f.ballVZ },
+					f.ballAVX, f.ballAVY, f.ballAVZ, static_cast<int>(kTickRate * 6), livePred);
+		}
 
 		if (goalPending)
 		{
@@ -409,6 +432,7 @@ void RLCoach::FinishRep(const std::string& reason)
 
 	bool ok = writer && writer->SaveRep(frames, s);
 	frames.clear();
+	livePred.clear();
 	pendingEndReason.clear();
 	eventTick = -1;
 	floorBeforeGoal = false;
@@ -558,11 +582,13 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 		add(std::format("Thr {:+.2f}  Str {:+.2f}  P {:+.2f}  Y {:+.2f}  R {:+.2f}",
 			f.throttle, f.steer, f.pitch, f.yaw, f.roll), 180, 220, 255);
 		add(std::format("Jump {}   Boost {}   Slide {}", f.jump ? "X" : "-", f.boost ? "X" : "-", f.handbrake ? "X" : "-"), 180, 220, 255);
-		add("Orange: ball path   Blue: car path   Green: touches", 160, 160, 160);
+		add(viewerPred.empty() ? "Orange: ball   Blue: car   Green: touches"
+			: "Orange: ball   Blue: car   Green: touches   White dashes: predicted ball", 160, 160, 160);
 		if (!viewerStatus.empty()) add(viewerStatus, 255, 200, 0);
 	}
 	else
 	{
+		if (state == RepState::Recording && *livePrediction && !livePred.empty()) DrawPredictedPath(canvas, livePred);
 
 	if (!*recordingEnabled)
 		add("Recording off  (F2 > Plugins > RLCoach)", 150, 150, 150);
@@ -652,6 +678,32 @@ void RLCoach::RenderSettings()
 	ImGui::TextWrapped("Rating keys: 1 Missed, 2 Close, 3 Bad shot but went in, 4 Good shot went in, 5 Great shot went in. Pressing during a rep rates that rep; pressing after rates the last saved rep.");
 	ImGui::TextWrapped("Controller: bind rlcoach_toggle_recording to a button in BakkesMod's Bindings tab to toggle recording.");
 	if (writer) ImGui::TextWrapped("Reps are saved in: %s", writer->Folder().string().c_str());
+
+	ImGui::Separator();
+	ImGui::TextUnformatted("Ball prediction (RocketSim)");
+	ImGui::Text("Status: %s", predictor.Status().c_str());
+	if (!predictor.Ready())
+	{
+		ImGui::TextWrapped("Needs arena files: download RLArenaCollisionDumper.exe, put it in the folder below, "
+			"launch Rocket League without EAC, go into free play on a standard arena (like DFH Stadium), then run the exe. "
+			"It creates a collision_meshes folder next to itself. Then click Load.");
+		if (writer) ImGui::TextWrapped("Folder: %s", writer->Folder().string().c_str());
+		if (ImGui::Button("Load arena files")) gameWrapper->Execute([this](GameWrapper*) { StartPredictor(); });
+	}
+	else
+	{
+		if (ImGui::Button("Run accuracy test on saved reps"))
+		{
+			auto root = writer->Folder();
+			predictor.StartAccuracyTest(root);
+		}
+		std::string ts = predictor.TestStatus();
+		if (!ts.empty()) ImGui::TextWrapped("%s", ts.c_str());
+		bool lp = *livePrediction;
+		if (ImGui::Checkbox("Show predicted ball path while playing", &lp)) setCvar("rlcoach_live_prediction", lp ? 1.0f : 0.0f);
+		bool mir = predictor.mirrorX;
+		if (ImGui::Checkbox("Mirror X (only if the accuracy test says mirrored is better)", &mir)) setCvar("rlcoach_pred_mirror", mir ? 1.0f : 0.0f);
+	}
 
 	ImGui::Separator();
 	if (ImGui::Button("Open rep viewer"))

@@ -87,6 +87,9 @@
     <ClCompile Include="RLCoachViewer.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
+    <ClCompile Include="BallPredictor.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
     <ClCompile Include="GuiBase.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
@@ -150,6 +153,9 @@
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="RepLibrary.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="BallPredictor.h">
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="logging.h">

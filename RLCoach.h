@@ -8,6 +8,7 @@
 #include "RepData.h"
 #include "RepWriter.h"
 #include "RepLibrary.h"
+#include "BallPredictor.h"
 
 #include <atomic>
 #include <chrono>
@@ -29,6 +30,12 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::shared_ptr<float> maxRepSeconds;     // rlcoach_max_rep_seconds
 	std::shared_ptr<bool>  useNumpad;         // rlcoach_rate_numpad (rate with numpad 1-5 instead of number row)
 	std::shared_ptr<float> postRollSeconds;   // rlcoach_postroll_seconds (keep recording after the shot, for recovery)
+	std::shared_ptr<bool>  livePrediction;    // rlcoach_live_prediction (draw the predicted ball path while you play)
+
+	// ---- Ball prediction (RocketSim) ----
+	BallPredictor predictor;
+	std::vector<BallSample> livePred;      // predicted path for the rep in progress
+	std::vector<BallSample> viewerPred;    // predicted path for the rep being watched
 
 	// ---- Rep detection ----
 	enum class RepState { Idle, WaitReset, Armed, Recording };
@@ -117,6 +124,8 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void OverrideViewerInput(CarWrapper& car, void* params); // game thread, before the game reads input
 	void RefreshRepList();                     // render thread
 	void DrawViewerPaths(CanvasWrapper& canvas);
+	void DrawPredictedPath(CanvasWrapper& canvas, const std::vector<BallSample>& path);
+	void StartPredictor();
 
 	// ---- Drawing ----
 	void RenderHud(CanvasWrapper canvas);
