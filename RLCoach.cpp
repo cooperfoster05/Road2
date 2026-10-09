@@ -61,6 +61,7 @@ void RLCoach::onLoad()
 	useNumpad = std::make_shared<bool>(false);
 	postRollSeconds = std::make_shared<float>(1.5f);
 	livePrediction = std::make_shared<bool>(false);
+	postRollMaxSeconds = std::make_shared<float>(4.0f);
 
 	cvarManager->registerCvar("rlcoach_hud", "1", "Show the RL Coach panel", true, true, 0, true, 1)
 		.bindTo(hudEnabled);
@@ -75,6 +76,9 @@ void RLCoach::onLoad()
 
 	cvarManager->registerCvar("rlcoach_postroll_seconds", "1.5", "Keep recording this long after the shot ends, to capture recovery and late goals", true, true, 0, true, 5)
 		.bindTo(postRollSeconds);
+
+	cvarManager->registerCvar("rlcoach_postroll_max_seconds", "4", "After the shot, keep recording until you're back in control, up to this long", true, true, 1, true, 8)
+		.bindTo(postRollMaxSeconds);
 
 	cvarManager->registerCvar("rlcoach_live_prediction", "0", "Draw the predicted ball path while you play", true, true, 0, true, 1)
 		.bindTo(livePrediction);
@@ -255,6 +259,8 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 			eventTick = -1;
 			floorBeforeGoal = false;
 			queuedRating = 0;
+			recoverRun = 0;
+			recovered = false;
 			repStartTime = std::chrono::steady_clock::now();
 			state = RepState::Recording;
 			frames.push_back(Capture(car, ball, in));
@@ -313,11 +319,21 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 			}
 		}
 
-		// Keep recording for the post-roll window so recovery (and late goals) are captured
-		if (!pendingEndReason.empty() && (tick - eventTick) >= static_cast<int>(*postRollSeconds * kTickRate))
+		// After the shot ends, keep recording so late goals and your recovery are captured:
+		// at least the minimum window, then until you're back in control (or the max runs out)
+		if (!pendingEndReason.empty())
 		{
-			FinishRep(pendingEndReason);
-			state = RepState::WaitReset;
+			recoverRun = Segmenter::InControl(frames.back()) ? recoverRun + 1 : 0;
+			if (recoverRun >= 30) recovered = true;
+			int since = tick - eventTick;
+			bool minDone = since >= static_cast<int>(*postRollSeconds * kTickRate);
+			bool maxDone = since >= static_cast<int>(*postRollMaxSeconds * kTickRate);
+			bool needRecovery = touchCount > 0 && !recovered;
+			if ((minDone && !needRecovery) || maxDone)
+			{
+				FinishRep(pendingEndReason);
+				state = RepState::WaitReset;
+			}
 		}
 		break;
 	}
@@ -582,6 +598,13 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 		add(std::format("Thr {:+.2f}  Str {:+.2f}  P {:+.2f}  Y {:+.2f}  R {:+.2f}",
 			f.throttle, f.steer, f.pitch, f.yaw, f.roll), 180, 220, 255);
 		add(std::format("Jump {}   Boost {}   Slide {}", f.jump ? "X" : "-", f.boost ? "X" : "-", f.handbrake ? "X" : "-"), 180, 220, 255);
+		for (const Segment& sg : viewerSegs.segs)
+		{
+			if (i < sg.start || i > sg.end || sg.kind == SegKind::Recovery) continue;
+			add(std::format("Segment: {}{}", Segmenter::Name(sg.kind), sg.touch > 1 ? std::format(" (touch {})", sg.touch) : std::string()), 255, 255, 255);
+		}
+		if (viewerSegs.whiff) add("Whiff: no touch on this rep", 255, 120, 120);
+
 		if (viewerShot.valid)
 		{
 			const ShotAnalysis& s = viewerShot;
@@ -688,7 +711,9 @@ void RLCoach::RenderSettings()
 	if (ImGui::SliderFloat("Max rep length (seconds)", &maxS, 2.0f, 30.0f, "%.0f")) setCvar("rlcoach_max_rep_seconds", maxS);
 
 	float post = *postRollSeconds;
-	if (ImGui::SliderFloat("Keep recording after the shot (seconds)", &post, 0.0f, 5.0f, "%.1f")) setCvar("rlcoach_postroll_seconds", post);
+	if (ImGui::SliderFloat("Keep recording after the shot, at least (seconds)", &post, 0.0f, 5.0f, "%.1f")) setCvar("rlcoach_postroll_seconds", post);
+	float postMax = *postRollMaxSeconds;
+	if (ImGui::SliderFloat("...and until recovered, at most (seconds)", &postMax, 1.0f, 8.0f, "%.1f")) setCvar("rlcoach_postroll_max_seconds", postMax);
 
 	ImGui::Separator();
 	ImGui::Text("Reps saved this session: %d", repsThisSession);

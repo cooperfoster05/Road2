@@ -51,6 +51,9 @@ namespace
 	}
 }
 
+// Older reps (before the index stored it) have no event tick; the segmenter then uses the last frame
+static int ViewerEventTick(const RepListItem& item) { return item.eventTick; }
+
 void RLCoach::ViewerLoad(const RepListItem& item)
 {
 	if (!writer) return;
@@ -76,6 +79,12 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 	viewerRep = item;
 
 	viewerShot = ShotGeometry::Analyze(viewerFrames);
+	viewerSegs = Segmenter::Split(viewerFrames, ViewerEventTick(item));
+	{
+		std::lock_guard<std::mutex> lock(uiSegMutex);
+		uiSegs = viewerSegs.segs;
+		uiSegTotal = static_cast<int>(viewerFrames.size());
+	}
 
 	// Predicted ball path from the moment the ball starts moving, for comparing against what really happened
 	viewerPred.clear();
@@ -110,6 +119,12 @@ void RLCoach::ViewerExit()
 	viewerPlaying = false;
 	viewerFrames.clear();
 	viewerPred.clear();
+	viewerSegs = RepSegments{};
+	{
+		std::lock_guard<std::mutex> lock(uiSegMutex);
+		uiSegs.clear();
+		uiSegTotal = 0;
+	}
 	uiViewerActive = false;
 	uiViewerPlaying = false;
 
@@ -452,6 +467,64 @@ void RLCoach::RenderWindow()
 	int total = uiViewerTotal;
 	int head = static_cast<int>(uiViewerPlayhead.load());
 	int scrub = head;
+	// ---- Segment timeline: click a segment to jump to it ----
+	std::vector<Segment> segs;
+	int segTotal = 0;
+	{
+		std::lock_guard<std::mutex> lock(uiSegMutex);
+		segs = uiSegs;
+		segTotal = uiSegTotal;
+	}
+	if (!segs.empty() && segTotal > 1)
+	{
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		ImVec2 origin = ImGui::GetCursorScreenPos();
+		float width = ImGui::GetContentRegionAvail().x;
+		const float rowH = 22.0f;
+		auto colorFor = [](SegKind k) -> ImU32 {
+			switch (k)
+			{
+			case SegKind::Approach: return IM_COL32(90, 110, 140, 255);
+			case SegKind::Takeoff:  return IM_COL32(70, 150, 220, 255);
+			case SegKind::Flight:   return IM_COL32(60, 120, 200, 255);
+			case SegKind::Contact:  return IM_COL32(80, 220, 120, 255);
+			case SegKind::Result:   return IM_COL32(230, 160, 50, 255);
+			case SegKind::Recovery: return IM_COL32(170, 110, 210, 255);
+			}
+			return IM_COL32(128, 128, 128, 255);
+		};
+		auto xOf = [&](int tick) { return origin.x + width * static_cast<float>(tick) / static_cast<float>(segTotal - 1); };
+
+		// Row 1: the play (approach to result). Row 2: recovery, which overlaps the result in time.
+		for (int si = 0; si < static_cast<int>(segs.size()); si++)
+		{
+			const Segment& sg = segs[si];
+			float y0 = origin.y + (sg.kind == SegKind::Recovery ? rowH + 4.0f : 0.0f);
+			float x0 = xOf(sg.start), x1 = std::max(xOf(sg.end + 1), x0 + 3.0f);
+			dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + rowH), colorFor(sg.kind));
+			dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y0 + rowH), IM_COL32(20, 20, 20, 255));
+			const char* label = Segmenter::Name(sg.kind);
+			ImVec2 ts = ImGui::CalcTextSize(label);
+			if (x1 - x0 > ts.x + 6.0f)
+				dl->AddText(ImVec2(x0 + 4.0f, y0 + (rowH - ts.y) * 0.5f), IM_COL32(255, 255, 255, 255), label);
+
+			ImGui::SetCursorScreenPos(ImVec2(x0, y0));
+			ImGui::PushID(si);  // stable ID so a click's press and release land on the same button
+			if (ImGui::InvisibleButton("seg", ImVec2(x1 - x0, rowH)))
+			{
+				float target = static_cast<float>(sg.start);
+				onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("%s: %.2fs to %.2fs (click to jump here)", label, sg.start / 120.0f, (sg.end + 1) / 120.0f);
+			ImGui::PopID();
+		}
+		// Playhead
+		float px = xOf(static_cast<int>(uiViewerPlayhead.load()));
+		dl->AddLine(ImVec2(px, origin.y - 2.0f), ImVec2(px, origin.y + 2 * rowH + 6.0f), IM_COL32(255, 255, 255, 255), 2.0f);
+		ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 2 * rowH + 10.0f));
+	}
+
 	ImGui::PushItemWidth(-1);
 	if (ImGui::SliderInt("##scrub", &scrub, 0, total > 0 ? total - 1 : 0,
 		std::format("{:.2f}s / {:.2f}s", scrub / 120.0f, total / 120.0f).c_str()))

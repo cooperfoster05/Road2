@@ -87,6 +87,9 @@
     <ClCompile Include="ShotGeometry.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
+    <ClCompile Include="Segmenter.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
     <ClCompile Include="RLCoachViewer.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
@@ -159,6 +162,9 @@
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="ShotGeometry.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="Segmenter.h">
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="BallPredictor.h">

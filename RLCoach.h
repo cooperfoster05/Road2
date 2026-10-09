@@ -10,6 +10,8 @@
 #include "RepLibrary.h"
 #include "BallPredictor.h"
 #include "ShotGeometry.h"
+#include "Segmenter.h"
+#include <mutex>
 
 #include <atomic>
 #include <chrono>
@@ -30,7 +32,8 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::shared_ptr<bool>  recordingEnabled;  // rlcoach_recording (data farming on/off, starts off every session)
 	std::shared_ptr<float> maxRepSeconds;     // rlcoach_max_rep_seconds
 	std::shared_ptr<bool>  useNumpad;         // rlcoach_rate_numpad (rate with numpad 1-5 instead of number row)
-	std::shared_ptr<float> postRollSeconds;   // rlcoach_postroll_seconds (keep recording after the shot, for recovery)
+	std::shared_ptr<float> postRollSeconds;   // rlcoach_postroll_seconds (minimum recording after the shot, catches late goals)
+	std::shared_ptr<float> postRollMaxSeconds;// rlcoach_postroll_max_seconds (keep going until you recover, up to this long)
 	std::shared_ptr<bool>  livePrediction;    // rlcoach_live_prediction (draw the predicted ball path while you play)
 
 	// ---- Ball prediction (RocketSim) ----
@@ -38,6 +41,12 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::vector<BallSample> livePred;      // predicted path for the rep in progress
 	std::vector<BallSample> viewerPred;    // predicted path for the rep being watched
 	ShotAnalysis viewerShot;               // shot math for the rep being watched
+	RepSegments viewerSegs;                // segments of the rep being watched
+
+	// Copy of the segments for the viewer window (render thread)
+	std::mutex uiSegMutex;
+	std::vector<Segment> uiSegs;
+	int uiSegTotal = 0;
 
 	// ---- Rep detection ----
 	enum class RepState { Idle, WaitReset, Armed, Recording };
@@ -58,6 +67,8 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	Vector armedCarLoc, armedBallLoc;
 	int   armedTicks = 0;
 	int   queuedRating = 0;         // rating pressed during a rep, applied when it saves
+	int   recoverRun = 0;           // ticks in a row the car has been back in control after the shot
+	bool  recovered = false;
 
 	// ---- Saving and rating ----
 	std::unique_ptr<RepWriter> writer;
