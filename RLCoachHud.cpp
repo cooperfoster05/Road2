@@ -167,7 +167,8 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 			unsigned char r, g, b;
 			OverallRgb(viewerGrade.overall, r, g, b);
 			add(std::format("{}  {}", viewerGrade.overall, Grader::OverallName(viewerGrade.overall)), r, g, b, false, 1.15f);
-			if (viewerShot.valid && viewerShot.type == ShotType::Ground) add("Graded as a ground shot", 150, 160, 178, true);
+			if (viewerShot.valid && viewerShot.type != ShotType::Aerial)
+				add(std::format("Graded as a {}", viewerShot.type == ShotType::Ground ? "ground shot" : "double tap"), 150, 160, 178, true);
 			add(viewerGrade.overallWhy, 150, 160, 178, true);
 		}
 		if (viewerGrade.biggestFix >= 0)
@@ -364,6 +365,12 @@ void RLCoach::RegisterLookCvars()
 	cvarManager->registerCvar("rlcoach_pad_roll_right", "0", "Controller button for air roll right", true, true, 0, true, PB_Count - 1).bindTo(padRollRight);
 
 	cvarManager->registerCvar("rlcoach_target_hitbox", "1", "Target car outline: 0 off, 1 for your touch, 2 for the earliest intercept", true, true, 0, true, 2).bindTo(targetHitbox);
+
+	showUngraded = std::make_shared<bool>(false);
+	cvarManager->registerCvar("rlcoach_viewer_show_ungraded", "0", "Rep viewer: also list reps with no grade (bailed or reset)", true, true, 0, true, 1).bindTo(showUngraded);
+
+	viewerRange = std::make_shared<int>(0);
+	cvarManager->registerCvar("rlcoach_viewer_range", "0", "Rep viewer list: 0 today, 1 last 7 days, 2 starred, 3 all", true, true, 0, true, 3).bindTo(viewerRange);
 
 	cvarManager->registerNotifier("rlcoach_hud_toggle_compact", [this](std::vector<std::string>) {
 		cvarManager->getCvar("rlcoach_hud_compact").setValue(*hudCompact ? 0 : 1);

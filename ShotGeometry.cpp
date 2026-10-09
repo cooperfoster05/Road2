@@ -228,11 +228,55 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 	// Hit from the ground, or a low ball reached with a small jump or flip = ground shot; otherwise an aerial
 	s.type = (s.carGrounded || s.ballCenter.z < kGroundShotMaxZ) ? ShotType::Ground : ShotType::Aerial;
 
+	// Double tap: the ball came off the backboard and you hit it before it touched the floor
+	int bb = LastBackboard(fr, s.startTick, k - 1);
+	if (bb >= 0)
+	{
+		bool floorBetween = false;
+		for (int i = bb + 1; i < k; i++) if (fr[i].ballZ < 110.0f && fr[i - 1].ballZ >= 110.0f) { floorBetween = true; break; }
+		int setup = -1;
+		for (int i = bb; i >= std::max(1, s.startTick); i--)
+			if (fr[i].touch && !fr[i - 1].touch) { setup = i; break; }
+		// A double tap is your own: you sent it to the backboard, then hit it again before it landed.
+		// (A pack that throws the ball off the backboard is graded like any other shot.)
+		if (!floorBetween && setup >= 0)
+		{
+			s.doubleTap = true;
+			s.type = ShotType::DoubleTap;
+			s.backboardTick = bb;
+			s.backboardZ = fr[bb].ballZ;
+			s.backboardX = fr[bb].ballX;
+			s.setupTouchTick = setup;
+		}
+	}
+
 	s.valid = true;
 	return s;
 }
 
 const char* ShotGeometry::TypeName(ShotType t)
 {
-	return t == ShotType::Ground ? "Ground shot" : "Aerial";
+	switch (t)
+	{
+	case ShotType::Ground:    return "Ground shot";
+	case ShotType::DoubleTap: return "Double tap";
+	default:                  return "Aerial";
+	}
+}
+
+bool ShotGeometry::IsBackboardHit(const Frame& before, const Frame& after)
+{
+	// Compared two ticks apart: the bounce often lands mid-tick, leaving one in-between frame with a tiny speed.
+	// Airborne only (not a rolling ball hitting the wall beside the goal), and not inside the goal mouth.
+	bool inGoalMouth = std::fabs(after.ballX) < kGoalHalfW && after.ballZ < kGoalH;
+	return std::fabs(before.ballY) > 4800.0f && std::fabs(after.ballY) > 4800.0f && after.ballZ > 200.0f && !inGoalMouth
+		&& !before.touch && !after.touch && std::fabs(before.ballVY) > 150.0f && before.ballVY * after.ballVY < 0.0f;
+}
+
+int ShotGeometry::LastBackboard(const std::vector<Frame>& fr, int from, int to)
+{
+	int found = -1;
+	for (int i = std::max(from, 1); i <= to && i + 1 < static_cast<int>(fr.size()); i++)
+		if (IsBackboardHit(fr[i - 1], fr[i + 1]) && !(found == i - 1)) found = i;
+	return found;
 }

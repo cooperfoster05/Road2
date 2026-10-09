@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <ctime>
 #include <format>
 #include <functional>
 
@@ -556,6 +557,7 @@ void RLCoach::RenderWindow()
 			auto ag = uiAutoGrades.find(cur->file);
 			if (ag != uiAutoGrades.end() && ag->second.overall > 0) Pill(std::format("auto {}", ag->second.overall), GradeColor(ag->second.overall));
 			if (ag != uiAutoGrades.end() && ag->second.shotType == 1) { ImGui::SameLine(); Pill("ground shot", kOk); }
+			if (ag != uiAutoGrades.end() && ag->second.shotType == 2) { ImGui::SameLine(); Pill("double tap", kGold); }
 			if (cur->rating > 0) { ImGui::SameLine(); Pill(std::format("you {}", cur->rating), GradeColor(cur->rating)); }
 			ImGui::SameLine();
 			bool kept = cur->kept;
@@ -630,6 +632,8 @@ void RLCoach::RenderWindow()
 				case SegKind::Contact:  return IM_COL32(46, 150, 92, alpha);
 				case SegKind::Result:   return IM_COL32(170, 116, 40, alpha);
 				case SegKind::Recovery: return IM_COL32(120, 82, 160, alpha);
+				case SegKind::Setup:    return IM_COL32(40, 130, 140, alpha);
+				case SegKind::Read:     return IM_COL32(150, 100, 60, alpha);
 				}
 				return IM_COL32(100, 100, 100, alpha);
 			};
@@ -749,6 +753,64 @@ void RLCoach::RenderWindow()
 	Heading("REPS");
 	if (gradeThreadBusy) { ImGui::SameLine(); ImGui::TextDisabled("grading..."); }
 
+	// Hide reps with no grade at all (no rating from you, no auto grade): bailed and reset reps, mostly
+	{
+		bool showAll = *showUngraded;
+		ImGui::SameLine();
+		if (ImGui::Checkbox("Show ungraded", &showAll))
+		{
+			float v = showAll ? 1.0f : 0.0f;
+			gameWrapper->Execute([this, v](GameWrapper*) { cvarManager->getCvar("rlcoach_viewer_show_ungraded").setValue(v); });
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reps you didn't rate that also have no auto grade (bailed or reset).\nThey stay saved; this only hides them from the list.");
+	}
+	// Which reps: today (default), the last 7 days, starred, or everything
+	{
+		int range = *viewerRange;
+		const char* ranges[4] = { "Today", "Last 7 days", "Starred", "All" };
+		ImGui::SameLine();
+		ImGui::PushItemWidth(110);
+		if (ImGui::Combo("##range", &range, ranges, 4))
+		{
+			float v = static_cast<float>(range);
+			gameWrapper->Execute([this, v](GameWrapper*) { cvarManager->getCvar("rlcoach_viewer_range").setValue(v); });
+		}
+		ImGui::PopItemWidth();
+	}
+	auto dayString = [](int daysAgo) {
+		std::time_t t = std::time(nullptr) - static_cast<std::time_t>(daysAgo) * 86400;
+		std::tm local{};
+		localtime_s(&local, &t);
+		char buf[16];
+		std::strftime(buf, sizeof(buf), "%Y-%m-%d", &local);
+		return std::string(buf);
+	};
+	const std::string today = dayString(0), weekStart = dayString(6);
+	const int range = *viewerRange;
+
+	std::vector<int> shown;
+	shown.reserve(repList.size());
+	int hiddenUngraded = 0;
+	for (int i = 0; i < static_cast<int>(repList.size()); i++)
+	{
+		const RepListItem& it = repList[i];
+		bool watching = it.file == watchingFile;
+		std::string day = it.savedAt.substr(0, 10);
+		bool inRange = range == 3 || (range == 2 && it.kept) || (range == 1 && day >= weekStart) || (range == 0 && day == today);
+		if (!inRange && !watching) continue;
+		auto ag = uiAutoGrades.find(it.file);
+		bool graded = it.rating > 0 || (ag != uiAutoGrades.end() && ag->second.overall > 0);
+		bool pending = ag == uiAutoGrades.end() && it.hasRecording && it.endReason != "reset";   // still being graded
+		if (*showUngraded || graded || pending || watching) shown.push_back(i);
+		else hiddenUngraded++;
+	}
+	ImGui::SameLine();
+	if (hiddenUngraded > 0) ImGui::TextDisabled("%d shown, %d ungraded hidden", static_cast<int>(shown.size()), hiddenUngraded);
+	else ImGui::TextDisabled("%d shown", static_cast<int>(shown.size()));
+	if (shown.empty())
+		ImGui::TextDisabled(range == 0 ? "No reps today yet. Switch to \"Last 7 days\" or \"All\" to see older ones."
+			: range == 2 ? "No starred reps. Star a rep to keep it forever and find it here." : "No reps to show.");
+
 	// A small 5-point star; filled when kept
 	auto drawStar = [](ImDrawList* dl, ImVec2 c, float r, bool filled, ImU32 col) {
 		ImVec2 pts[10];
@@ -772,9 +834,16 @@ void RLCoach::RenderWindow()
 	for (const char* h : heads) { ImGui::TextDisabled("%s", h); ImGui::NextColumn(); }
 	ImGui::Separator();
 	std::string toggleKeep;
-	for (int i = 0; i < static_cast<int>(repList.size()); i++)
+	// Only draw the rows that are on screen. Drawing all of them (1,500+) overflows ImGui's vertex buffer,
+	// which shows up as smeared, garbled shapes. Every row is one fixed height so the clipper can skip the rest.
+	const float rowH = ImGui::GetTextLineHeightWithSpacing() + 2.0f;
+	ImGuiListClipper clipper(static_cast<int>(shown.size()), rowH);
+	while (clipper.Step())
+	for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++)
 	{
+		const int i = shown[row];   // index into repList
 		const RepListItem& it = repList[i];
+		float rowTop = ImGui::GetCursorPosY();
 		bool isWatching = uiViewerActive && it.file == watchingFile;
 
 		// Keep star (only reps that still have a recording can be kept)
@@ -829,8 +898,10 @@ void RLCoach::RenderWindow()
 		{
 			Pill(std::to_string(ag->second.overall), GradeColor(ag->second.overall), 26.0f);
 			if (ag->second.shotType == 1) { ImGui::SameLine(); ImGui::TextDisabled("ground"); }
+			if (ag->second.shotType == 2) { ImGui::SameLine(); ImGui::TextDisabled("dbl tap"); }
 		}
 		ImGui::NextColumn();
+		if (ImGui::GetCursorPosY() < rowTop + rowH) ImGui::SetCursorPosY(rowTop + rowH);   // keep every row the same height
 	}
 	ImGui::Columns(1);
 	ImGui::EndChild();
@@ -843,7 +914,7 @@ void RLCoach::RenderWindow()
 		onGame([this, pick]() { ViewerLoad(pick); });
 	}
 	const RepListItem* latest = nullptr;
-	for (const RepListItem& it : repList) if (it.hasRecording) { latest = &it; break; }
+	for (int i : shown) if (repList[i].hasRecording) { latest = &repList[i]; break; }
 	if (latest)
 	{
 		if (canWatchSelected) ImGui::SameLine();

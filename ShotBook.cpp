@@ -28,23 +28,34 @@ void ShotBook::Update(const std::filesystem::path& root)
 
 	if (!loadedCache)
 	{
-		std::ifstream in(cachePath);
-		std::string line;
-		std::getline(in, line); // header
-		while (std::getline(in, line))
+		bool oldFormat = false;
 		{
-			if (!line.empty() && line.back() == '\r') line.pop_back();
-			auto p = Split(line);
-			if (p.size() < 5) continue;
-			Entry e{ p[1], p[2] == "1", std::strtof(p[3].c_str(), nullptr), std::strtof(p[4].c_str(), nullptr) };
-			entries[p[0]] = e;
+			std::ifstream in(cachePath);
+			std::string line;
+			std::getline(in, line); // header
+			while (std::getline(in, line))
+			{
+				if (!line.empty() && line.back() == '\r') line.pop_back();
+				auto p = Split(line);
+				if (p.size() < 6) { oldFormat = true; continue; }   // from before double taps were tracked: rescanned below
+				Entry e{ p[1], p[2] == "1", std::strtof(p[3].c_str(), nullptr), std::strtof(p[4].c_str(), nullptr), p[5] == "1" };
+				entries[p[0]] = e;
+			}
+		}
+		if (oldFormat)
+		{
+			// Start the file over with just the up-to-date lines
+			std::ofstream fresh(cachePath, std::ios::trunc);
+			fresh << "file,shot_key,goal,touch_sec,jump_sec,double_tap\n";
+			for (const auto& [file, e] : entries)
+				fresh << file << ',' << e.shot << ',' << (e.goal ? 1 : 0) << ',' << e.touchSec << ',' << e.jumpSec << ',' << (e.doubleTap ? 1 : 0) << '\n';
 		}
 		loadedCache = true;
 	}
 
 	bool isNew = !std::filesystem::exists(cachePath);
 	std::ofstream out(cachePath, std::ios::app);
-	if (isNew) out << "file,shot_key,goal,touch_sec,jump_sec\n";
+	if (isNew) out << "file,shot_key,goal,touch_sec,jump_sec,double_tap\n";
 
 	for (const RepListItem& item : RepLibrary::ListReps(root))
 	{
@@ -58,6 +69,7 @@ void ShotBook::Update(const std::filesystem::path& root)
 			ShotAnalysis sa = ShotGeometry::Analyze(frames);
 			if (sa.valid)
 			{
+				e.doubleTap = sa.doubleTap;
 				e.touchSec = (sa.touchTick - sa.startTick) / 120.0f;
 				// The jump that led into the shot touch
 				RepSegments segs = Segmenter::Split(frames, item.eventTick);
@@ -66,7 +78,7 @@ void ShotBook::Update(const std::filesystem::path& root)
 			}
 		}
 		entries[item.file] = e;
-		if (out) out << item.file << ',' << e.shot << ',' << (e.goal ? 1 : 0) << ',' << e.touchSec << ',' << e.jumpSec << '\n';
+		if (out) out << item.file << ',' << e.shot << ',' << (e.goal ? 1 : 0) << ',' << e.touchSec << ',' << e.jumpSec << ',' << (e.doubleTap ? 1 : 0) << '\n';
 	}
 }
 
@@ -85,14 +97,14 @@ bool ShotBook::TryGet(const std::string& shotKey, ShotReference& out)
 }
 
 bool ShotBook::TryAdd(const std::filesystem::path& root, const std::string& file, const std::string& shotKey,
-	bool goal, float touchSec, float jumpSec)
+	bool goal, float touchSec, float jumpSec, bool doubleTap)
 {
 	std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
 	if (!lock.owns_lock() || !loadedCache) return false;   // the next full scan will pick it up
 	if (entries.count(file)) return true;
-	entries[file] = Entry{ shotKey, goal, touchSec, jumpSec };
+	entries[file] = Entry{ shotKey, goal, touchSec, jumpSec, doubleTap };
 	std::ofstream out(root / "shot_cache.csv", std::ios::app);
-	if (out) out << file << ',' << shotKey << ',' << (goal ? 1 : 0) << ',' << touchSec << ',' << jumpSec << '\n';
+	if (out) out << file << ',' << shotKey << ',' << (goal ? 1 : 0) << ',' << touchSec << ',' << jumpSec << ',' << (doubleTap ? 1 : 0) << '\n';
 	return true;
 }
 
@@ -118,6 +130,7 @@ ShotReference ShotBook::Lookup(const std::string& shotKey)
 	{
 		if (e.shot != shotKey) continue;
 		r.attempts++;
+		if (e.doubleTap) r.doubleTaps++;
 		if (!e.goal || e.touchSec < 0) continue;
 		r.goals++;
 		if (!r.valid || e.touchSec < r.touchSec)

@@ -350,7 +350,11 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 				{
 					const BallSample& last = path.back();
 					bool goes_in = std::fabs(last.y) > 5215.0f && std::fabs(last.x) < 893.0f && last.z < 643.0f;
-					if (!goes_in) { ended = "miss"; eventTick = tick; }
+					// Heading for the backboard = a double tap setup, not a miss
+					bool toBackboard = false;
+					for (const BallSample& b : path)
+						if (std::fabs(b.y) > 4900.0f && b.z > 200.0f && !(std::fabs(b.x) < 893.0f && b.z < 643.0f)) { toBackboard = true; break; }
+					if (!goes_in && !toBackboard) { ended = "miss"; eventTick = tick; }
 				}
 			}
 			if (!ended.empty())
@@ -512,7 +516,7 @@ void RLCoach::GradeFinishedRep(const RepSummary& s)
 		float jumpSec = -1.0f;
 		for (const Segment& sg : segs.segs)
 			if (sg.kind == SegKind::Takeoff && sg.start < shot.touchTick) jumpSec = (sg.start - shot.startTick) / 120.0f;
-		shotBook.TryAdd(writer->Folder(), s.fileName, s.shotKey, s.goal, (shot.touchTick - shot.startTick) / 120.0f, jumpSec);
+		shotBook.TryAdd(writer->Folder(), s.fileName, s.shotKey, s.goal, (shot.touchTick - shot.startTick) / 120.0f, jumpSec, shot.doubleTap);
 	}
 
 	auto gradeRgb = [](Grade gr, unsigned char& r, unsigned char& gg, unsigned char& b) {
@@ -528,7 +532,7 @@ void RLCoach::GradeFinishedRep(const RepSummary& s)
 	unsigned char orr, og, ob;
 	OverallRgb(g.overall, orr, og, ob);
 	lastRepGradeLines.push_back({ { { std::format("GRADE {}: {}  ({}){}", g.overall, Grader::OverallName(g.overall), g.overallWhy,
-		shot.valid && shot.type == ShotType::Ground ? "  [ground shot]" : ""), orr, og, ob } } });
+		!shot.valid || shot.type == ShotType::Aerial ? "" : shot.type == ShotType::Ground ? "  [ground shot]" : "  [double tap]"), orr, og, ob } } });
 
 	// One line of segment grades, each grade in its own color (same colors as the rep viewer)
 	PanelGradeLine chips;

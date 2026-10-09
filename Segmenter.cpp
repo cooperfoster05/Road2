@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Segmenter.h"
+#include "ShotGeometry.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +24,8 @@ const char* Segmenter::Name(SegKind k)
 	case SegKind::Contact:  return "Contact";
 	case SegKind::Result:   return "Result";
 	case SegKind::Recovery: return "Recovery";
+	case SegKind::Setup:    return "Setup touch";
+	case SegKind::Read:     return "Backboard read";
 	}
 	return "";
 }
@@ -118,6 +121,28 @@ RepSegments Segmenter::Split(const std::vector<Frame>& fr, int eventTick)
 		cursor = b + 1;
 	}
 
+	// Double tap: the touch that sent the ball to the backboard is the setup, and the stretch after the
+	// backboard (before your final touch) is the read
+	if (r.touchTicks.size() >= 2)
+	{
+		int bb = ShotGeometry::LastBackboard(fr, r.startTick, r.lastTouch - 1);
+		bool floorBetween = false;
+		if (bb >= 0)
+			for (int i = bb + 1; i < r.lastTouch; i++) if (fr[i].ballZ < 110.0f && fr[i - 1].ballZ >= 110.0f) { floorBetween = true; break; }
+		if (bb >= 0 && !floorBetween)
+		{
+			const int shotTouch = static_cast<int>(r.touchTicks.size());
+			int setupTouch = 0;
+			for (size_t t = 0; t < r.touchTicks.size(); t++) if (r.touchTicks[t] <= bb) setupTouch = static_cast<int>(t) + 1;
+			if (setupTouch > 0 && setupTouch < shotTouch)
+				for (Segment& sg : r.segs)
+				{
+					if (sg.kind == SegKind::Contact && sg.touch == setupTouch) sg.kind = SegKind::Setup;
+					if (sg.touch == shotTouch && (sg.kind == SegKind::Flight || sg.kind == SegKind::Approach) && sg.end >= bb) sg.kind = SegKind::Read;
+				}
+		}
+	}
+
 	// After the last touch: result runs to the end of the shot, recovery until back in control
 	int after = r.lastTouch + kContactAfter + 1;
 	add(SegKind::Result, after, std::max(after, eventEnd));
@@ -161,7 +186,14 @@ std::string ShotEndTracker::Update(const Frame& f, bool hadPrev, float prevBallZ
 
 	// Before any touch: only a whiff in the air ends it (ball lands while you're up in the air going for it).
 	// A bouncing ball with you still on or near the floor is normal in ground packs.
-	bool aerialPlay = touches > 0 ? !groundTouch : (carLeftFloor && f.carZ > 250.0f);
+	// Off the backboard (a double tap, or a pack that throws it there): the play goes on until the ball lands
+	if (f.touch) offBackboard = false;
+	if (framesSeen >= 2 && ShotGeometry::IsBackboardHit(prev2, f)) offBackboard = true;
+	prev2 = prev1;
+	prev1 = f;
+	framesSeen++;
+
+	bool aerialPlay = offBackboard || (touches > 0 ? !groundTouch : (carLeftFloor && f.carZ > 250.0f));
 	bool floorHit = hadPrev && framesSoFar > 30 && f.ballZ < kFloorZ && prevBallZ >= kFloorZ;
 	if (aerialPlay && floorHit)
 	{
@@ -169,7 +201,7 @@ std::string ShotEndTracker::Update(const Frame& f, bool hadPrev, float prevBallZ
 		return "floor";
 	}
 
-	if (touches > 0 && groundTouch && goalSign != 0)
+	if (touches > 0 && groundTouch && goalSign != 0 && !offBackboard)
 	{
 		awayRun = f.ballVY * goalSign < kTowardSpeed ? awayRun + 1 : 0;
 		if (awayRun >= kAwayTicks)

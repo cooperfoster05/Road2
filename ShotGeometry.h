@@ -13,7 +13,7 @@ struct V3
 };
 
 // Which grader a rep goes to, decided from the shot touch
-enum class ShotType { Aerial = 0, Ground = 1 };
+enum class ShotType { Aerial = 0, Ground = 1, DoubleTap = 2 };
 
 struct ShotAnalysis
 {
@@ -52,6 +52,13 @@ struct ShotAnalysis
 	bool  dipsToFloor = false;    // on its current path the ball hits the floor before the goal line
 	float cornerDist = 0;         // distance from the nearest top corner of the goal (ball-center units)
 
+	// Double taps: the ball came off the backboard (no floor bounce) right before your final touch
+	bool  doubleTap = false;
+	int   backboardTick = -1;     // when it hit the backboard
+	float backboardZ = 0;         // how high (ball center)
+	float backboardX = 0;         // how far from the middle (+/- sideways)
+	int   setupTouchTick = -1;    // your touch that sent it there
+
 	// Your car at the touch
 	bool  carGrounded = false;    // wheels on the ground when you hit it
 	float carSpeed = 0;           // car speed into the touch
@@ -61,5 +68,9 @@ struct ShotAnalysis
 namespace ShotGeometry
 {
 	const char* TypeName(ShotType t);
+
+	// Ball bouncing off the back wall (outside the goal mouth) in ticks [from, to]: the last such tick, or -1
+	int LastBackboard(const std::vector<Frame>& frames, int from, int to);
+	bool IsBackboardHit(const Frame& before, const Frame& after);   // frames two ticks apart
 	ShotAnalysis Analyze(const std::vector<Frame>& frames);
 }

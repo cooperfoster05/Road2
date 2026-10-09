@@ -6,7 +6,9 @@
 #include <string>
 #include <vector>
 
-enum class SegKind { Approach, Takeoff, Flight, Contact, Result, Recovery };
+// Setup and Read only appear in double taps: the touch that sends the ball to the backboard, and the time
+// from there until your final touch
+enum class SegKind { Approach, Takeoff, Flight, Contact, Result, Recovery, Setup, Read };
 
 struct Segment
 {
@@ -60,5 +62,8 @@ private:
 	int  lastTouchFrame = -1000;
 	int  goalSign = 0;           // which goal the ground shot was hit toward (+1 / -1), 0 = not known yet
 	int  awayRun = 0;            // ticks in a row the ball hasn't been heading toward that goal
+	bool offBackboard = false;   // came off the backboard since the last touch: in play until it lands
+	int  framesSeen = 0;
+	Frame prev1, prev2;          // the last two frames (backboard bounces are checked two ticks apart)
 };
 

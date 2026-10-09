@@ -29,7 +29,30 @@ namespace
 	constexpr float kGroundGoodZ = 360.0f;     // ball center at the goal line: below = low shot (3)
 	constexpr float kGroundGreatZ = 500.0f;    // at or above = top shelf (5)
 	constexpr float kGroundSlow = 2000.0f;     // slower than this = a 3 whatever the height (not in the data yet)
-	const Cutoffs& For(ShotType t) { return t == ShotType::Ground ? kGround : kAerial; }
+	// Double taps: only closeMiss is used (goals are graded by height, below). Tuned on Oct 9 double-tap reps:
+	// a miss within 245 was a 2; height in the net split 3s (all under 250) from 4s (all over 410).
+	constexpr Cutoffs kDoubleTap{ 245.0f, 350.0f, 2800.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
+	const Cutoffs& For(ShotType t) { return t == ShotType::Ground ? kGround : t == ShotType::DoubleTap ? kDoubleTap : kAerial; }
+
+	constexpr float kDtGoodZ = 360.0f;      // double tap goal at/above this height at the line = a 4
+	constexpr float kDtReadFast = 2600.0f;  // "hard" in the description
+	// A 5 (none in the data yet): high, hard and accurate
+	constexpr float kDtGreatZ = 550.0f, kDtGreatSpeed = 2800.0f, kDtGreatAim = 2.0f;
+
+	// First-pass setup and read grades for double taps (refine once there are more rated double taps)
+	Grade FromBackboardSpot(float z, float absX)
+	{
+		if (z >= 500.0f && z <= 1300.0f && absX <= 1600.0f) return Grade::Clean;
+		if (z >= 300.0f && z <= 1700.0f && absX <= 2400.0f) return Grade::Solid;
+		return Grade::Sloppy;
+	}
+	Grade FromReadTime(float sec)
+	{
+		if (sec <= 0.35f) return Grade::Clean;
+		if (sec <= 0.70f) return Grade::Solid;
+		if (sec <= 1.10f) return Grade::Sloppy;
+		return Grade::Costly;
+	}
 
 	// Ground shots: how well your driving line lined up with the push the ball needed
 	Grade FromApproachAngle(float deg)
@@ -175,6 +198,18 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		gradeSeg(approachIdx, grade, why);
 	}
 
+	// ---- Double tap: the setup touch into the backboard, and the read off it ----
+	if (shot.type == ShotType::DoubleTap)
+	{
+		int setupIdx = findSeg(SegKind::Setup, 0);
+		float ax = std::fabs(shot.backboardX);
+		gradeSeg(setupIdx, FromBackboardSpot(shot.backboardZ, ax),
+			std::format("Sent it to the backboard {:.0f} high, {:.0f} from the middle", shot.backboardZ, ax));
+		int readIdx = findSeg(SegKind::Read, shotTouch);
+		float readSec = (shot.touchTick - shot.backboardTick) / 120.0f;
+		gradeSeg(readIdx, FromReadTime(readSec), std::format("Hit it {:.2f}s after it came off the backboard", readSec));
+	}
+
 	// ---- Contact: aim error, explained by where you hit the ball ----
 	int contactIdx = findSeg(SegKind::Contact, shotTouch);
 	{
@@ -192,12 +227,27 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 	bool fast = shot.shotSpeed >= C.fast;
 	if (!wentIn)
 	{
-		bool close = shot.reachesGoalLine && shot.missDist <= C.closeMiss;
+		bool close = shot.reachesGoalLine && shot.missDist <= C.closeMiss
+			&& (shot.type != ShotType::DoubleTap || shot.missDist > 0.0f);
 		std::string why = !shot.reachesGoalLine ? "Never reached the goal line"
 			: shot.missDist <= 0 ? "Looked on target but didn't go in"
 			: std::format("Missed {} by {:.0f}", shot.missDir, shot.missDist);
+		// In a double-tap drill: set up the backboard but never got the second touch
+		if (ref.DoubleTapDrill() && shot.type != ShotType::DoubleTap
+			&& ShotGeometry::LastBackboard(fr, shot.touchTick + 1, static_cast<int>(fr.size()) - 2) >= 0)
+			why = "Got it to the backboard but no second touch";
 		gradeSeg(resultIdx, close ? Grade::Sloppy : Grade::Costly, why);
 		g.overall = close ? 2 : 1;
+		g.overallWhy = why;
+	}
+	else if (shot.type == ShotType::DoubleTap)
+	{
+		bool high = shot.reachesGoalLine && shot.crossZ >= kDtGoodZ;
+		bool great = shot.reachesGoalLine && shot.crossZ >= kDtGreatZ && shot.shotSpeed >= kDtGreatSpeed && shot.aimErrDeg <= kDtGreatAim;
+		g.overall = high ? (great ? 5 : 4) : 3;
+		std::string why = std::format("{} goal, {}, {} ({})", "Double tap",
+			high ? "high in the net" : "low in the net", shot.shotSpeed >= kDtReadFast ? "hard" : "soft", Units::Speed(shot.shotSpeed));
+		gradeSeg(resultIdx, g.overall >= 5 ? Grade::Clean : g.overall == 4 ? Grade::Solid : Grade::Sloppy, why);
 		g.overallWhy = why;
 	}
 	else if (shot.type == ShotType::Ground)

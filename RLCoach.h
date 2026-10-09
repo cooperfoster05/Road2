@@ -212,6 +212,8 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	bool  repListLoaded = false;
 	int   selectedRep = -1;
 	bool  uiLoop = true;
+	std::shared_ptr<bool> showUngraded;   // rlcoach_viewer_show_ungraded
+	std::shared_ptr<int>  viewerRange;    // rlcoach_viewer_range: 0 today, 1 last 7 days, 2 starred, 3 all
 
 	void ViewerLoad(const RepListItem& item);  // game thread
 	void ViewerExit();                         // game thread
