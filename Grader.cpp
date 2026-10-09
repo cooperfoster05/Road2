@@ -113,7 +113,10 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 			std::string why = std::fabs(jumpDiff) <= 0.10f
 				? std::format("Jumped on time ({:+.2f}s vs your fastest goal on this shot)", jumpDiff)
 				: std::format("Jumped {:.2f}s {} than on your fastest goal on this shot", std::fabs(jumpDiff), jumpDiff > 0 ? "later" : "earlier");
-			gradeSeg(takeoffIdx, FromDelay(jumpDiff), why);
+			if (vsBest < 0.0f)
+				gradeSeg(takeoffIdx, Grade::Clean, std::format("Fastest touch yet on this shot ({:.2f}s quicker than your old best)", -vsBest));
+			else
+				gradeSeg(takeoffIdx, FromDelay(jumpDiff), why);
 
 			if (flightIdx >= 0)
 			{

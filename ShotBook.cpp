@@ -73,6 +73,31 @@ void ShotBook::Update(const std::filesystem::path& root)
 ShotReference ShotBook::Get(const std::string& shotKey)
 {
 	std::lock_guard<std::mutex> lock(mtx);
+	return Lookup(shotKey);
+}
+
+bool ShotBook::TryGet(const std::string& shotKey, ShotReference& out)
+{
+	std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
+	if (!lock.owns_lock() || !loadedCache) return false;
+	out = Lookup(shotKey);
+	return true;
+}
+
+bool ShotBook::TryAdd(const std::filesystem::path& root, const std::string& file, const std::string& shotKey,
+	bool goal, float touchSec, float jumpSec)
+{
+	std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
+	if (!lock.owns_lock() || !loadedCache) return false;   // the next full scan will pick it up
+	if (entries.count(file)) return true;
+	entries[file] = Entry{ shotKey, goal, touchSec, jumpSec };
+	std::ofstream out(root / "shot_cache.csv", std::ios::app);
+	if (out) out << file << ',' << shotKey << ',' << (goal ? 1 : 0) << ',' << touchSec << ',' << jumpSec << '\n';
+	return true;
+}
+
+ShotReference ShotBook::Lookup(const std::string& shotKey)
+{
 	ShotReference r;
 	for (const auto& [file, e] : entries)
 	{

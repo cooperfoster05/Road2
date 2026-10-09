@@ -423,6 +423,70 @@ void RLCoach::OnGoal()
 	if (state == RepState::Recording) goalPending = true;
 }
 
+void RLCoach::GradeFinishedRep(const RepSummary& s)
+{
+	lastRepGradeLines.clear();
+	if (!writer || frames.size() < 10) return;
+	if (s.endReason == "reset")
+	{
+		lastRepGradeLines.push_back({ "Reset before the shot finished: not graded", 160, 160, 160 });
+		return;
+	}
+
+	ShotAnalysis shot = ShotGeometry::Analyze(frames);
+	RepSegments segs = Segmenter::Split(frames, s.eventTick);
+
+	// Compare against your fastest goal on this shot so far (skipped if the shot book is still loading)
+	ShotReference ref;
+	shotBook.TryGet(s.shotKey, ref);
+	RepGrade g = Grader::GradeRep(frames, segs, shot, s.goal, s.floorBeforeGoal, ref);
+
+	if (shot.valid)
+	{
+		float jumpSec = -1.0f;
+		for (const Segment& sg : segs.segs)
+			if (sg.kind == SegKind::Takeoff && sg.start < shot.touchTick) jumpSec = (sg.start - shot.startTick) / 120.0f;
+		shotBook.TryAdd(writer->Folder(), s.fileName, s.shotKey, s.goal, (shot.touchTick - shot.startTick) / 120.0f, jumpSec);
+	}
+
+	auto gradeRgb = [](Grade gr, unsigned char& r, unsigned char& gg, unsigned char& b) {
+		switch (gr)
+		{
+		case Grade::Clean: case Grade::Calculated: r = 120; gg = 230; b = 120; break;
+		case Grade::Solid: r = 150; gg = 200; b = 255; break;
+		case Grade::Sloppy: r = 255; gg = 200; b = 70; break;
+		default: r = 255; gg = 110; b = 100; break;
+		}
+	};
+
+	unsigned char orr = g.overall >= 4 ? 120 : (g.overall == 3 ? 255 : 255);
+	unsigned char og = g.overall >= 4 ? 230 : (g.overall == 3 ? 200 : 110);
+	unsigned char ob = g.overall >= 4 ? 120 : (g.overall == 3 ? 70 : 100);
+	lastRepGradeLines.push_back({ std::format("GRADE {}: {}  ({})", g.overall, Grader::OverallName(g.overall), g.overallWhy), orr, og, ob });
+
+	// One compact line of segment grades
+	std::string chips;
+	for (const SegmentGrade& sgd : g.segs)
+	{
+		if (sgd.grade == Grade::None) continue;
+		if (!chips.empty()) chips += "   ";
+		chips += std::format("{} {}", Segmenter::Name(segs.segs[sgd.segIndex].kind), Grader::Name(sgd.grade));
+	}
+	if (!chips.empty()) lastRepGradeLines.push_back({ chips, 200, 200, 200 });
+
+	if (g.biggestFix >= 0)
+	{
+		const SegmentGrade& fix = g.segs[g.biggestFix];
+		unsigned char r, gg, b;
+		gradeRgb(fix.grade, r, gg, b);
+		lastRepGradeLines.push_back({ std::format("Fix: {} - {}", Segmenter::Name(segs.segs[fix.segIndex].kind), fix.why), r, gg, b });
+	}
+	else if (g.overall >= 4)
+	{
+		lastRepGradeLines.push_back({ "Nothing to fix on this one", 120, 230, 120 });
+	}
+}
+
 void RLCoach::FinishRep(const std::string& reason)
 {
 	// A reset right after starting is just noise, don't save it
@@ -454,6 +518,7 @@ void RLCoach::FinishRep(const std::string& reason)
 	}
 
 	bool ok = writer && writer->SaveRep(frames, s);
+	if (ok) GradeFinishedRep(s);
 	frames.clear();
 	livePred.clear();
 	pendingEndReason.clear();
@@ -678,6 +743,7 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 	{
 		add(std::format("Last rep: {}  {:.2f}s  {} touch{}", lastRep.endReason, lastRep.durationS,
 			lastRep.touches, lastRep.touches == 1 ? "" : "es"));
+		for (const PanelGradeLine& gl : lastRepGradeLines) add(gl.text, gl.r, gl.g, gl.b);
 		if (lastRating == 0)
 			add("Rate it: 1 Missed  2 Close  3 Bad-in  4 Good-in  5 Great-in", 255, 200, 0);
 		else
@@ -688,9 +754,14 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 	}
 
 	// Panel
-	const float x = 30.0f, y = 180.0f, pad = 10.0f, lineH = 18.0f, width = 420.0f;
+	const float x = 30.0f, y = 180.0f, pad = 10.0f, lineH = 18.0f;
 	float height = pad * 2;
-	for (const Line& l : lines) height += lineH * l.scale;
+	float width = 420.0f;
+	for (const Line& l : lines)
+	{
+		height += lineH * l.scale;
+		width = std::max(width, canvas.GetStringSize(l.text, l.scale, l.scale).X + pad * 2);
+	}
 
 	canvas.SetColor(0, 0, 0, 160);
 	canvas.SetPosition(Vector2F{ x, y });

@@ -85,6 +85,10 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::unique_ptr<RepWriter> writer;
 	int   repsThisSession = 0;
 	RepSummary lastRep;
+	// Grade of the last saved rep, shown on the panel in the pack
+	struct PanelGradeLine { std::string text; unsigned char r, g, b; };
+	std::vector<PanelGradeLine> lastRepGradeLines;
+	void GradeFinishedRep(const RepSummary& s);
 	bool  haveLastRep = false;
 	int   lastRating = 0;
 	int   keyIndex[5] = {};

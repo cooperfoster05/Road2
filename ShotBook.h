@@ -25,7 +25,13 @@ public:
 	void Update(const std::filesystem::path& rlcoachFolder);
 	ShotReference Get(const std::string& shotKey);
 
+	// Game-thread versions that never wait: they give up (return false) if a scan is running.
+	bool TryGet(const std::string& shotKey, ShotReference& out);
+	bool TryAdd(const std::filesystem::path& rlcoachFolder, const std::string& file, const std::string& shotKey,
+		bool goal, float touchSec, float jumpSec);
+
 private:
+	ShotReference Lookup(const std::string& shotKey);   // caller holds the lock
 	struct Entry { std::string shot; bool goal = false; float touchSec = -1; float jumpSec = -1; };
 	std::mutex mtx;
 	std::unordered_map<std::string, Entry> entries;   // by rep file
