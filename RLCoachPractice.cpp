@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "RLCoach.h"
+#include "Overlay3D.h"
 #include "bakkesmod/wrappers/includes.h"
 
 #include <algorithm>
@@ -105,7 +106,8 @@ void RLCoach::PracticeBegin(int targetTick, SegKind kind, int segStart, const st
 	practiceSegStart = segStart;
 	practiceTargetTick = targetTick;
 	practiceLabel = label;
-	practiceBallStartTick = ShotGeometry::Analyze(practiceRep).startTick;
+	practiceShot = ShotGeometry::Analyze(practiceRep);
+	practiceBallStartTick = practiceShot.startTick;
 	PracticeSetLeadIn(practiceLeadIn);
 
 	practiceAttempts = 0;
@@ -167,7 +169,7 @@ void RLCoach::PracticePickReference()
 	gradeBook.Copy(autos);
 	std::vector<RepListItem> same;
 	for (const RepListItem& it : RepLibrary::ListReps(writer->Folder()))   // newest first
-		if (it.shotKey == practiceItem.shotKey && it.endReason != "reset") same.push_back(it);
+		if (it.shotKey == practiceItem.shotKey && it.endReason != "reset" && it.hasRecording) same.push_back(it);
 	if (same.empty()) return;
 
 	auto autoOf = [&](const RepListItem& it) { auto f = autos.find(it.file); return f == autos.end() ? 0 : f->second; };
@@ -186,7 +188,7 @@ void RLCoach::PracticePickReference()
 		if (autoOf(it) != bestAuto || it.rating != bestRating) break;
 		std::vector<Frame> fr;
 		std::string err;
-		if (!RepLibrary::LoadRep(writer->Folder() / "reps" / it.file, fr, err)) continue;
+		if (!RepLibrary::LoadRep(writer->Folder(), it.file, fr, err)) continue;
 		ShotAnalysis sa = ShotGeometry::Analyze(fr);
 		float aim = sa.valid ? sa.aimErrDeg : 1e8f;
 		if (aim < bestAim - 0.01f) { bestAim = aim; bestFrames = std::move(fr); bestItem = it; }
@@ -460,12 +462,29 @@ void RLCoach::PracticeExit()
 // Faint reference: your best rep on this shot, from the practice start on
 void RLCoach::DrawPracticeOverlay(CanvasWrapper& canvas)
 {
-	if (practiceRefFrames.size() < 2) return;
 	CameraWrapper cam = gameWrapper->GetCamera();
 	if (cam.IsNull()) return;
 	Vector camLoc = cam.GetLocation();
 	Vector camFwd = RotatorToVector(cam.GetRotation());
 
+	// Yellow ring on the ball: where to hit it. Rides with the ball until you touch it this attempt.
+	if (practiceShot.valid && practiceTargetTick <= practiceShot.touchTick)
+	{
+		bool touched = false;
+		for (const Frame& f : practiceLive) if (f.touch) { touched = true; break; }
+		ServerWrapper server = gameWrapper->GetGameEventAsServer();
+		BallWrapper ball = server.IsNull() ? BallWrapper(0) : server.GetBall();
+		if (!touched && !ball.IsNull())
+		{
+			const ShotAnalysis& s = practiceShot;
+			Vector n(s.idealContact.x - s.ballCenter.x, s.idealContact.y - s.ballCenter.y, s.idealContact.z - s.ballCenter.z);
+			Overlay3D::BallRing(canvas, camLoc, camFwd, ball.GetLocation(), n, 255, 220, 0);
+			int tick = practiceStartTick + static_cast<int>(practiceLive.size());
+			DrawTargetHitbox(canvas, camLoc, camFwd, s, practiceRep, tick, ball.GetLocation(), false);
+		}
+	}
+
+	if (practiceRefFrames.size() < 2) return;
 	int from = std::min(practiceStartTick, static_cast<int>(practiceRefFrames.size()) - 1);
 	auto draw = [&](auto getPos, unsigned char r, unsigned char g, unsigned char b) {
 		Vector2F prev{};

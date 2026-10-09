@@ -117,6 +117,16 @@
     <ClCompile Include="GradeBook.cpp" />
     <ClCompile Include="RLCoachViewer.cpp" />
     <ClCompile Include="RLCoachPractice.cpp" />
+    <ClCompile Include="RLCoachStorage.cpp" />
+    <ClCompile Include="RLCoachHud.cpp" />
+    <ClCompile Include="ControllerOverlay.cpp" />
+    <ClCompile Include="RepStore.cpp" />
+    <!-- miniz (third_party/miniz, MIT license): compresses rep recordings -->
+    <ClCompile Include="third_party\miniz\miniz.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <SDLCheck>false</SDLCheck>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
     <ClCompile Include="BallPredictor.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PreprocessorDefinitions>RS_DONT_LOG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -158,6 +168,14 @@
     <ClInclude Include="ShotBook.h" />
     <ClInclude Include="Grader.h" />
     <ClInclude Include="GradeBook.h" />
+    <ClInclude Include="RepStore.h" />
+    <ClInclude Include="ControllerOverlay.h" />
+    <ClInclude Include="HudDraw.h" />
+    <ClInclude Include="Overlay3D.h" />
+    <ClInclude Include="Ratings.h" />
+    <ClInclude Include="UiStyle.h" />
+    <ClInclude Include="Units.h" />
+    <ClInclude Include="third_party\miniz\miniz.h" />
     <ClInclude Include="BallPredictor.h" />
     <ClInclude Include="version.h" />
   </ItemGroup>

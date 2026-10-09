@@ -1,5 +1,7 @@
 #include "pch.h"
 #include "RLCoach.h"
+#include "Ratings.h"
+#include "UiStyle.h"
 #include "bakkesmod/wrappers/includes.h"
 
 #include <algorithm>
@@ -33,28 +35,6 @@ namespace
 			|| in.Jump || in.ActivateBoost || in.HoldingBoost || in.Handbrake;
 	}
 
-	// Colors for 1-5 grades, shared by the panel and the rep list
-	void OverallRgb(int o, unsigned char& r, unsigned char& g, unsigned char& b)
-	{
-		if (o >= 4) { r = 115; g = 230; b = 115; }
-		else if (o == 3) { r = 255; g = 204; b = 77; }
-		else if (o == 2) { r = 255; g = 160; b = 80; }
-		else if (o == 1) { r = 255; g = 115; b = 102; }
-		else { r = 160; g = 160; b = 160; }
-	}
-
-	const char* RatingName(int r)
-	{
-		switch (r)
-		{
-		case 1: return "Missed";
-		case 2: return "Close";
-		case 3: return "Bad shot, went in";
-		case 4: return "Good shot, went in";
-		case 5: return "Great shot, went in";
-		default: return "";
-		}
-	}
 }
 
 // ============================================================
@@ -95,6 +75,18 @@ void RLCoach::onLoad()
 
 	CVarWrapper mirror = cvarManager->registerCvar("rlcoach_pred_mirror", "0", "Mirror X when predicting (set from the accuracy test)", true, true, 0, true, 1);
 	mirror.addOnValueChanged([this](std::string, CVarWrapper c) { predictor.mirrorX = c.getBoolValue(); });
+
+	RegisterLookCvars();
+
+	keepDays = std::make_shared<float>(2.0f);
+	keepRatedDays = std::make_shared<float>(180.0f);
+	storageCapMb = std::make_shared<float>(1024.0f);
+	cvarManager->registerCvar("rlcoach_keep_days", "2", "Days to keep full recordings of reps you didn't rate or star", true, true, 1, true, 60)
+		.bindTo(keepDays);
+	cvarManager->registerCvar("rlcoach_keep_rated_days", "180", "Days to keep full recordings of reps you rated", true, true, 7, true, 730)
+		.bindTo(keepRatedDays);
+	cvarManager->registerCvar("rlcoach_storage_cap_mb", "1024", "Most disk space recordings can use (MB)", true, true, 100, true, 10240)
+		.bindTo(storageCapMb);
 
 	CVarWrapper numpad = cvarManager->registerCvar("rlcoach_rate_numpad", "0", "Rate reps with numpad 1-5 instead of the number row", true, true, 0, true, 1);
 	numpad.bindTo(useNumpad);
@@ -150,11 +142,8 @@ void RLCoach::onLoad()
 	predictor.mirrorX = cvarManager->getCvar("rlcoach_pred_mirror").getBoolValue();
 	StartPredictor();
 
-	// Build the shot book in the background so the first rep you open doesn't stall
-	{
-		auto root = writer->Folder();
-		shotBookThread = std::thread([this, root]() { shotBook.Update(root); });
-	}
+	// In the background: tidy up storage, build the shot book and auto grades
+	StartHousekeeping();
 	LOG("RL Coach loaded. Reps save to {}", writer->Folder().string());
 }
 
@@ -167,8 +156,14 @@ void RLCoach::onUnload()
 {
 	PracticeExit();
 	ViewerExit();
-	if (shotBookThread.joinable()) shotBookThread.join();
+	housekeepStop = true;
+	if (housekeepThread.joinable()) housekeepThread.join();
 	if (gradeThread.joinable()) gradeThread.join();
+	if (writer)
+	{
+		writer->Shutdown();   // finish any saves still queued
+		gradeBook.Save(writer->Folder());
+	}
 	gameWrapper->UnregisterDrawables();
 	frames.clear();
 	state = RepState::Idle;
@@ -532,7 +527,7 @@ void RLCoach::GradeFinishedRep(const RepSummary& s)
 		lastRepGradeLines.push_back({ { { "Nothing to fix on this one", 115, 230, 115 } } });
 	}
 
-	gradeBook.TrySet(s.fileName, g.overall, s.shotKey, ref.bestFile);
+	gradeBook.TrySet(s.fileName, GradeBook::Make(g, shot, segs, s.shotKey, ref.bestFile, false));
 }
 
 void RLCoach::FinishRep(const std::string& reason)
@@ -581,7 +576,9 @@ void RLCoach::FinishRep(const std::string& reason)
 		haveLastRep = true;
 		lastRating = 0;
 		repsThisSession++;
-		statusMessage = std::format("Rep {} saved ({})", repsThisSession, reason);
+		statusMessage = writer->FailedSaves() > 0
+			? std::format("Rep {} saved ({}), but {} save(s) failed this session", repsThisSession, reason, writer->FailedSaves())
+			: std::format("Rep {} saved ({})", repsThisSession, reason);
 		if (ratingToApply > 0) RateLastRep(ratingToApply);
 	}
 	else
@@ -676,248 +673,83 @@ void RLCoach::TestSetState()
 }
 
 // ============================================================
-// Drawing
-// ============================================================
-
-void RLCoach::RenderHud(CanvasWrapper canvas)
-{
-	UpdateRatingKeys();
-
-	if (!*hudEnabled || !IsOfflinePractice()) return;
-	CarWrapper car = gameWrapper->GetLocalCar();
-	if (car.IsNull()) return;
-
-	float speed = car.GetVelocity().magnitude();
-	int boost = 0;
-	BoostWrapper boostComp = car.GetBoostComponent();
-	if (!boostComp.IsNull()) boost = static_cast<int>(boostComp.GetCurrentBoostAmount() * 100.0f + 0.5f);
-
-	// Build the lines first so the panel can size itself
-	struct Line { std::vector<PanelChunk> chunks; float scale; };
-	std::vector<Line> lines;
-	auto add = [&](std::string text, unsigned char r = 230, unsigned char g = 230, unsigned char b = 230, float scale = 1.0f) {
-		lines.push_back({ { { std::move(text), r, g, b } }, scale });
-	};
-
-	add("RL COACH", 255, 255, 255, 1.25f);
-
-	if (practiceState != PracticeState::Off)
-	{
-		DrawPracticeOverlay(canvas);
-		int pct = static_cast<int>(practiceSpeed * 100.0f + 0.5f);
-		add(std::format("PRACTICE  {}  @ {}% speed, {:.2f}s lead-in{}", practiceLabel, pct, practiceLeadIn,
-			practiceAutoRamp ? " (auto-ramp)" : ""), 120, 200, 255);
-		if (practiceState == PracticeState::Frozen)
-			add("Frozen: move to start the attempt", 255, 204, 77);
-		else
-			add("GO", 115, 230, 115);
-		std::string bySpeed;
-		for (const auto& [p, h] : practiceHitsByPct) bySpeed += std::format("{}{}%: {}", bySpeed.empty() ? "" : "   ", p, h);
-		add(std::format("Hits {}/{}{}   streak {}", practiceHitsTotal, practiceAttempts,
-			bySpeed.empty() ? std::string() : "   (" + bySpeed + ")", practiceStreak));
-		for (const PanelGradeLine& gl : practiceResultLines) lines.push_back({ gl.chunks, 1.0f });
-		if (!practiceRefLabel.empty()) add(practiceRefLabel, 150, 150, 150);
-		add("Retry: rlcoach_practice_retry   Exit: rlcoach_practice_exit", 130, 130, 130);
-	}
-	else if (viewerActive && !viewerFrames.empty())
-	{
-		DrawViewerPaths(canvas);
-
-		int i = std::min(static_cast<int>(viewerPlayhead), static_cast<int>(viewerFrames.size()) - 1);
-		const Frame& f = viewerFrames[i];
-		std::string when = viewerRep.savedAt.size() >= 19 ? viewerRep.savedAt.substr(5, 11) : viewerRep.savedAt;
-		add(std::format("VIEWER  {}  {}  {}", when, viewerRep.endReason,
-			viewerRep.rating > 0 ? std::format("rated {}", viewerRep.rating) : std::string("unrated")), 120, 200, 255);
-		add(std::format("{:.2f}s / {:.2f}s   {}   {}x", f.t, viewerFrames.back().t,
-			viewerPlaying ? "PLAYING" : "PAUSED", viewerSpeed));
-		float spd = std::sqrt(f.carVX * f.carVX + f.carVY * f.carVY + f.carVZ * f.carVZ);
-		add(std::format("Speed {:.0f}   Boost {:.0f}   {}{}", spd, f.boostAmount,
-			f.onGround ? "Grounded" : "Airborne", f.touch ? "   TOUCH" : ""));
-		add(std::format("Thr {:+.2f}  Str {:+.2f}  P {:+.2f}  Y {:+.2f}  R {:+.2f}",
-			f.throttle, f.steer, f.pitch, f.yaw, f.roll), 180, 220, 255);
-		add(std::format("Jump {}   Boost {}   Slide {}", f.jump ? "X" : "-", f.boost ? "X" : "-", f.handbrake ? "X" : "-"), 180, 220, 255);
-		if (viewerGrade.overall > 0)
-			add(std::format("GRADE {}: {}  ({})", viewerGrade.overall, Grader::OverallName(viewerGrade.overall), viewerGrade.overallWhy),
-				viewerGrade.overall >= 4 ? 120 : 255, viewerGrade.overall >= 4 ? 230 : (viewerGrade.overall == 3 ? 200 : 120), 120);
-		if (viewerGrade.biggestFix >= 0)
-		{
-			const SegmentGrade& fix = viewerGrade.segs[viewerGrade.biggestFix];
-			add(std::format("Biggest fix: {} ({}): {}", Segmenter::Name(viewerSegs.segs[fix.segIndex].kind), Grader::Name(fix.grade), fix.why), 255, 200, 0);
-		}
-		for (int si = 0; si < static_cast<int>(viewerSegs.segs.size()); si++)
-		{
-			const Segment& sg = viewerSegs.segs[si];
-			if (i < sg.start || i > sg.end || sg.kind == SegKind::Recovery) continue;
-			std::string gradeText;
-			for (const SegmentGrade& gs : viewerGrade.segs)
-				if (gs.segIndex == si && gs.grade != Grade::None) gradeText = std::format(": {} - {}", Grader::Name(gs.grade), gs.why);
-			add(std::format("Now: {}{}{}", Segmenter::Name(sg.kind), sg.touch > 1 ? std::format(" (touch {})", sg.touch) : std::string(), gradeText), 255, 255, 255);
-		}
-		if (viewerSegs.whiff) add("Whiff: no touch on this rep", 255, 120, 120);
-
-		if (viewerShot.valid)
-		{
-			const ShotAnalysis& s = viewerShot;
-			if (!s.reachesGoalLine)
-				add("Shot: never reached the goal line", 255, 120, 120);
-			else if (s.missDist <= 0.0f)
-				add("Shot: on target", 120, 230, 120);
-			else
-				add(std::format("Shot: missed {} by {:.0f}", s.missDir, s.missDist), 255, 120, 120);
-			add(std::format("Aim: {:.1f} deg off   Contact: {:.0f} {} / {:.0f} {} of ideal",
-				s.aimErrDeg,
-				std::fabs(s.contactUp), s.contactUp >= 0 ? "high" : "low",
-				std::fabs(s.contactLeft), s.contactLeft >= 0 ? "left" : "right"));
-			if (s.earliestTick >= 0)
-				add(std::format("Touch came {:.2f}s after the earliest possible intercept", s.lateBy));
-			add("Yellow: ideal hit spot + direction   Green line: your shot   Ring: earliest intercept", 160, 160, 160);
-		}
-		add(viewerPred.empty() ? "Orange: ball   Blue: car   Green: touches"
-			: "Orange: ball   Blue: car   Green: touches   White dashes: predicted ball", 160, 160, 160);
-		if (!viewerStatus.empty()) add(viewerStatus, 255, 200, 0);
-	}
-	else
-	{
-		if (state == RepState::Recording && *livePrediction && !livePred.empty()) DrawPredictedPath(canvas, livePred);
-
-	if (!*recordingEnabled)
-		add("Recording off  (F2 > Plugins > RLCoach)", 150, 150, 150);
-	else if (state == RepState::Recording && !pendingEndReason.empty())
-		add(std::format("REC  shot over ({}), recording recovery", pendingEndReason), 255, 120, 120);
-	else if (state == RepState::Recording)
-		add("REC  recording rep", 255, 70, 70);
-	else if (state == RepState::Armed)
-		add("ARMED  rep starts on first input", 255, 200, 0);
-	else
-		add("WAITING  reset the shot or ball", 200, 200, 200);
-
-	if (*recordingEnabled) add(std::format("Reps saved this session: {}", repsThisSession));
-
-	add(std::format("Speed {:.0f}{}   Boost {}   {}", speed, speed >= 2200.0f ? " (SS)" : "", boost,
-		car.IsOnGround() ? "Grounded" : "Airborne"));
-
-	const ControllerInput& in = lastInput;
-	add(std::format("Thr {:+.2f}  Str {:+.2f}  P {:+.2f}  Y {:+.2f}  R {:+.2f}",
-		in.Throttle, in.Steer, in.Pitch, in.Yaw, in.Roll), 180, 220, 255);
-	add(std::format("Jump {}   Boost {}   Slide {}",
-		in.Jump ? "X" : "-", (in.ActivateBoost || in.HoldingBoost) ? "X" : "-", in.Handbrake ? "X" : "-"), 180, 220, 255);
-
-	if (*recordingEnabled && state == RepState::Recording && queuedRating > 0)
-		add(std::format("This rep will be rated {}: {}", queuedRating, RatingName(queuedRating)), 120, 230, 120);
-
-	if (*recordingEnabled && haveLastRep)
-	{
-		add(std::format("Last rep: {}  {:.2f}s  {} touch{}", lastRep.endReason, lastRep.durationS,
-			lastRep.touches, lastRep.touches == 1 ? "" : "es"));
-		for (const PanelGradeLine& gl : lastRepGradeLines) lines.push_back({ gl.chunks, 1.0f });
-		if (lastRating == 0)
-			add("Rate it: 1 Missed  2 Close  3 Bad-in  4 Good-in  5 Great-in", 255, 200, 0);
-		else
-			add(std::format("Rated {}: {}", lastRating, RatingName(lastRating)), 120, 230, 120);
-	}
-
-	if (!statusMessage.empty()) add(statusMessage, 160, 160, 160);
-	}
-
-	// Panel
-	const float x = 30.0f, y = 180.0f, pad = 10.0f, lineH = 18.0f;
-	float height = pad * 2;
-	float width = 420.0f;
-	for (const Line& l : lines)
-	{
-		height += lineH * l.scale;
-		float w = 0.0f;
-		for (const PanelChunk& c : l.chunks) w += canvas.GetStringSize(c.text, l.scale, l.scale).X;
-		width = std::max(width, w + pad * 2);
-	}
-
-	canvas.SetColor(0, 0, 0, 160);
-	canvas.SetPosition(Vector2F{ x, y });
-	canvas.FillBox(Vector2F{ width, height });
-
-	float cy = y + pad;
-	for (const Line& l : lines)
-	{
-		float cx = x + pad;
-		for (const PanelChunk& c : l.chunks)
-		{
-			canvas.SetColor(c.r, c.g, c.b, 255);
-			canvas.SetPosition(Vector2F{ cx, cy });
-			canvas.DrawString(c.text, l.scale, l.scale, true);
-			cx += canvas.GetStringSize(c.text, l.scale, l.scale).X;
-		}
-		cy += lineH * l.scale;
-	}
-}
-
-// ============================================================
 // Settings tab (F2 > Plugins > RLCoach)
 // ============================================================
 
 void RLCoach::RenderSettings()
 {
+	UiStyle::Scope style(false);   // RL Coach's look for the widgets in this tab
+
 	// This runs on the render thread, so cvar changes are handed to the game thread
 	auto setCvar = [this](const std::string& name, float value) {
 		gameWrapper->Execute([this, name, value](GameWrapper*) { cvarManager->getCvar(name).setValue(value); });
 	};
 
+	ImGui::TextColored(UiStyle::kAccent, "RL COACH");
+	ImGui::SameLine();
+	ImGui::TextDisabled("v%s   %d reps saved this session", plugin_version, repsThisSession);
+
 	bool rec = *recordingEnabled;
-	if (ImGui::Checkbox("Record reps (data farming)", &rec)) setCvar("rlcoach_recording", rec ? 1.0f : 0.0f);
-
+	if (ImGui::Checkbox("Record reps", &rec)) setCvar("rlcoach_recording", rec ? 1.0f : 0.0f);
+	ImGui::SameLine();
 	bool hud = *hudEnabled;
-	if (ImGui::Checkbox("Show RL Coach panel", &hud)) setCvar("rlcoach_hud", hud ? 1.0f : 0.0f);
-
-	bool np = *useNumpad;
-	if (ImGui::Checkbox("Rate with numpad 1-5 instead of the number row", &np)) setCvar("rlcoach_rate_numpad", np ? 1.0f : 0.0f);
-
-	float maxS = *maxRepSeconds;
-	if (ImGui::SliderFloat("Max rep length (seconds)", &maxS, 2.0f, 30.0f, "%.0f")) setCvar("rlcoach_max_rep_seconds", maxS);
-
-	float post = *postRollSeconds;
-	if (ImGui::SliderFloat("Keep recording after the shot, at least (seconds)", &post, 0.0f, 5.0f, "%.1f")) setCvar("rlcoach_postroll_seconds", post);
-	float postMax = *postRollMaxSeconds;
-	if (ImGui::SliderFloat("...and until recovered, at most (seconds)", &postMax, 1.0f, 8.0f, "%.1f")) setCvar("rlcoach_postroll_max_seconds", postMax);
-
-	ImGui::Separator();
-	ImGui::Text("Reps saved this session: %d", repsThisSession);
-	ImGui::TextWrapped("Rating keys: 1 Missed, 2 Close, 3 Bad shot but went in, 4 Good shot went in, 5 Great shot went in. Pressing during a rep rates that rep; pressing after rates the last saved rep.");
-	ImGui::TextWrapped("Controller: bind rlcoach_toggle_recording to a button in BakkesMod's Bindings tab to toggle recording.");
-	if (writer) ImGui::TextWrapped("Reps are saved in: %s", writer->Folder().string().c_str());
-
-	ImGui::Separator();
-	ImGui::TextUnformatted("Ball prediction (RocketSim)");
-	ImGui::Text("Status: %s", predictor.Status().c_str());
-	if (!predictor.Ready())
-	{
-		ImGui::TextWrapped("Needs arena files: download RLArenaCollisionDumper.exe, put it in the folder below, "
-			"launch Rocket League without EAC, go into free play on a standard arena (like DFH Stadium), then run the exe. "
-			"It creates a collision_meshes folder next to itself. Then click Load.");
-		if (writer) ImGui::TextWrapped("Folder: %s", writer->Folder().string().c_str());
-		if (ImGui::Button("Load arena files")) gameWrapper->Execute([this](GameWrapper*) { StartPredictor(); });
-	}
-	else
-	{
-		if (ImGui::Button("Run accuracy test on saved reps"))
-		{
-			auto root = writer->Folder();
-			predictor.StartAccuracyTest(root);
-		}
-		std::string ts = predictor.TestStatus();
-		if (!ts.empty()) ImGui::TextWrapped("%s", ts.c_str());
-		bool lp = *livePrediction;
-		if (ImGui::Checkbox("Show predicted ball path while playing", &lp)) setCvar("rlcoach_live_prediction", lp ? 1.0f : 0.0f);
-		bool mir = predictor.mirrorX;
-		if (ImGui::Checkbox("Mirror X (only if the accuracy test says mirrored is better)", &mir)) setCvar("rlcoach_pred_mirror", mir ? 1.0f : 0.0f);
-	}
-
-	ImGui::Separator();
-	if (ImGui::Button("Open rep viewer"))
+	if (ImGui::Checkbox("Show panel", &hud)) setCvar("rlcoach_hud", hud ? 1.0f : 0.0f);
+	ImGui::SameLine();
+	if (UiStyle::AccentButton("Open rep viewer"))
 		gameWrapper->Execute([this](GameWrapper*) { cvarManager->executeCommand("togglemenu " + GetMenuName()); });
-	ImGui::SameLine();
-	ImGui::TextUnformatted("(or bind rlcoach_viewer to a key)");
 
-	if (ImGui::Button("Test: move car and ball"))
-		gameWrapper->Execute([this](GameWrapper*) { TestSetState(); });
-	ImGui::SameLine();
-	ImGui::TextUnformatted("(try it in free play AND in a training pack)");
+	if (ImGui::CollapsingHeader("Recording and rating"))
+	{
+		bool np = *useNumpad;
+		if (ImGui::Checkbox("Rate with numpad 1-5 instead of the number row", &np)) setCvar("rlcoach_rate_numpad", np ? 1.0f : 0.0f);
+		float maxS = *maxRepSeconds;
+		if (ImGui::SliderFloat("Max rep length (seconds)", &maxS, 2.0f, 30.0f, "%.0f")) setCvar("rlcoach_max_rep_seconds", maxS);
+		float post = *postRollSeconds;
+		if (ImGui::SliderFloat("Keep recording after the shot, at least (s)", &post, 0.0f, 5.0f, "%.1f")) setCvar("rlcoach_postroll_seconds", post);
+		float postMax = *postRollMaxSeconds;
+		if (ImGui::SliderFloat("...and until recovered, at most (s)", &postMax, 1.0f, 8.0f, "%.1f")) setCvar("rlcoach_postroll_max_seconds", postMax);
+		ImGui::TextDisabled("Rating keys: 1 Missed, 2 Close, 3 Bad shot went in, 4 Good shot went in, 5 Great shot went in.");
+		ImGui::TextDisabled("Pressing during a rep rates that rep; after, it rates the last saved rep.");
+		ImGui::TextDisabled("Controller: bind rlcoach_toggle_recording / rlcoach_viewer in BakkesMod's Bindings tab.");
+	}
+
+	if (ImGui::CollapsingHeader("Panel and units")) RenderLookSettings();
+	if (ImGui::CollapsingHeader("Controller overlay")) RenderPadSettings();
+	if (ImGui::CollapsingHeader("Storage")) RenderStorageSettings();
+
+	if (ImGui::CollapsingHeader("Ball prediction (RocketSim)"))
+	{
+		ImGui::Text("Status: %s", predictor.Status().c_str());
+		if (!predictor.Ready())
+		{
+			ImGui::TextWrapped("Needs arena files: download RLArenaCollisionDumper.exe, put it in the folder below, "
+				"launch Rocket League without EAC, go into free play on a standard arena (like DFH Stadium), then run the exe. "
+				"It creates a collision_meshes folder next to itself. Then click Load.");
+			if (writer) ImGui::TextWrapped("Folder: %s", writer->Folder().string().c_str());
+			if (ImGui::Button("Load arena files")) gameWrapper->Execute([this](GameWrapper*) { StartPredictor(); });
+		}
+		else
+		{
+			bool lp = *livePrediction;
+			if (ImGui::Checkbox("Show predicted ball path while playing", &lp)) setCvar("rlcoach_live_prediction", lp ? 1.0f : 0.0f);
+			if (ImGui::Button("Run accuracy test on saved reps"))
+			{
+				auto root = writer->Folder();
+				predictor.StartAccuracyTest(root);
+			}
+			std::string ts = predictor.TestStatus();
+			if (!ts.empty()) ImGui::TextWrapped("%s", ts.c_str());
+			bool mir = predictor.mirrorX;
+			if (ImGui::Checkbox("Mirror X (only if the accuracy test says mirrored is better)", &mir)) setCvar("rlcoach_pred_mirror", mir ? 1.0f : 0.0f);
+		}
+	}
+
+	if (ImGui::CollapsingHeader("Tools"))
+	{
+		if (writer) ImGui::TextWrapped("Data folder: %s", writer->Folder().string().c_str());
+		if (ImGui::Button("Test: move car and ball"))
+			gameWrapper->Execute([this](GameWrapper*) { TestSetState(); });
+		ImGui::SameLine();
+		ImGui::TextDisabled("(try it in free play and in a training pack)");
+	}
 }

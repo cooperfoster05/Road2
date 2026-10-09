@@ -147,7 +147,7 @@ void BallPredictor::StartAccuracyTest(const std::filesystem::path& root)
 		{
 			std::vector<Frame> frames;
 			std::string err;
-			if (!RepLibrary::LoadRep(root / "reps" / item.file, frames, err)) continue;
+			if (!RepLibrary::LoadRep(root, item.file, frames, err)) continue;
 
 			// Start once the ball is moving; stop just before the first touch (after that it's not free flight)
 			int start = -1;

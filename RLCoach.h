@@ -7,6 +7,7 @@
 
 #include "RepData.h"
 #include "RepWriter.h"
+#include "RepStore.h"
 #include "RepLibrary.h"
 #include "BallPredictor.h"
 #include "ShotGeometry.h"
@@ -14,6 +15,7 @@
 #include "ShotBook.h"
 #include "Grader.h"
 #include "GradeBook.h"
+#include "ControllerOverlay.h"
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -52,7 +54,27 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 
 	// Your fastest goal on each shot, for timing grades
 	ShotBook shotBook;
-	std::thread shotBookThread;
+
+	// ---- Storage upkeep (RLCoachStorage.cpp) ----
+	std::shared_ptr<float> keepDays;          // rlcoach_keep_days: full recordings of unrated reps
+	std::shared_ptr<float> keepRatedDays;     // rlcoach_keep_rated_days: full recordings of reps you rated
+	std::shared_ptr<float> storageCapMb;      // rlcoach_storage_cap_mb: oldest un-kept recordings go first past this
+	std::thread housekeepThread;
+	std::atomic<bool> housekeepBusy{ false };
+	std::atomic<bool> housekeepStop{ false };
+	std::mutex storageMsgMutex;
+	std::string storageMsg;
+	std::chrono::steady_clock::time_point storageStatsAt{};
+	uint64_t uiStorageBytes = 0;              // render thread
+	void StartHousekeeping();                 // game or render thread
+	void Housekeep(const std::filesystem::path& root, const std::filesystem::path& sessionBundle,
+		float keepD, float keepRatedD, float capMb);
+	int  TrimStorage(const std::filesystem::path& root, const std::filesystem::path& sessionBundle,
+		float keepD, float keepRatedD, float capMb);
+	void SetStorageMsg(const std::string& msg);
+	std::string GetStorageMsg();
+	void RenderStorageSettings();
+	void ToggleKeep(const std::string& file);  // render thread
 
 	// Auto grades for the rep list, filled in on a worker thread
 	GradeBook gradeBook;
@@ -68,6 +90,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	struct UiGrade { int segIndex; std::string name; std::string why; bool biggest; };
 	std::vector<UiGrade> uiGrades;
 	std::string uiOverall;
+	std::string uiViewerFile;   // the rep being watched
 
 	// ---- Rep detection ----
 	enum class RepState { Idle, WaitReset, Armed, Recording };
@@ -165,12 +188,15 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void RefreshRepList();                     // render thread
 	void DrawViewerPaths(CanvasWrapper& canvas);
 	void DrawPredictedPath(CanvasWrapper& canvas, const std::vector<BallSample>& path);
+	void DrawTargetHitbox(CanvasWrapper& canvas, const Vector& camLoc, const Vector& camFwd, const ShotAnalysis& shot,
+		const std::vector<Frame>& fr, int tick, const Vector& ballNow, bool showActual);
 	void StartPredictor();
 
 	// ---- Practice mode (game thread) ----
 	enum class PracticeState { Off, Frozen, Live };
 	PracticeState practiceState = PracticeState::Off;
 	std::vector<Frame> practiceRep;          // the rep being practiced
+	ShotAnalysis practiceShot;               // its shot math (for the ideal-contact ring)
 	RepListItem practiceItem;
 	SegKind practiceKind = SegKind::Approach;
 	int   practiceSegStart = 0;              // start tick of the practiced segment (for grading)
@@ -226,8 +252,22 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void DrawPracticeOverlay(CanvasWrapper& canvas);
 	Frame CaptureAt(CarWrapper& car, BallWrapper& ball, const ControllerInput& in, int tick, float wallMs);
 
-	// ---- Drawing ----
+	// ---- Drawing (RLCoachHud.cpp) ----
 	void RenderHud(CanvasWrapper canvas);
+	void DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& pad);
+
+	// ---- Look settings (RLCoachHud.cpp) ----
+	std::shared_ptr<bool>  hudCompact;        // rlcoach_hud_compact: only the essentials on the panel
+	std::shared_ptr<float> hudScale;          // rlcoach_hud_scale
+	std::shared_ptr<float> hudX, hudY;        // rlcoach_hud_x / rlcoach_hud_y: panel corner, fraction of the screen
+	std::shared_ptr<int>   speedUnits;        // rlcoach_speed_units: 0 uu/s, 1 km/h, 2 mph
+	std::shared_ptr<int>   inputDisplay;      // rlcoach_input_display: 0 none, 1 text on the panel, 2 PS4, 3 Xbox
+	std::shared_ptr<float> padX, padY, padScale;   // rlcoach_pad_x / _y / _scale
+	std::shared_ptr<int>   padJump, padBoost, padSlide, padRollLeft, padRollRight;   // rlcoach_pad_<action>: button index
+	std::shared_ptr<int>   targetHitbox;      // rlcoach_target_hitbox: 0 off, 1 for your touch, 2 for the earliest intercept
+	void RegisterLookCvars();
+	void RenderLookSettings();
+	void RenderPadSettings();
 
 public:
 	void RenderSettings() override;

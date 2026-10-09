@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Grader.h"
+#include "Units.h"
 
 #include <algorithm>
 #include <cmath>
@@ -163,7 +164,7 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 	{
 		std::vector<std::string> pros, cons;
 		(upper ? pros : cons).push_back(upper ? "upper half of the net" : "low in the net");
-		(fast ? pros : cons).push_back(std::format("{} ({:.0f})", fast ? "fast" : "slow", shot.shotSpeed));
+		(fast ? pros : cons).push_back(std::format("{} ({})", fast ? "fast" : "slow", Units::Speed(shot.shotSpeed)));
 		if (bounced) cons.push_back("bounced in");
 
 		Grade res = bounced ? Grade::Sloppy : (upper && fast) ? Grade::Clean : (upper || fast) ? Grade::Solid : Grade::Sloppy;

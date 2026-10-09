@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "RLCoach.h"
 #include "bakkesmod/wrappers/includes.h"
+#include "Overlay3D.h"
+#include "UiStyle.h"
 
 #include <algorithm>
 #include <cmath>
@@ -60,7 +62,7 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 	PracticeExit();   // opening a rep ends any practice set
 	std::vector<Frame> loaded;
 	std::string err;
-	if (!RepLibrary::LoadRep(writer->Folder() / "reps" / item.file, loaded, err))
+	if (!RepLibrary::LoadRep(writer->Folder(), item.file, loaded, err))
 	{
 		viewerStatus = "Couldn't load rep: " + err;
 		return;
@@ -83,12 +85,13 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 	viewerSegs = Segmenter::Split(viewerFrames, ViewerEventTick(item));
 
 	// Grades: timing compares against your fastest goal on the same shot
-	shotBook.Update(writer->Folder());
-	ShotReference viewerRef = shotBook.Get(item.shotKey);
+	ShotReference viewerRef;
+	shotBook.TryGet(item.shotKey, viewerRef);   // never waits; if the shot book is still loading, timing isn't compared
 	viewerGrade = Grader::GradeRep(viewerFrames, viewerSegs, viewerShot, item.goal, item.floorBeforeGoal, viewerRef);
-	gradeBook.TrySet(item.file, item.endReason == "reset" ? 0 : viewerGrade.overall, item.shotKey, viewerRef.bestFile);
+	gradeBook.TrySet(item.file, GradeBook::Make(viewerGrade, viewerShot, viewerSegs, item.shotKey, viewerRef.bestFile, item.endReason == "reset"));
 	{
 		std::lock_guard<std::mutex> lock(uiSegMutex);
+		uiViewerFile = item.file;
 		uiSegs = viewerSegs.segs;
 		uiSegTotal = static_cast<int>(viewerFrames.size());
 		uiGrades.clear();
@@ -303,55 +306,106 @@ void RLCoach::DrawViewerPaths(CanvasWrapper& canvas)
 	// Shot analysis overlays
 	if (viewerShot.valid)
 	{
-		auto box = [&](const Vector& p, float size, unsigned char r, unsigned char g, unsigned char b) {
-			Vector2F s;
-			if (!ToScreen(canvas, camLoc, camFwd, p, s)) return;
-			canvas.SetColor(r, g, b, 255);
-			canvas.SetPosition(Vector2F{ s.X - size / 2, s.Y - size / 2 });
-			canvas.FillBox(Vector2F{ size, size });
-		};
+		const ShotAnalysis& s = viewerShot;
+		Vector c(s.ballCenter.x, s.ballCenter.y, s.ballCenter.z);
 		auto line = [&](const Vector& a, const Vector& b, unsigned char r, unsigned char g, unsigned char bl) {
 			Vector2F sa, sb;
 			if (!ToScreen(canvas, camLoc, camFwd, a, sa) || !ToScreen(canvas, camLoc, camFwd, b, sb)) return;
-			canvas.SetColor(r, g, bl, 230);
-			canvas.DrawLine(sa, sb, 3.0f);
+			Overlay3D::OutlinedLine(canvas, sa, sb, 2.5f, r, g, bl, 220);
 		};
-		const ShotAnalysis& s = viewerShot;
-		Vector c(s.ballCenter.x, s.ballCenter.y, s.ballCenter.z);
 
-		// Yellow: where on the ball you needed to hit it, and the direction it needed to go
-		box(Vector(s.idealContact.x, s.idealContact.y, s.idealContact.z), 12.0f, 255, 220, 0);
+		// Yellow: the direction the ball needed to go. Green: where your shot actually went.
 		line(c, Vector(c.X + s.idealDir.x * 900, c.Y + s.idealDir.y * 900, c.Z + s.idealDir.z * 900), 255, 220, 0);
-		// Green: the direction your shot actually went
 		line(c, Vector(c.X + s.shotDir.x * 900, c.Y + s.shotDir.y * 900, c.Z + s.shotDir.z * 900), 80, 255, 120);
 
-		// Yellow ring: earliest a fast, direct aerial could have met the ball
+		// Rings on the ball: yellow = where you needed to hit it, green = where you did.
+		// Before the touch they ride along with the ball, so at contact they sit right where the car meets it.
+		Vector nIdeal(s.idealContact.x - s.ballCenter.x, s.idealContact.y - s.ballCenter.y, s.idealContact.z - s.ballCenter.z);
+		Vector nActual(s.actualContact.x - s.ballCenter.x, s.actualContact.y - s.ballCenter.y, s.actualContact.z - s.ballCenter.z);
+		Vector now;
+		{
+			ServerWrapper server = gameWrapper->GetGameEventAsServer();
+			BallWrapper ball = server.IsNull() ? BallWrapper(0) : server.GetBall();
+			if (!ball.IsNull()) now = ball.GetLocation();
+			else { const Frame& f = viewerFrames[std::min(head, n - 1)]; now = Vector(f.ballX, f.ballY, f.ballZ); }
+		}
+		DrawTargetHitbox(canvas, camLoc, camFwd, s, viewerFrames, head, now, true);
+		if (head < s.touchTick)
+		{
+			Overlay3D::BallRing(canvas, camLoc, camFwd, now, nIdeal, 255, 220, 0);
+			Overlay3D::BallRing(canvas, camLoc, camFwd, now, nActual, 80, 255, 120);
+		}
+		else
+		{
+			// After the touch: a faint ghost ball marks where the hit happened, with both rings on it
+			float fade = std::max(0.55f, 1.0f - (head - s.touchTick) / 90.0f);
+			Overlay3D::BallGhost(canvas, camLoc, camFwd, c, 255, 255, 255, static_cast<unsigned char>(70 * fade));
+			Overlay3D::BallRing(canvas, camLoc, camFwd, c, nIdeal, 255, 220, 0, fade);
+			Overlay3D::BallRing(canvas, camLoc, camFwd, c, nActual, 80, 255, 120, fade);
+		}
+
+		// Faint ghost ball: the earliest a fast, direct aerial could have met it
 		if (s.earliestTick >= 0 && s.earliestTick < n)
 		{
 			const Frame& e = viewerFrames[s.earliestTick];
-			Vector2F es;
-			if (ToScreen(canvas, camLoc, camFwd, Vector(e.ballX, e.ballY, e.ballZ), es))
-			{
-				canvas.SetColor(255, 220, 0, 255);
-				for (int a = 0; a < 16; a++)
-				{
-					float a0 = a * 0.3927f, a1 = (a + 1) * 0.3927f;
-					canvas.DrawLine(Vector2F{ es.X + 14 * std::cos(a0), es.Y + 14 * std::sin(a0) },
-						Vector2F{ es.X + 14 * std::cos(a1), es.Y + 14 * std::sin(a1) }, 2.0f);
-				}
-			}
+			Overlay3D::BallGhost(canvas, camLoc, camFwd, Vector(e.ballX, e.ballY, e.ballZ), 255, 220, 0, 150);
 		}
 	}
 
-	// Ball touches: green squares where you hit the ball
-	for (const Frame& f : viewerFrames)
+	// Other touches (not the shot): small green dots
+	for (int i = 0; i < n; i++)
 	{
-		if (!f.touch) continue;
+		const Frame& f = viewerFrames[i];
+		if (!f.touch || (viewerShot.valid && std::abs(i - viewerShot.touchTick) <= 12)) continue;
 		Vector2F s;
 		if (!ToScreen(canvas, camLoc, camFwd, Vector(f.touchX, f.touchY, f.touchZ), s)) continue;
+		canvas.SetColor(0, 0, 0, 120);
+		canvas.SetPosition(Vector2F{ s.X - 4.0f, s.Y - 4.0f });
+		canvas.FillBox(Vector2F{ 8.0f, 8.0f });
 		canvas.SetColor(80, 255, 120, 255);
-		canvas.SetPosition(Vector2F{ s.X - 5.0f, s.Y - 5.0f });
-		canvas.FillBox(Vector2F{ 10.0f, 10.0f });
+		canvas.SetPosition(Vector2F{ s.X - 3.0f, s.Y - 3.0f });
+		canvas.FillBox(Vector2F{ 6.0f, 6.0f });
+	}
+}
+
+// Target car: your hitbox, placed and aimed to make the ideal hit (yellow). Rides along with the ball
+// until the moment it's for, then stays put. After your touch, your real hitbox at contact shows in green.
+void RLCoach::DrawTargetHitbox(CanvasWrapper& canvas, const Vector& camLoc, const Vector& camFwd, const ShotAnalysis& s,
+	const std::vector<Frame>& fr, int tick, const Vector& ballNow, bool showActual)
+{
+	int mode = *targetHitbox;
+	if (mode == 0 || !s.valid || fr.empty()) return;
+	CarWrapper car = gameWrapper->GetLocalCar();
+	if (car.IsNull()) return;
+	Vector half = car.GetLocalCollisionExtent();
+	Vector off = car.GetLocalCollisionOffset();
+	if (half.X > 90.0f) half = half * 0.5f;   // some builds report the full size
+	if (half.X < 20.0f || half.Z < 5.0f) return;
+
+	bool earliest = mode == 2 && s.earliestValid && s.earliestTick >= 0;
+	Vector contact = earliest ? Vector(s.earliestContact.x, s.earliestContact.y, s.earliestContact.z)
+		: Vector(s.idealContact.x, s.idealContact.y, s.idealContact.z);
+	Vector ball = earliest ? Vector(s.earliestBall.x, s.earliestBall.y, s.earliestBall.z)
+		: Vector(s.ballCenter.x, s.ballCenter.y, s.ballCenter.z);
+	int anchor = earliest ? s.earliestTick : s.touchTick;
+
+	Vector fwd = ball - contact;
+	if (fwd.magnitude() < 1.0f) return;
+	fwd.normalize();
+	const Frame& tf = fr[std::max(0, std::min(s.touchTick, static_cast<int>(fr.size()) - 1))];
+	Overlay3D::Basis actual = Overlay3D::FromRotator(tf.carPitch, tf.carYaw, tf.carRoll);
+	Overlay3D::Basis aim = Overlay3D::Aim(fwd, actual.u);   // same roll as your car had, just aimed right
+
+	// Nose (front face center) on the ideal contact point
+	Vector rel = (contact - fwd * half.X) - ball;
+	Vector base = tick < anchor ? ballNow : ball;
+	float fade = tick < anchor ? 1.0f : std::max(0.55f, 1.0f - (tick - anchor) / 90.0f);
+	Overlay3D::HitboxWire(canvas, camLoc, camFwd, base + rel, aim, half, 255, 220, 0, fade);
+
+	if (showActual && tick >= s.touchTick)
+	{
+		Vector center = Vector(tf.carX, tf.carY, tf.carZ) + actual.f * off.X + actual.r * off.Y + actual.u * off.Z;
+		Overlay3D::HitboxWire(canvas, camLoc, camFwd, center, actual, half, 80, 255, 120, 0.6f * fade);
 	}
 }
 
@@ -410,21 +464,39 @@ void RLCoach::StartGradeRefresh()
 
 void RLCoach::RenderWindow()
 {
+	using namespace UiStyle;
 	if (!repListLoaded) RefreshRepList();
 
 	auto onGame = [this](std::function<void()> fn) {
 		gameWrapper->Execute([fn](GameWrapper*) { fn(); });
 	};
 
+	// ---- Title row ----
+	ImGui::TextColored(kAccent, "RL COACH");
+	ImGui::SameLine();
+	ImGui::TextDisabled("rep viewer");
+	{
+		std::string info = std::format("{} reps", repList.size());
+		float w = ImGui::CalcTextSize(info.c_str()).x + ImGui::CalcTextSize("Refresh").x + 40.0f;
+		ImGui::SameLine(std::max(200.0f, ImGui::GetWindowContentRegionMax().x - w));
+		ImGui::TextDisabled("%s", info.c_str());
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Refresh")) RefreshRepList();
+	}
+
+	gradeBook.TryCopy(uiAutoGrades);   // keeps the last copy if a refresh is busy
+	std::string watchingFile;
+	{
+		std::lock_guard<std::mutex> lock(uiSegMutex);
+		watchingFile = uiViewerFile;
+	}
+
 	// ---- Practice controls (while practicing) ----
 	if (uiPracticeActive)
 	{
-		ImGui::TextColored(ImVec4(0.47f, 0.78f, 1.0f, 1.0f), "PRACTICING");
-		ImGui::SameLine();
-		ImGui::TextDisabled("(results show on the in-game panel)");
-		// Game speed: 10-100%, snaps to 5%
-		int pct = static_cast<int>(std::lround(uiPracticeSpeed.load() * 100.0f));
+		Heading("PRACTICE");
 		ImGui::PushItemWidth(260);
+		int pct = static_cast<int>(std::lround(uiPracticeSpeed.load() * 100.0f));
 		if (ImGui::SliderInt("Game speed", &pct, 10, 100, "%d%%"))
 		{
 			pct = std::max(10, std::min(100, static_cast<int>(std::lround(pct / 5.0)) * 5));
@@ -432,9 +504,8 @@ void RLCoach::RenderWindow()
 			uiPracticeSpeed = sp;
 			onGame([this, sp]() { PracticeSetSpeed(sp); });
 		}
-		// Lead-in: how far before the moment you start, 0-2 s, snaps to 0.05 s
 		float lead = uiPracticeLeadIn.load();
-		if (ImGui::SliderFloat("Lead-in (seconds before the moment)", &lead, 0.0f, 2.0f, "%.2fs"))
+		if (ImGui::SliderFloat("Lead-in before the moment", &lead, 0.0f, 2.0f, "%.2fs"))
 		{
 			lead = std::round(lead * 20.0f) / 20.0f;
 			uiPracticeLeadIn = lead;
@@ -447,240 +518,328 @@ void RLCoach::RenderWindow()
 			uiPracticeAutoRamp = ramp;
 			onGame([this, ramp]() { practiceAutoRamp = ramp; practiceStreak = 0; });
 		}
-		if (ImGui::Button("Retry")) onGame([this]() { PracticeRetry(); });
+		if (AccentButton("Retry")) onGame([this]() { PracticeRetry(); });
 		ImGui::SameLine();
 		if (ImGui::Button("Stop practicing")) onGame([this]() { PracticeExit(); });
 		ImGui::SameLine();
-		ImGui::TextDisabled("Bind rlcoach_practice_retry / rlcoach_practice_exit to controller buttons");
-		ImGui::Separator();
+		ImGui::TextDisabled("results show on the in-game panel");
+	}
+
+	// ---- The rep being watched ----
+	if (uiViewerActive)
+	{
+		int total = uiViewerTotal;
+		int scrub = static_cast<int>(uiViewerPlayhead.load());
+		std::vector<Segment> segs;
+		std::vector<UiGrade> grades;
+		std::string overall, watching;
+		int segTotal = 0;
+		{
+			std::lock_guard<std::mutex> lock(uiSegMutex);
+			segs = uiSegs;
+			segTotal = uiSegTotal;
+			grades = uiGrades;
+			overall = uiOverall;
+			watching = uiViewerFile;
+		}
+		const RepListItem* cur = nullptr;
+		for (const RepListItem& it : repList) if (it.file == watching) { cur = &it; break; }
+
+		Heading("WATCHING");
+		if (cur)
+		{
+			std::string when = cur->savedAt.size() >= 19 ? cur->savedAt.substr(5, 11) : cur->savedAt;
+			ImGui::Text("%s", when.c_str());
+			ImGui::SameLine();
+			ImGui::TextDisabled("%s   %.1fs   %d touch%s", cur->endReason.c_str(), cur->duration, cur->touches, cur->touches == 1 ? "" : "es");
+			ImGui::SameLine();
+			auto ag = uiAutoGrades.find(cur->file);
+			if (ag != uiAutoGrades.end() && ag->second > 0) Pill(std::format("auto {}", ag->second), GradeColor(ag->second));
+			if (cur->rating > 0) { ImGui::SameLine(); Pill(std::format("you {}", cur->rating), GradeColor(cur->rating)); }
+			ImGui::SameLine();
+			bool kept = cur->kept;
+			if (kept) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.36f, 0.08f, 1.0f));
+			if (ImGui::SmallButton(kept ? "Kept" : "Keep")) ToggleKeep(watching);
+			if (kept) ImGui::PopStyleColor();
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip(kept ? "Kept forever. Click to un-keep." : "Keep this rep forever (never cleaned up)");
+		}
+		if (!overall.empty())
+		{
+			// overall is "4: Good shot  (why...)"
+			size_t colon = overall.find(':');
+			int o = colon != std::string::npos ? std::atoi(overall.substr(0, colon).c_str()) : 0;
+			ImGui::PushStyleColor(ImGuiCol_Text, GradeColor(o));
+			ImGui::TextWrapped("Grade %s", overall.c_str());
+			ImGui::PopStyleColor();
+		}
+
+		// Transport
+		bool playing = uiViewerPlaying;
+		if (AccentButton(playing ? "Pause" : "Play", ImVec2(64, 0)))
+			onGame([this]() { viewerPlaying = !viewerPlaying; uiViewerPlaying = viewerPlaying; });
+		ImGui::SameLine();
+		if (ImGui::Button("|<")) onGame([this]() { ViewerSeek(0.0f); });
+		ImGui::SameLine();
+		if (ImGui::Button("<")) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) - 1.0f); });
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back 1 tick");
+		ImGui::SameLine();
+		if (ImGui::Button(">")) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) + 1.0f); });
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forward 1 tick");
+		ImGui::SameLine(0, 18);
+		const float speeds[4] = { 0.1f, 0.25f, 0.5f, 1.0f };
+		const char* names[4] = { "0.1x", "0.25x", "0.5x", "1x" };
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2, 6));
+		for (int i = 0; i < 4; i++)
+		{
+			if (i > 0) ImGui::SameLine();
+			bool current = std::fabs(uiViewerSpeed.load() - speeds[i]) < 0.001f;
+			if (current) ImGui::PushStyleColor(ImGuiCol_Button, kAccentDim);
+			if (ImGui::Button(names[i]))
+			{
+				float sp = speeds[i];
+				uiViewerSpeed = sp;
+				onGame([this, sp]() { viewerSpeed = sp; });
+			}
+			if (current) ImGui::PopStyleColor();
+		}
+		ImGui::PopStyleVar();
+		ImGui::SameLine(0, 18);
+		if (ImGui::Checkbox("Loop", &uiLoop))
+		{
+			bool loop = uiLoop;
+			onGame([this, loop]() { viewerLoop = loop; });
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Stop watching")) onGame([this]() { ViewerExit(); });
+
+		// Segment timeline: click a segment to jump to it
+		if (!segs.empty() && segTotal > 1)
+		{
+			ImGui::Spacing();
+			ImDrawList* dl = ImGui::GetWindowDrawList();
+			ImVec2 origin = ImGui::GetCursorScreenPos();
+			float width = ImGui::GetContentRegionAvail().x;
+			const float rowH = 24.0f, gap = 4.0f;
+			auto colorFor = [](SegKind k, int alpha) -> ImU32 {
+				switch (k)
+				{
+				case SegKind::Approach: return IM_COL32(70, 86, 112, alpha);
+				case SegKind::Takeoff:  return IM_COL32(52, 112, 170, alpha);
+				case SegKind::Flight:   return IM_COL32(44, 92, 156, alpha);
+				case SegKind::Contact:  return IM_COL32(46, 150, 92, alpha);
+				case SegKind::Result:   return IM_COL32(170, 116, 40, alpha);
+				case SegKind::Recovery: return IM_COL32(120, 82, 160, alpha);
+				}
+				return IM_COL32(100, 100, 100, alpha);
+			};
+			auto xOf = [&](int tick) { return origin.x + width * static_cast<float>(tick) / static_cast<float>(segTotal - 1); };
+			dl->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + 2 * rowH + gap), IM_COL32(22, 25, 32, 255), 5.0f);
+
+			// Row 1: the play (approach to result). Row 2: recovery, which overlaps the result in time.
+			for (int si = 0; si < static_cast<int>(segs.size()); si++)
+			{
+				const Segment& sg = segs[si];
+				float y0 = origin.y + (sg.kind == SegKind::Recovery ? rowH + gap : 0.0f);
+				float x0 = xOf(sg.start) + 1.0f, x1 = std::max(xOf(sg.end + 1) - 1.0f, x0 + 3.0f);
+				std::string gradeName, why;
+				for (const UiGrade& ug : grades) if (ug.segIndex == si) { gradeName = ug.name; why = ug.why; }
+
+				ImGui::SetCursorScreenPos(ImVec2(x0, y0));
+				ImGui::PushID(si);   // stable ID so a click's press and release land on the same button
+				bool clicked = ImGui::InvisibleButton("seg", ImVec2(x1 - x0, rowH));
+				bool hovered = ImGui::IsItemHovered();
+				ImGui::PopID();
+
+				dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + rowH), colorFor(sg.kind, hovered ? 255 : 215), 4.0f);
+				if (!gradeName.empty())   // grade stripe along the bottom
+					dl->AddRectFilled(ImVec2(x0 + 2, y0 + rowH - 4), ImVec2(x1 - 2, y0 + rowH - 1), ImGui::GetColorU32(SegGradeColor(gradeName)), 2.0f);
+				std::string label = Segmenter::Name(sg.kind);
+				ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+				if (x1 - x0 > ts.x + 8.0f)
+					dl->AddText(ImVec2(x0 + 5.0f, y0 + (rowH - 3 - ts.y) * 0.5f), IM_COL32(240, 244, 250, 255), label.c_str());
+
+				if (clicked)
+				{
+					float target = static_cast<float>(sg.start);
+					onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
+				}
+				if (hovered)
+					ImGui::SetTooltip("%s%s%s: %.2fs to %.2fs (click to jump here)%s%s", label.c_str(), gradeName.empty() ? "" : " - ",
+						gradeName.c_str(), sg.start / 120.0f, (sg.end + 1) / 120.0f, why.empty() ? "" : "\n", why.c_str());
+			}
+			// Playhead
+			float px = xOf(static_cast<int>(uiViewerPlayhead.load()));
+			dl->AddLine(ImVec2(px, origin.y - 3.0f), ImVec2(px, origin.y + 2 * rowH + gap + 3.0f), IM_COL32(255, 255, 255, 235), 2.0f);
+			dl->AddTriangleFilled(ImVec2(px - 5, origin.y - 7), ImVec2(px + 5, origin.y - 7), ImVec2(px, origin.y - 1), IM_COL32(255, 255, 255, 235));
+			ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 2 * rowH + gap + 8.0f));
+		}
+
+		ImGui::PushItemWidth(-1);
+		if (ImGui::SliderInt("##scrub", &scrub, 0, total > 0 ? total - 1 : 0,
+			std::format("{:.2f}s / {:.2f}s", scrub / 120.0f, total / 120.0f).c_str()))
+		{
+			float target = static_cast<float>(scrub);
+			onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
+		}
+		ImGui::PopItemWidth();
+
+		// Breakdown: each segment's grade; the biggest fix is marked. Click a line to jump there, or practice it.
+		Heading("BREAKDOWN");
+		{
+			int here = static_cast<int>(uiViewerPlayhead.load());
+			if (AccentButton(std::format("Practice from here ({:.2f}s)", here / 120.0f).c_str()))
+				onGame([this, here]() { PracticeStartAt(here); });
+			ImGui::SameLine();
+			ImGui::TextDisabled("scrub to pick the moment; the lead-in still applies");
+		}
+		for (const UiGrade& ug : grades)
+		{
+			if (ug.name.empty() || ug.segIndex < 0 || ug.segIndex >= static_cast<int>(segs.size())) continue;
+			const Segment& sg = segs[ug.segIndex];
+			int si = ug.segIndex;
+			ImGui::PushID(si + 2000);
+			if (ImGui::SmallButton("Practice")) onGame([this, si]() { PracticeStart(si); });
+			ImGui::PopID();
+			ImGui::SameLine();
+			Pill(ug.name, SegGradeColor(ug.name), 84.0f);
+			ImGui::SameLine();
+			if (ug.biggest) { ImGui::TextColored(kGold, "FIX"); ImGui::SameLine(); }
+			std::string line = std::format("{}: {}", Segmenter::Name(sg.kind), ug.why);
+			ImGui::PushID(si + 1000);
+			if (ImGui::Selectable(line.c_str(), false))
+			{
+				float target = static_cast<float>(sg.start);
+				onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
+			}
+			ImGui::PopID();
+		}
+
+		{
+			int th = *targetHitbox;
+			const char* thNames[3] = { "Off", "For your touch", "For the earliest intercept" };
+			ImGui::PushItemWidth(220);
+			if (ImGui::Combo("Target car outline", &th, thNames, 3))
+			{
+				float v = static_cast<float>(th);
+				onGame([this, v]() { cvarManager->getCvar("rlcoach_target_hitbox").setValue(v); });
+			}
+			ImGui::PopItemWidth();
+		}
+		if (ImGui::TreeNode("What the lines mean"))
+		{
+			ImGui::TextColored(ImVec4(1.0f, 0.63f, 0.16f, 1.0f), "Orange");  ImGui::SameLine(); ImGui::TextDisabled("ball path");
+			ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "Blue");    ImGui::SameLine(); ImGui::TextDisabled("car path (bright = already played)");
+			ImGui::TextColored(kGold, "Yellow ring");                        ImGui::SameLine(); ImGui::TextDisabled("where you needed to hit the ball; yellow line = where it needed to go");
+			ImGui::TextColored(kGood, "Green ring");                         ImGui::SameLine(); ImGui::TextDisabled("where you hit it; green line = where it went");
+			ImGui::TextColored(kGold, "Yellow ghost ball");                  ImGui::SameLine(); ImGui::TextDisabled("earliest a fast, direct aerial could have met it");
+			ImGui::TextColored(kGold, "Yellow box");                         ImGui::SameLine(); ImGui::TextDisabled("your hitbox placed and aimed to make that ideal hit");
+			ImGui::TextColored(kGood, "Green box");                          ImGui::SameLine(); ImGui::TextDisabled("your real hitbox at contact");
+			ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "White dashes");       ImGui::SameLine(); ImGui::TextDisabled("predicted ball path");
+			ImGui::TreePop();
+		}
+	}
+	else
+	{
+		ImGui::Spacing();
+		ImGui::TextDisabled("Double-click a rep to watch it. Playback happens in free play; recording pauses while you watch.");
 	}
 
 	// ---- Rep list ----
-	if (ImGui::Button("Refresh")) RefreshRepList();
-	ImGui::SameLine();
-	ImGui::Text("%d reps saved (newest first). Double-click to watch.", static_cast<int>(repList.size()));
+	Heading("REPS");
+	if (gradeThreadBusy) { ImGui::SameLine(); ImGui::TextDisabled("grading..."); }
 
-	gradeBook.TryCopy(uiAutoGrades);   // keeps the last copy if a refresh is busy
-	if (gradeThreadBusy) { ImGui::SameLine(); ImGui::TextDisabled("(grading...)"); }
-
-	auto overallColor = [](int o) -> ImVec4 {
-		if (o >= 4) return ImVec4(0.45f, 0.9f, 0.45f, 1.0f);
-		if (o == 3) return ImVec4(1.0f, 0.8f, 0.3f, 1.0f);
-		if (o == 2) return ImVec4(1.0f, 0.63f, 0.31f, 1.0f);
-		if (o == 1) return ImVec4(1.0f, 0.45f, 0.4f, 1.0f);
-		return ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+	// A small 5-point star; filled when kept
+	auto drawStar = [](ImDrawList* dl, ImVec2 c, float r, bool filled, ImU32 col) {
+		ImVec2 pts[10];
+		for (int k = 0; k < 10; k++)
+		{
+			float a = -1.5708f + k * 0.62832f;
+			float rr = (k % 2 == 0) ? r : r * 0.45f;
+			pts[k] = ImVec2(c.x + rr * std::cos(a), c.y + rr * std::sin(a));
+		}
+		if (filled)
+			for (int k = 0; k < 10; k++) dl->AddTriangleFilled(c, pts[k], pts[(k + 1) % 10], col);
+		else
+			dl->AddPolyline(pts, 10, col, true, 1.2f);
 	};
 
-	ImGui::BeginChild("replist", ImVec2(0, 260), true);
-	ImGui::Columns(6, "repcols", false);
-	ImGui::SetColumnWidth(0, 110); ImGui::SetColumnWidth(1, 70); ImGui::SetColumnWidth(2, 60);
-	ImGui::SetColumnWidth(3, 60); ImGui::SetColumnWidth(4, 70);
-	const char* heads[6] = { "When", "Ended", "Length", "Touches", "Your grade", "Auto grade" };
+	ImGui::BeginChild("replist", ImVec2(0, uiViewerActive ? 220.0f : 380.0f), false);
+	ImGui::Columns(7, "repcols", false);
+	ImGui::SetColumnWidth(0, 34); ImGui::SetColumnWidth(1, 110); ImGui::SetColumnWidth(2, 70); ImGui::SetColumnWidth(3, 60);
+	ImGui::SetColumnWidth(4, 64); ImGui::SetColumnWidth(5, 70);
+	const char* heads[7] = { "", "When", "Ended", "Length", "Touches", "You", "Auto" };
 	for (const char* h : heads) { ImGui::TextDisabled("%s", h); ImGui::NextColumn(); }
 	ImGui::Separator();
+	std::string toggleKeep;
 	for (int i = 0; i < static_cast<int>(repList.size()); i++)
 	{
 		const RepListItem& it = repList[i];
+		bool isWatching = uiViewerActive && it.file == watchingFile;
+
+		// Keep star (only reps that still have a recording can be kept)
+		{
+			ImVec2 p = ImGui::GetCursorScreenPos();
+			float h = ImGui::GetTextLineHeight();
+			ImGui::PushID(i);
+			if (it.hasRecording && ImGui::InvisibleButton("keep", ImVec2(h + 4, h))) toggleKeep = it.file;
+			else if (!it.hasRecording) ImGui::Dummy(ImVec2(h + 4, h));
+			bool hover = it.hasRecording && ImGui::IsItemHovered();
+			ImGui::PopID();
+			ImU32 col = it.kept ? IM_COL32(255, 205, 64, 255) : (hover ? IM_COL32(220, 224, 232, 255) : IM_COL32(90, 96, 110, 255));
+			if (it.hasRecording || it.kept)
+				drawStar(ImGui::GetWindowDrawList(), ImVec2(p.x + h * 0.5f + 2, p.y + h * 0.5f), h * 0.45f, it.kept, col);
+			if (hover) ImGui::SetTooltip(it.kept ? "Kept forever. Click to un-keep." : "Keep this rep forever");
+		}
+		ImGui::NextColumn();
+
 		std::string when = it.savedAt.size() >= 19 ? it.savedAt.substr(5, 11) : it.savedAt;
 		std::string label = std::format("{}##row{}", when, i);
-		if (ImGui::Selectable(label.c_str(), selectedRep == i, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
+		if (!it.hasRecording) ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+		if (ImGui::Selectable(label.c_str(), selectedRep == i || isWatching, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
 		{
 			selectedRep = i;
-			if (ImGui::IsMouseDoubleClicked(0))
+			if (ImGui::IsMouseDoubleClicked(0) && it.hasRecording)
 			{
 				RepListItem pick = it;
 				onGame([this, pick]() { ViewerLoad(pick); });
 			}
 		}
+		if (!it.hasRecording && ImGui::IsItemHovered())
+			ImGui::SetTooltip(it.endReason == "reset" ? "Bailed rep: only the summary is saved"
+				: "Recording cleaned up: summary and grades are kept");
 		ImGui::NextColumn();
 		ImGui::TextUnformatted(it.endReason.c_str()); ImGui::NextColumn();
 		ImGui::Text("%.1fs", it.duration); ImGui::NextColumn();
 		ImGui::Text("%d", it.touches); ImGui::NextColumn();
-		if (it.rating > 0) ImGui::TextColored(overallColor(it.rating), "%d", it.rating);
+		if (!it.hasRecording) ImGui::PopStyleColor();
+		if (it.rating > 0) Pill(std::to_string(it.rating), GradeColor(it.rating), 26.0f);
 		else ImGui::TextDisabled("-");
 		ImGui::NextColumn();
 		auto ag = uiAutoGrades.find(it.file);
-		if (ag == uiAutoGrades.end()) ImGui::TextDisabled("...");
-		else if (ag->second <= 0) ImGui::TextDisabled("n/a");
-		else ImGui::TextColored(overallColor(ag->second), "%d", ag->second);
+		if (ag == uiAutoGrades.end()) ImGui::TextDisabled(it.hasRecording ? "..." : "-");
+		else if (ag->second <= 0) ImGui::TextDisabled("-");
+		else Pill(std::to_string(ag->second), GradeColor(ag->second), 26.0f);
 		ImGui::NextColumn();
 	}
 	ImGui::Columns(1);
 	ImGui::EndChild();
+	if (!toggleKeep.empty()) ToggleKeep(toggleKeep);
 
-	if (selectedRep >= 0 && ImGui::Button("Watch selected"))
+	bool canWatchSelected = selectedRep >= 0 && selectedRep < static_cast<int>(repList.size()) && repList[selectedRep].hasRecording;
+	if (canWatchSelected && AccentButton("Watch selected"))
 	{
 		RepListItem pick = repList[selectedRep];
 		onGame([this, pick]() { ViewerLoad(pick); });
 	}
-	if (!repList.empty())
+	const RepListItem* latest = nullptr;
+	for (const RepListItem& it : repList) if (it.hasRecording) { latest = &it; break; }
+	if (latest)
 	{
-		if (selectedRep >= 0) ImGui::SameLine();
+		if (canWatchSelected) ImGui::SameLine();
 		if (ImGui::Button("Watch latest"))
 		{
-			RepListItem pick = repList.front();
+			RepListItem pick = *latest;
 			onGame([this, pick]() { ViewerLoad(pick); });
 		}
 	}
-
-	ImGui::Separator();
-
-	// ---- Playback controls ----
-	if (!uiViewerActive)
-	{
-		ImGui::TextWrapped("Pick a rep to watch. Playback happens in free play; recording pauses while you watch.");
-		return;
-	}
-
-	bool playing = uiViewerPlaying;
-	if (ImGui::Button(playing ? "Pause" : "Play"))
-		onGame([this]() { viewerPlaying = !viewerPlaying; uiViewerPlaying = viewerPlaying; });
-	ImGui::SameLine();
-	if (ImGui::Button("|<")) onGame([this]() { ViewerSeek(0.0f); });
-	ImGui::SameLine();
-	if (ImGui::Button("< 1 tick")) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) - 1.0f); });
-	ImGui::SameLine();
-	if (ImGui::Button("1 tick >")) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) + 1.0f); });
-	ImGui::SameLine();
-	if (ImGui::Button("Stop watching")) onGame([this]() { ViewerExit(); });
-
-	ImGui::Text("Speed:");
-	const float speeds[4] = { 0.1f, 0.25f, 0.5f, 1.0f };
-	const char* names[4] = { "0.1x", "0.25x", "0.5x", "1x" };
-	for (int i = 0; i < 4; i++)
-	{
-		ImGui::SameLine();
-		bool current = std::fabs(uiViewerSpeed.load() - speeds[i]) < 0.001f;
-		if (current) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.9f, 1.0f));
-		if (ImGui::Button(names[i]))
-		{
-			float sp = speeds[i];
-			uiViewerSpeed = sp;
-			onGame([this, sp]() { viewerSpeed = sp; });
-		}
-		if (current) ImGui::PopStyleColor();
-	}
-	ImGui::SameLine();
-	if (ImGui::Checkbox("Loop", &uiLoop))
-	{
-		bool loop = uiLoop;
-		onGame([this, loop]() { viewerLoop = loop; });
-	}
-
-	int total = uiViewerTotal;
-	int head = static_cast<int>(uiViewerPlayhead.load());
-	int scrub = head;
-	// ---- Segment timeline: click a segment to jump to it ----
-	std::vector<Segment> segs;
-	std::vector<UiGrade> grades;
-	std::string overall;
-	int segTotal = 0;
-	{
-		std::lock_guard<std::mutex> lock(uiSegMutex);
-		segs = uiSegs;
-		segTotal = uiSegTotal;
-		grades = uiGrades;
-		overall = uiOverall;
-	}
-	auto gradeColor = [](const std::string& g) -> ImVec4 {
-		if (g == "Clean" || g == "Calculated") return ImVec4(0.45f, 0.9f, 0.45f, 1.0f);
-		if (g == "Solid") return ImVec4(0.6f, 0.8f, 1.0f, 1.0f);
-		if (g == "Sloppy") return ImVec4(1.0f, 0.8f, 0.3f, 1.0f);
-		return ImVec4(1.0f, 0.45f, 0.4f, 1.0f);
-	};
-	if (!overall.empty()) ImGui::TextWrapped("Grade %s", overall.c_str());
-	if (!segs.empty() && segTotal > 1)
-	{
-		ImDrawList* dl = ImGui::GetWindowDrawList();
-		ImVec2 origin = ImGui::GetCursorScreenPos();
-		float width = ImGui::GetContentRegionAvail().x;
-		const float rowH = 22.0f;
-		auto colorFor = [](SegKind k) -> ImU32 {
-			switch (k)
-			{
-			case SegKind::Approach: return IM_COL32(90, 110, 140, 255);
-			case SegKind::Takeoff:  return IM_COL32(70, 150, 220, 255);
-			case SegKind::Flight:   return IM_COL32(60, 120, 200, 255);
-			case SegKind::Contact:  return IM_COL32(80, 220, 120, 255);
-			case SegKind::Result:   return IM_COL32(230, 160, 50, 255);
-			case SegKind::Recovery: return IM_COL32(170, 110, 210, 255);
-			}
-			return IM_COL32(128, 128, 128, 255);
-		};
-		auto xOf = [&](int tick) { return origin.x + width * static_cast<float>(tick) / static_cast<float>(segTotal - 1); };
-
-		// Row 1: the play (approach to result). Row 2: recovery, which overlaps the result in time.
-		for (int si = 0; si < static_cast<int>(segs.size()); si++)
-		{
-			const Segment& sg = segs[si];
-			float y0 = origin.y + (sg.kind == SegKind::Recovery ? rowH + 4.0f : 0.0f);
-			float x0 = xOf(sg.start), x1 = std::max(xOf(sg.end + 1), x0 + 3.0f);
-			dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + rowH), colorFor(sg.kind));
-			dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y0 + rowH), IM_COL32(20, 20, 20, 255));
-			std::string labelStr = Segmenter::Name(sg.kind);
-			std::string why;
-			for (const UiGrade& ug : grades)
-				if (ug.segIndex == si) { labelStr += ": " + ug.name; why = ug.why; }
-			const char* label = labelStr.c_str();
-			ImVec2 ts = ImGui::CalcTextSize(label);
-			if (x1 - x0 > ts.x + 6.0f)
-				dl->AddText(ImVec2(x0 + 4.0f, y0 + (rowH - ts.y) * 0.5f), IM_COL32(255, 255, 255, 255), label);
-
-			ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-			ImGui::PushID(si);  // stable ID so a click's press and release land on the same button
-			if (ImGui::InvisibleButton("seg", ImVec2(x1 - x0, rowH)))
-			{
-				float target = static_cast<float>(sg.start);
-				onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
-			}
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("%s: %.2fs to %.2fs (click to jump here)%s%s", label, sg.start / 120.0f, (sg.end + 1) / 120.0f,
-					why.empty() ? "" : "\n", why.c_str());
-			ImGui::PopID();
-		}
-		// Playhead
-		float px = xOf(static_cast<int>(uiViewerPlayhead.load()));
-		dl->AddLine(ImVec2(px, origin.y - 2.0f), ImVec2(px, origin.y + 2 * rowH + 6.0f), IM_COL32(255, 255, 255, 255), 2.0f);
-		ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 2 * rowH + 10.0f));
-	}
-
-	// Segment grades, in order; the biggest fix is marked. Click a line to jump there, or Practice it.
-	{
-		int here = static_cast<int>(uiViewerPlayhead.load());
-		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.55f, 0.1f, 1.0f));
-		if (ImGui::Button(std::format("Practice from here ({:.2f}s)", here / 120.0f).c_str()))
-			onGame([this, here]() { PracticeStartAt(here); });
-		ImGui::PopStyleColor();
-		ImGui::SameLine();
-		ImGui::TextDisabled("Scrub the timeline to pick the moment; the lead-in still applies");
-	}
-	for (const UiGrade& ug : grades)
-	{
-		if (ug.name.empty() || ug.segIndex < 0 || ug.segIndex >= static_cast<int>(segs.size())) continue;
-		const Segment& sg = segs[ug.segIndex];
-		ImGui::PushID(ug.segIndex + 2000);
-		int si = ug.segIndex;
-		if (ImGui::SmallButton("Practice")) onGame([this, si]() { PracticeStart(si); });
-		ImGui::PopID();
-		ImGui::SameLine();
-		ImGui::TextColored(gradeColor(ug.name), "%-8s", ug.name.c_str());
-		ImGui::SameLine();
-		std::string line = std::format("{}{}: {}", ug.biggest ? ">> " : "", Segmenter::Name(sg.kind), ug.why);
-		ImGui::PushID(ug.segIndex + 1000);
-		if (ImGui::Selectable(line.c_str(), ug.biggest))
-		{
-			float target = static_cast<float>(sg.start);
-			onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
-		}
-		ImGui::PopID();
-	}
-
-	ImGui::PushItemWidth(-1);
-	if (ImGui::SliderInt("##scrub", &scrub, 0, total > 0 ? total - 1 : 0,
-		std::format("{:.2f}s / {:.2f}s", scrub / 120.0f, total / 120.0f).c_str()))
-	{
-		float target = static_cast<float>(scrub);
-		onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
-	}
-	ImGui::PopItemWidth();
 }

@@ -53,7 +53,7 @@ void ShotBook::Update(const std::filesystem::path& root)
 
 		std::vector<Frame> frames;
 		std::string err;
-		if (RepLibrary::LoadRep(root / "reps" / item.file, frames, err))
+		if (RepLibrary::LoadRep(root, item.file, frames, err))
 		{
 			ShotAnalysis sa = ShotGeometry::Analyze(frames);
 			if (sa.valid)
@@ -94,6 +94,21 @@ bool ShotBook::TryAdd(const std::filesystem::path& root, const std::string& file
 	std::ofstream out(root / "shot_cache.csv", std::ios::app);
 	if (out) out << file << ',' << shotKey << ',' << (goal ? 1 : 0) << ',' << touchSec << ',' << jumpSec << '\n';
 	return true;
+}
+
+std::unordered_set<std::string> ShotBook::BestFiles()
+{
+	std::lock_guard<std::mutex> lock(mtx);
+	std::unordered_map<std::string, std::pair<float, std::string>> best;   // shot -> (touch time, file)
+	for (const auto& [file, e] : entries)
+	{
+		if (!e.goal || e.touchSec < 0) continue;
+		auto it = best.find(e.shot);
+		if (it == best.end() || e.touchSec < it->second.first) best[e.shot] = { e.touchSec, file };
+	}
+	std::unordered_set<std::string> out;
+	for (const auto& [shot, b] : best) out.insert(b.second);
+	return out;
 }
 
 ShotReference ShotBook::Lookup(const std::string& shotKey)

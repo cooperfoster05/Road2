@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "RepLibrary.h"
+#include "RepStore.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -55,12 +56,18 @@ namespace
 	}
 }
 
-bool RepLibrary::LoadRep(const std::filesystem::path& file, std::vector<Frame>& out, std::string& err)
+bool RepLibrary::LoadRep(const std::filesystem::path& root, const std::string& name, std::vector<Frame>& out, std::string& err)
 {
 	out.clear();
-	std::ifstream in(file);
-	if (!in) { err = "Couldn't open " + file.filename().string(); return false; }
+	std::string csv;
+	if (!RepStore::Read(root, name, csv, err)) return false;
+	return ParseRep(csv, out, err);
+}
 
+bool RepLibrary::ParseRep(const std::string& csv, std::vector<Frame>& out, std::string& err)
+{
+	out.clear();
+	std::istringstream in(csv);
 	std::string line;
 	if (!std::getline(in, line)) { err = "Empty file"; return false; }
 	std::vector<std::string> header = SplitCsv(TrimCr(line));
@@ -105,6 +112,23 @@ std::vector<RepListItem> RepLibrary::ListReps(const std::filesystem::path& root)
 		}
 	}
 
+	// Keep marks (newest line wins)
+	std::unordered_map<std::string, bool> kept;
+	{
+		std::ifstream kin(root / "kept.csv");
+		std::string line;
+		std::getline(kin, line); // header
+		while (std::getline(kin, line))
+		{
+			auto p = SplitCsv(TrimCr(line));
+			if (p.size() >= 2) kept[p[0]] = p[1] == "1";
+		}
+	}
+
+	// Which recordings still exist
+	std::unordered_map<std::string, bool> recorded;
+	for (const RepStore::RecInfo& r : RepStore::List(root)) recorded[r.name] = true;
+
 	std::ifstream in(root / "reps_index.csv");
 	std::string line;
 	if (!std::getline(in, line)) return items;
@@ -134,6 +158,9 @@ std::vector<RepListItem> RepLibrary::ListReps(const std::filesystem::path& root)
 		it.floorBeforeGoal = get(cBounce) == "1";
 		auto r = ratings.find(it.file);
 		it.rating = r == ratings.end() ? 0 : r->second;
+		auto k = kept.find(it.file);
+		it.kept = k != kept.end() && k->second;
+		it.hasRecording = recorded.count(it.file) > 0;
 		items.push_back(it);
 	}
 

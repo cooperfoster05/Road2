@@ -105,6 +105,18 @@
     <ClCompile Include="RLCoachPractice.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
+    <ClCompile Include="RLCoachStorage.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
+    <ClCompile Include="RLCoachHud.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
+    <ClCompile Include="ControllerOverlay.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
+    <ClCompile Include="RepStore.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
     <ClCompile Include="BallPredictor.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
@@ -186,6 +198,27 @@
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="GradeBook.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="ControllerOverlay.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="HudDraw.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="Overlay3D.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="Ratings.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="UiStyle.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="Units.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="RepStore.h">
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="BallPredictor.h">

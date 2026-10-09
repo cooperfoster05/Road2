@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 struct ShotReference
 {
@@ -29,6 +30,9 @@ public:
 	bool TryGet(const std::string& shotKey, ShotReference& out);
 	bool TryAdd(const std::filesystem::path& rlcoachFolder, const std::string& file, const std::string& shotKey,
 		bool goal, float touchSec, float jumpSec);
+
+	// Every shot's fastest-goal rep (the timing benchmarks); cleanup never deletes these
+	std::unordered_set<std::string> BestFiles();
 
 private:
 	ShotReference Lookup(const std::string& shotKey);   // caller holds the lock

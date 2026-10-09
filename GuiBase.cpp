@@ -1,5 +1,6 @@
 ﻿#include "pch.h"
 #include "GuiBase.h"
+#include "UiStyle.h"
 
 std::string SettingsWindowBase::GetPluginName()
 {
@@ -48,16 +49,13 @@ void PluginWindowBase::OnClose()
 
 void PluginWindowBase::Render()
 {
-	if (!ImGui::Begin(menuTitle_.c_str(), &isWindowOpen_, ImGuiWindowFlags_None))
 	{
-		// Early out if the window is collapsed, as an optimization.
+		UiStyle::Scope style;   // RL Coach's look, only for this window
+		ImGui::SetNextWindowSize(ImVec2(640, 680), ImGuiCond_FirstUseEver);
+		if (ImGui::Begin(menuTitle_.c_str(), &isWindowOpen_, ImGuiWindowFlags_None))
+			RenderWindow();
 		ImGui::End();
-		return;
 	}
-
-	RenderWindow();
-
-	ImGui::End();
 
 	if (!isWindowOpen_)
 	{

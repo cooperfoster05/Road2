@@ -39,6 +39,9 @@ struct ShotAnalysis
 	// Timing
 	int   earliestTick = -1;      // earliest tick a fast, direct aerial could have reached the ball
 	float lateBy = 0;             // seconds between that and your touch
+	bool  earliestValid = false;  // where to hit the ball at that earliest moment to score
+	V3    earliestBall;           // ball center at earliestTick
+	V3    earliestContact;        // ideal contact point on the ball then
 
 	// Shot quality
 	float shotSpeed = 0;          // ball speed off your car

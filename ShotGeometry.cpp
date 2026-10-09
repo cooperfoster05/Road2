@@ -201,7 +201,20 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 		float v0 = std::max(0.0f, Dot(cv, Unit(dvec)));
 		if (ReachDistance(v0, kReachAccel, t) >= d) { s.earliestTick = i; break; }
 	}
-	if (s.earliestTick >= 0) s.lateBy = (k - s.earliestTick) / 120.0f;
+	if (s.earliestTick >= 0)
+	{
+		s.lateBy = (k - s.earliestTick) / 120.0f;
+		// Where to hit it then: same target, at least a decent shot speed
+		const Frame& e = fr[s.earliestTick];
+		s.earliestBall = BallPos(e);
+		V3 vI;
+		if (LaunchTo(s.earliestBall, target, std::max(Len(vout), 1800.0f), vI))
+		{
+			V3 nI = Unit(Sub(vI, BallVel(e)));
+			s.earliestContact = Sub(s.earliestBall, Mul(nI, kBallR));
+			s.earliestValid = true;
+		}
+	}
 
 	s.valid = true;
 	return s;
