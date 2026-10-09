@@ -1,0 +1,47 @@
+#pragma once
+// Shot math for one rep: where the shot was going, how far off target, where on the ball
+// you should have hit it, and how early you could have reached the ball.
+// Plain C++, no BakkesMod code. Tuned on recorded reps (see design doc).
+
+#include "RepData.h"
+#include <string>
+#include <vector>
+
+struct V3
+{
+	float x = 0, y = 0, z = 0;
+};
+
+struct ShotAnalysis
+{
+	bool  valid = false;          // false if the rep has no touch to analyze
+	int   startTick = 0;          // ball starts moving
+	int   touchTick = -1;         // first frame that reports the touch
+	float goalSign = 1;           // +1 = shooting at the +Y goal
+
+	// Where the shot was headed
+	bool  reachesGoalLine = false;
+	float crossX = 0, crossZ = 0; // ball center at the goal line
+	float missDist = 0;           // 0 = on target; otherwise units outside the goal mouth
+	std::string missDir;          // "", "left", "right", "high", "low", or combos
+
+	// Aim and contact
+	float aimErrDeg = 0;          // angle between your shot and the closest on-target shot at the same speed
+	V3    ballCenter;             // ball center at contact
+	V3    actualContact;          // where you hit the ball
+	V3    idealContact;           // where on the ball would have sent it on target
+	V3    shotDir;                // unit direction the ball left your car
+	V3    idealDir;               // unit direction it needed to leave
+	float contactErr = 0;         // distance between actual and ideal contact points (units)
+	float contactUp = 0;          // + means you hit higher on the ball than ideal
+	float contactLeft = 0;        // + means you hit further left on the ball than ideal (your view toward goal)
+
+	// Timing
+	int   earliestTick = -1;      // earliest tick a fast, direct aerial could have reached the ball
+	float lateBy = 0;             // seconds between that and your touch
+};
+
+namespace ShotGeometry
+{
+	ShotAnalysis Analyze(const std::vector<Frame>& frames);
+}

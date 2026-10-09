@@ -75,6 +75,8 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 	viewerFrames = std::move(loaded);
 	viewerRep = item;
 
+	viewerShot = ShotGeometry::Analyze(viewerFrames);
+
 	// Predicted ball path from the moment the ball starts moving, for comparing against what really happened
 	viewerPred.clear();
 	if (predictor.Ready())
@@ -261,6 +263,49 @@ void RLCoach::DrawViewerPaths(CanvasWrapper& canvas)
 	if (!viewerPred.empty()) DrawPredictedPath(canvas, viewerPred);
 	drawPath([](const Frame& f) { return Vector(f.ballX, f.ballY, f.ballZ); }, 255, 160, 40);
 	drawPath([](const Frame& f) { return Vector(f.carX, f.carY, f.carZ); }, 90, 190, 255);
+
+	// Shot analysis overlays
+	if (viewerShot.valid)
+	{
+		auto box = [&](const Vector& p, float size, unsigned char r, unsigned char g, unsigned char b) {
+			Vector2F s;
+			if (!ToScreen(canvas, camLoc, camFwd, p, s)) return;
+			canvas.SetColor(r, g, b, 255);
+			canvas.SetPosition(Vector2F{ s.X - size / 2, s.Y - size / 2 });
+			canvas.FillBox(Vector2F{ size, size });
+		};
+		auto line = [&](const Vector& a, const Vector& b, unsigned char r, unsigned char g, unsigned char bl) {
+			Vector2F sa, sb;
+			if (!ToScreen(canvas, camLoc, camFwd, a, sa) || !ToScreen(canvas, camLoc, camFwd, b, sb)) return;
+			canvas.SetColor(r, g, bl, 230);
+			canvas.DrawLine(sa, sb, 3.0f);
+		};
+		const ShotAnalysis& s = viewerShot;
+		Vector c(s.ballCenter.x, s.ballCenter.y, s.ballCenter.z);
+
+		// Yellow: where on the ball you needed to hit it, and the direction it needed to go
+		box(Vector(s.idealContact.x, s.idealContact.y, s.idealContact.z), 12.0f, 255, 220, 0);
+		line(c, Vector(c.X + s.idealDir.x * 900, c.Y + s.idealDir.y * 900, c.Z + s.idealDir.z * 900), 255, 220, 0);
+		// Green: the direction your shot actually went
+		line(c, Vector(c.X + s.shotDir.x * 900, c.Y + s.shotDir.y * 900, c.Z + s.shotDir.z * 900), 80, 255, 120);
+
+		// Yellow ring: earliest a fast, direct aerial could have met the ball
+		if (s.earliestTick >= 0 && s.earliestTick < n)
+		{
+			const Frame& e = viewerFrames[s.earliestTick];
+			Vector2F es;
+			if (ToScreen(canvas, camLoc, camFwd, Vector(e.ballX, e.ballY, e.ballZ), es))
+			{
+				canvas.SetColor(255, 220, 0, 255);
+				for (int a = 0; a < 16; a++)
+				{
+					float a0 = a * 0.3927f, a1 = (a + 1) * 0.3927f;
+					canvas.DrawLine(Vector2F{ es.X + 14 * std::cos(a0), es.Y + 14 * std::sin(a0) },
+						Vector2F{ es.X + 14 * std::cos(a1), es.Y + 14 * std::sin(a1) }, 2.0f);
+				}
+			}
+		}
+	}
 
 	// Ball touches: green squares where you hit the ball
 	for (const Frame& f : viewerFrames)

@@ -582,6 +582,23 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 		add(std::format("Thr {:+.2f}  Str {:+.2f}  P {:+.2f}  Y {:+.2f}  R {:+.2f}",
 			f.throttle, f.steer, f.pitch, f.yaw, f.roll), 180, 220, 255);
 		add(std::format("Jump {}   Boost {}   Slide {}", f.jump ? "X" : "-", f.boost ? "X" : "-", f.handbrake ? "X" : "-"), 180, 220, 255);
+		if (viewerShot.valid)
+		{
+			const ShotAnalysis& s = viewerShot;
+			if (!s.reachesGoalLine)
+				add("Shot: never reached the goal line", 255, 120, 120);
+			else if (s.missDist <= 0.0f)
+				add("Shot: on target", 120, 230, 120);
+			else
+				add(std::format("Shot: missed {} by {:.0f}", s.missDir, s.missDist), 255, 120, 120);
+			add(std::format("Aim: {:.1f} deg off   Contact: {:.0f} {} / {:.0f} {} of ideal",
+				s.aimErrDeg,
+				std::fabs(s.contactUp), s.contactUp >= 0 ? "high" : "low",
+				std::fabs(s.contactLeft), s.contactLeft >= 0 ? "left" : "right"));
+			if (s.earliestTick >= 0)
+				add(std::format("Touch came {:.2f}s after the earliest possible intercept", s.lateBy));
+			add("Yellow: ideal hit spot + direction   Green line: your shot   Ring: earliest intercept", 160, 160, 160);
+		}
 		add(viewerPred.empty() ? "Orange: ball   Blue: car   Green: touches"
 			: "Orange: ball   Blue: car   Green: touches   White dashes: predicted ball", 160, 160, 160);
 		if (!viewerStatus.empty()) add(viewerStatus, 255, 200, 0);

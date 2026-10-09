@@ -9,6 +9,7 @@
 #include "RepWriter.h"
 #include "RepLibrary.h"
 #include "BallPredictor.h"
+#include "ShotGeometry.h"
 
 #include <atomic>
 #include <chrono>
@@ -36,6 +37,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	BallPredictor predictor;
 	std::vector<BallSample> livePred;      // predicted path for the rep in progress
 	std::vector<BallSample> viewerPred;    // predicted path for the rep being watched
+	ShotAnalysis viewerShot;               // shot math for the rep being watched
 
 	// ---- Rep detection ----
 	enum class RepState { Idle, WaitReset, Armed, Recording };
