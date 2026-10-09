@@ -18,6 +18,7 @@ public:
 	// Never waits (for the game and render threads); returns false if a refresh holds the lock.
 	bool TrySet(const std::string& file, int overall, const std::string& shotKey, const std::string& refFile);
 	bool TryCopy(std::unordered_map<std::string, int>& out);
+	void Copy(std::unordered_map<std::string, int>& out);   // waits briefly if a refresh is storing a grade
 
 private:
 	struct Entry { int overall = 0; std::string shotKey; std::string refFile; };

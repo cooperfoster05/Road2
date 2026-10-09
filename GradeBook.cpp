@@ -37,6 +37,13 @@ bool GradeBook::TrySet(const std::string& file, int overall, const std::string& 
 	return true;
 }
 
+void GradeBook::Copy(std::unordered_map<std::string, int>& out)
+{
+	std::lock_guard<std::mutex> lock(mtx);
+	out.clear();
+	for (const auto& [file, e] : grades) out[file] = e.overall;
+}
+
 bool GradeBook::TryCopy(std::unordered_map<std::string, int>& out)
 {
 	std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);

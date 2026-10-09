@@ -57,6 +57,7 @@ static int ViewerEventTick(const RepListItem& item) { return item.eventTick; }
 void RLCoach::ViewerLoad(const RepListItem& item)
 {
 	if (!writer) return;
+	PracticeExit();   // opening a rep ends any practice set
 	std::vector<Frame> loaded;
 	std::string err;
 	if (!RepLibrary::LoadRep(writer->Folder() / "reps" / item.file, loaded, err))
@@ -129,6 +130,7 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 
 void RLCoach::ViewerExit()
 {
+	PracticeExit();
 	if (!viewerActive) return;
 	viewerActive = false;
 	viewerPlaying = false;
@@ -248,6 +250,7 @@ void RLCoach::ViewerTick(CarWrapper& car)
 
 void RLCoach::OverrideViewerInput(CarWrapper& car, void* params)
 {
+	if (practiceState != PracticeState::Off) return;   // practice: your controller drives
 	if (!viewerActive || !params || viewerFrames.empty() || car.IsNull()) return;
 	CarWrapper local = gameWrapper->GetLocalCar();
 	if (local.IsNull() || local.memory_address != car.memory_address) return;
@@ -412,6 +415,45 @@ void RLCoach::RenderWindow()
 	auto onGame = [this](std::function<void()> fn) {
 		gameWrapper->Execute([fn](GameWrapper*) { fn(); });
 	};
+
+	// ---- Practice controls (while practicing) ----
+	if (uiPracticeActive)
+	{
+		ImGui::TextColored(ImVec4(0.47f, 0.78f, 1.0f, 1.0f), "PRACTICING");
+		ImGui::SameLine();
+		ImGui::TextDisabled("(results show on the in-game panel)");
+		// Game speed: 10-100%, snaps to 5%
+		int pct = static_cast<int>(std::lround(uiPracticeSpeed.load() * 100.0f));
+		ImGui::PushItemWidth(260);
+		if (ImGui::SliderInt("Game speed", &pct, 10, 100, "%d%%"))
+		{
+			pct = std::max(10, std::min(100, static_cast<int>(std::lround(pct / 5.0)) * 5));
+			float sp = pct / 100.0f;
+			uiPracticeSpeed = sp;
+			onGame([this, sp]() { PracticeSetSpeed(sp); });
+		}
+		// Lead-in: how far before the moment you start, 0-2 s, snaps to 0.05 s
+		float lead = uiPracticeLeadIn.load();
+		if (ImGui::SliderFloat("Lead-in (seconds before the moment)", &lead, 0.0f, 2.0f, "%.2fs"))
+		{
+			lead = std::round(lead * 20.0f) / 20.0f;
+			uiPracticeLeadIn = lead;
+			onGame([this, lead]() { PracticeSetLeadIn(lead); PracticeRetry(); });
+		}
+		ImGui::PopItemWidth();
+		bool ramp = uiPracticeAutoRamp;
+		if (ImGui::Checkbox("Auto-ramp (3 hits in a row = +10% speed)", &ramp))
+		{
+			uiPracticeAutoRamp = ramp;
+			onGame([this, ramp]() { practiceAutoRamp = ramp; practiceStreak = 0; });
+		}
+		if (ImGui::Button("Retry")) onGame([this]() { PracticeRetry(); });
+		ImGui::SameLine();
+		if (ImGui::Button("Stop practicing")) onGame([this]() { PracticeExit(); });
+		ImGui::SameLine();
+		ImGui::TextDisabled("Bind rlcoach_practice_retry / rlcoach_practice_exit to controller buttons");
+		ImGui::Separator();
+	}
 
 	// ---- Rep list ----
 	if (ImGui::Button("Refresh")) RefreshRepList();
@@ -602,11 +644,25 @@ void RLCoach::RenderWindow()
 		ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 2 * rowH + 10.0f));
 	}
 
-	// Segment grades, in order; the biggest fix is marked and clickable
+	// Segment grades, in order; the biggest fix is marked. Click a line to jump there, or Practice it.
+	{
+		int here = static_cast<int>(uiViewerPlayhead.load());
+		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.55f, 0.1f, 1.0f));
+		if (ImGui::Button(std::format("Practice from here ({:.2f}s)", here / 120.0f).c_str()))
+			onGame([this, here]() { PracticeStartAt(here); });
+		ImGui::PopStyleColor();
+		ImGui::SameLine();
+		ImGui::TextDisabled("Scrub the timeline to pick the moment; the lead-in still applies");
+	}
 	for (const UiGrade& ug : grades)
 	{
 		if (ug.name.empty() || ug.segIndex < 0 || ug.segIndex >= static_cast<int>(segs.size())) continue;
 		const Segment& sg = segs[ug.segIndex];
+		ImGui::PushID(ug.segIndex + 2000);
+		int si = ug.segIndex;
+		if (ImGui::SmallButton("Practice")) onGame([this, si]() { PracticeStart(si); });
+		ImGui::PopID();
+		ImGui::SameLine();
 		ImGui::TextColored(gradeColor(ug.name), "%-8s", ug.name.c_str());
 		ImGui::SameLine();
 		std::string line = std::format("{}{}: {}", ug.biggest ? ">> " : "", Segmenter::Name(sg.kind), ug.why);

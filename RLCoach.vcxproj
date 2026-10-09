@@ -116,6 +116,7 @@
     <ClCompile Include="Grader.cpp" />
     <ClCompile Include="GradeBook.cpp" />
     <ClCompile Include="RLCoachViewer.cpp" />
+    <ClCompile Include="RLCoachPractice.cpp" />
     <ClCompile Include="BallPredictor.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PreprocessorDefinitions>RS_DONT_LOG;%(PreprocessorDefinitions)</PreprocessorDefinitions>

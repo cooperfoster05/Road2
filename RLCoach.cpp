@@ -117,6 +117,11 @@ void RLCoach::onLoad()
 		cvarManager->executeCommand("togglemenu " + GetMenuName());
 	}, "Open or close the rep viewer", PERMISSION_ALL);
 
+	cvarManager->registerNotifier("rlcoach_practice_retry", [this](std::vector<std::string>) { PracticeRetry(); },
+		"Practice: reset to the start of the segment", PERMISSION_ALL);
+	cvarManager->registerNotifier("rlcoach_practice_exit", [this](std::vector<std::string>) { PracticeExit(); },
+		"Practice: stop practicing", PERMISSION_ALL);
+
 	cvarManager->registerNotifier("rlcoach_test_setstate", [this](std::vector<std::string>) {
 		TestSetState();
 	}, "Test: move the car and ball to a fixed spot", PERMISSION_ALL);
@@ -160,6 +165,7 @@ void RLCoach::StartPredictor()
 
 void RLCoach::onUnload()
 {
+	PracticeExit();
 	ViewerExit();
 	if (shotBookThread.joinable()) shotBookThread.join();
 	if (gradeThread.joinable()) gradeThread.join();
@@ -212,6 +218,13 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 
 	ControllerInput in = car.GetInput();
 	lastInput = in;
+
+	// Practice mode runs the car and ball itself; the recorder sits out
+	if (practiceState != PracticeState::Off)
+	{
+		PracticeTick(car, in);
+		return;
+	}
 
 	// While watching a rep, the viewer drives the car and ball and the recorder sits out
 	if (viewerActive)
@@ -363,10 +376,24 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 
 Frame RLCoach::Capture(CarWrapper& car, BallWrapper& ball, const ControllerInput& in)
 {
+	float wallMs = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - repStartTime).count();
+	Frame f = CaptureAt(car, ball, in, static_cast<int>(frames.size()), wallMs);
+	if (touchPending)
+	{
+		f.touch = true;
+		f.touchX = touchLoc.X; f.touchY = touchLoc.Y; f.touchZ = touchLoc.Z;
+		touchPending = false;
+	}
+	return f;
+}
+
+// One tick of car, ball and input state (no touch info)
+Frame RLCoach::CaptureAt(CarWrapper& car, BallWrapper& ball, const ControllerInput& in, int tick, float wallMs)
+{
 	Frame f;
-	f.tick = static_cast<int>(frames.size());
+	f.tick = tick;
 	f.t = f.tick / kTickRate;
-	f.wallMs = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - repStartTime).count();
+	f.wallMs = wallMs;
 
 	f.throttle = in.Throttle;
 	f.steer = in.Steer;
@@ -398,18 +425,24 @@ Frame RLCoach::Capture(CarWrapper& car, BallWrapper& ball, const ControllerInput
 	f.ballX = bLoc.X; f.ballY = bLoc.Y; f.ballZ = bLoc.Z;
 	f.ballVX = bVel.X; f.ballVY = bVel.Y; f.ballVZ = bVel.Z;
 	f.ballAVX = bAng.X; f.ballAVY = bAng.Y; f.ballAVZ = bAng.Z;
-
-	if (touchPending)
-	{
-		f.touch = true;
-		f.touchX = touchLoc.X; f.touchY = touchLoc.Y; f.touchZ = touchLoc.Z;
-		touchPending = false;
-	}
 	return f;
 }
 
 void RLCoach::OnBallTouch(CarWrapper car, void* params)
 {
+	if (practiceState == PracticeState::Live && !car.IsNull())
+	{
+		CarWrapper me = gameWrapper->GetLocalCar();
+		if (me.IsNull() || me.memory_address != car.memory_address) return;
+		struct HitP { uintptr_t ball; float hx, hy, hz; float nx, ny, nz; };
+		if (params)
+		{
+			const HitP* p = reinterpret_cast<const HitP*>(params);
+			practiceTouchLoc = Vector(p->hx, p->hy, p->hz);
+		}
+		practiceTouchPending = true;
+		return;
+	}
 	if (state != RepState::Recording || car.IsNull()) return;
 	CarWrapper local = gameWrapper->GetLocalCar();
 	if (local.IsNull() || local.memory_address != car.memory_address) return;
@@ -431,6 +464,7 @@ void RLCoach::OnBallTouch(CarWrapper car, void* params)
 
 void RLCoach::OnGoal()
 {
+	if (practiceState == PracticeState::Live) practiceGoalPending = true;
 	if (state == RepState::Recording) goalPending = true;
 }
 
@@ -667,7 +701,25 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 
 	add("RL COACH", 255, 255, 255, 1.25f);
 
-	if (viewerActive && !viewerFrames.empty())
+	if (practiceState != PracticeState::Off)
+	{
+		DrawPracticeOverlay(canvas);
+		int pct = static_cast<int>(practiceSpeed * 100.0f + 0.5f);
+		add(std::format("PRACTICE  {}  @ {}% speed, {:.2f}s lead-in{}", practiceLabel, pct, practiceLeadIn,
+			practiceAutoRamp ? " (auto-ramp)" : ""), 120, 200, 255);
+		if (practiceState == PracticeState::Frozen)
+			add("Frozen: move to start the attempt", 255, 204, 77);
+		else
+			add("GO", 115, 230, 115);
+		std::string bySpeed;
+		for (const auto& [p, h] : practiceHitsByPct) bySpeed += std::format("{}{}%: {}", bySpeed.empty() ? "" : "   ", p, h);
+		add(std::format("Hits {}/{}{}   streak {}", practiceHitsTotal, practiceAttempts,
+			bySpeed.empty() ? std::string() : "   (" + bySpeed + ")", practiceStreak));
+		for (const PanelGradeLine& gl : practiceResultLines) lines.push_back({ gl.chunks, 1.0f });
+		if (!practiceRefLabel.empty()) add(practiceRefLabel, 150, 150, 150);
+		add("Retry: rlcoach_practice_retry   Exit: rlcoach_practice_exit", 130, 130, 130);
+	}
+	else if (viewerActive && !viewerFrames.empty())
 	{
 		DrawViewerPaths(canvas);
 

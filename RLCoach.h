@@ -19,6 +19,7 @@
 #include <unordered_map>
 
 #include <atomic>
+#include <map>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -165,6 +166,65 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void DrawViewerPaths(CanvasWrapper& canvas);
 	void DrawPredictedPath(CanvasWrapper& canvas, const std::vector<BallSample>& path);
 	void StartPredictor();
+
+	// ---- Practice mode (game thread) ----
+	enum class PracticeState { Off, Frozen, Live };
+	PracticeState practiceState = PracticeState::Off;
+	std::vector<Frame> practiceRep;          // the rep being practiced
+	RepListItem practiceItem;
+	SegKind practiceKind = SegKind::Approach;
+	int   practiceSegStart = 0;              // start tick of the practiced segment (for grading)
+	int   practiceTargetTick = 0;            // the moment you picked (segment start, or the viewer's playhead)
+	int   practiceStartTick = 0;             // where each attempt starts (target minus lead-in)
+	int   practiceBallStartTick = 0;         // never start before the ball is moving
+	float practiceLeadIn = 0.5f;             // seconds of lead-in before the target
+	int   practiceFlipExpireTick = -1;       // tick (rep time) your flip runs out, -1 if no timer applies
+	bool  practiceFlipHeld = false;          // we're holding the game's flip timer open
+	float practiceOrigMaxDodge = 1.25f;
+	std::string practiceLabel;
+	std::vector<Frame> practiceLive;         // the attempt in progress, from practiceStartTick on
+	float practiceSpeed = 1.0f;
+	bool  practiceAutoRamp = false;
+	int   practiceStreak = 0;
+	int   practiceAttempts = 0;
+	std::map<int, int> practiceHitsByPct;    // hits at each game speed (percent)
+	int   practiceHitsTotal = 0;
+	std::string practicePending;             // goal / floor once the shot is over
+	int   practiceEventTick = -1;
+	bool  practiceGoalPending = false;
+	bool  practiceWentIn = false;
+	bool  practiceFloorFirst = false;
+	bool  practiceTouchPending = false;
+	Vector practiceTouchLoc;
+	int   practiceRecoverRun = 0;
+	bool  practiceHavePrev = false;
+	Vector practicePrevCar, practicePrevBall;
+	float practiceSavedGameSpeed = 1.0f;
+	std::vector<PanelGradeLine> practiceResultLines;
+	std::vector<Frame> practiceRefFrames;    // your best rep on this shot, drawn faintly
+	std::string practiceRefLabel;
+
+	// Copies for the viewer window
+	std::atomic<bool>  uiPracticeActive{ false };
+	std::atomic<float> uiPracticeSpeed{ 1.0f };
+	std::atomic<bool>  uiPracticeAutoRamp{ false };
+	std::atomic<float> uiPracticeLeadIn{ 0.5f };
+	std::atomic<int>   uiPracticeTarget{ -1 };
+
+	void PracticeStart(int segIndex);        // from the rep being watched
+	void PracticeStartAt(int tick);          // "Practice from here": the viewer's current moment
+	void PracticeBegin(int targetTick, SegKind kind, int segStart, const std::string& label);
+	void PracticeSetLeadIn(float sec);
+	void PracticeReleaseFlip(CarWrapper& car);
+	void PracticeTick(CarWrapper& car, const ControllerInput& in);
+	void PracticeApplyStart(CarWrapper& car, BallWrapper& ball, bool frozen);
+	void PracticeFinishAttempt(const std::string& reason);
+	void PracticeRetry();
+	void PracticeExit();
+	void PracticeSetSpeed(float speed);
+	void PracticePickReference();
+	void DrawPracticeOverlay(CanvasWrapper& canvas);
+	Frame CaptureAt(CarWrapper& car, BallWrapper& ball, const ControllerInput& in, int tick, float wallMs);
 
 	// ---- Drawing ----
 	void RenderHud(CanvasWrapper canvas);

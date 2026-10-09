@@ -102,6 +102,9 @@
     <ClCompile Include="RLCoachViewer.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
+    <ClCompile Include="RLCoachPractice.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
     <ClCompile Include="BallPredictor.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
