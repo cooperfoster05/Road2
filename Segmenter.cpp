@@ -26,6 +26,8 @@ const char* Segmenter::Name(SegKind k)
 	case SegKind::Recovery: return "Recovery";
 	case SegKind::Setup:    return "Setup touch";
 	case SegKind::Read:     return "Backboard read";
+	case SegKind::Dribble:  return "Dribble";
+	case SegKind::Flick:    return "Flick";
 	}
 	return "";
 }
@@ -109,9 +111,29 @@ RepSegments Segmenter::Split(const std::vector<Frame>& fr, int eventTick)
 		return r;
 	}
 
+	// Dribble: getting the ball up, carrying it, then the flick. One carry instead of a contact for every tick
+	// the ball sits on your roof.
+	{
+		// Same shot touch ShotGeometry::Analyze picks: the last touch with a couple of ticks recorded after it
+		int release = -1;
+		for (int t : r.touchTicks) if (t >= 2 && t + 2 < n) release = t;
+		while (release >= 0 && release + 1 < n && fr[release + 1].touch) release++;
+		DribbleSpan d = ShotGeometry::FindDribble(fr, release);
+		if (d.valid && release + 3 < n)
+		{
+			const int shotTouch = static_cast<int>(r.touchTicks.size());
+			r.dribble = true;
+			r.lastTouch = release;
+			int carryEnd = d.flickJump >= 0 ? d.flickJump - 1 : d.lastRoof;
+			add(SegKind::Approach, 0, d.start - 1, shotTouch);
+			add(SegKind::Dribble, d.start, carryEnd, shotTouch);
+			add(SegKind::Flick, carryEnd + 1, release + kContactAfter, shotTouch);
+		}
+	}
+
 	// Lead-in and contact for each touch
 	int cursor = 0;
-	for (size_t t = 0; t < r.touchTicks.size(); t++)
+	for (size_t t = 0; t < r.touchTicks.size() && !r.dribble; t++)
 	{
 		int k = r.touchTicks[t];
 		int a = std::max(k - kContactBefore, cursor);
@@ -123,7 +145,7 @@ RepSegments Segmenter::Split(const std::vector<Frame>& fr, int eventTick)
 
 	// Double tap: the touch that sent the ball to the backboard is the setup, and the stretch after the
 	// backboard (before your final touch) is the read
-	if (r.touchTicks.size() >= 2)
+	if (r.touchTicks.size() >= 2 && !r.dribble)
 	{
 		int bb = ShotGeometry::LastWallTap(fr, r.startTick, r.lastTouch - 1);
 		bool floorBetween = false;
@@ -183,9 +205,8 @@ std::string ShotEndTracker::Update(const Frame& f, bool hadPrev, float prevBallZ
 	// Dribbling: you touched it within the last few ticks, or it's sitting just above your car.
 	// While that lasts the shot isn't over; when it ends (a flick, or it rolls off) we judge from there.
 	{
-		float dx = f.ballX - f.carX, dy = f.ballY - f.carY, above = f.ballZ - f.carZ;
-		bool onCar = dx * dx + dy * dy < 160.0f * 160.0f && above > 40.0f && above < 260.0f;
-		bool nowCarrying = touches > 0 && (f.tick - lastTouchFrame <= 20 || onCar);
+		// Pushing it along the ground in front of you counts too (scooping it up, hood dribbles)
+		bool nowCarrying = touches > 0 && (f.tick - lastTouchFrame <= 20 || ShotGeometry::BallWithCar(f));
 		if (carrying && !nowCarrying)
 		{
 			touchTick = lastTouchFrame;   // judge where it goes from the moment it left your car

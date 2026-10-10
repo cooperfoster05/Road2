@@ -367,7 +367,8 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 			{
 				pendingEndReason = ended;
 			}
-			else if (elapsed >= *maxRepSeconds)
+			// Mid-dribble: give it up to 20 more seconds so the flick still makes the rep
+			else if (elapsed >= *maxRepSeconds && !(endTracker.Carrying() && elapsed < *maxRepSeconds + 20.0f))
 			{
 				eventTick = tick;
 				FinishRep("timeout");
@@ -538,7 +539,8 @@ void RLCoach::GradeFinishedRep(const RepSummary& s)
 	unsigned char orr, og, ob;
 	OverallRgb(g.overall, orr, og, ob);
 	lastRepGradeLines.push_back({ { { std::format("GRADE {}: {}  ({}){}", g.overall, Grader::OverallName(g.overall), g.overallWhy,
-		!shot.valid || shot.type == ShotType::Aerial ? "" : shot.type == ShotType::Ground ? "  [ground shot]" : "  [double tap]"), orr, og, ob } } });
+		!shot.valid || shot.type == ShotType::Aerial ? "" : shot.type == ShotType::Ground ? "  [ground shot]"
+		: shot.type == ShotType::Dribble ? "  [dribble]" : "  [double tap]"), orr, og, ob } } });
 
 	// One line of segment grades, each grade in its own color (same colors as the rep viewer)
 	PanelGradeLine chips;

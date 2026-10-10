@@ -7,8 +7,9 @@
 #include <vector>
 
 // Setup and Read only appear in double taps: the touch that sends the ball to the backboard, and the time
-// from there until your final touch
-enum class SegKind { Approach, Takeoff, Flight, Contact, Result, Recovery, Setup, Read };
+// from there until your final touch. Dribble and Flick only appear in dribbles: carrying the ball on your roof,
+// then the jump and flip that send it off.
+enum class SegKind { Approach, Takeoff, Flight, Contact, Result, Recovery, Setup, Read, Dribble, Flick };
 
 struct Segment
 {
@@ -28,6 +29,7 @@ struct RepSegments
 	int lastTouch = -1;
 	int recoveredTick = -1;       // back in control after the last touch (-1 = not within the rep)
 	bool whiff = false;           // never touched the ball
+	bool dribble = false;         // carried on the roof into the final touch (lastTouch = when the flick let go)
 };
 
 namespace Segmenter
@@ -53,7 +55,7 @@ public:
 
 	bool GroundPlay() const { return touches > 0 && groundTouch; }
 	int  LastTouchTick() const { return touches > 0 ? touchTick : -1; }
-	bool Carrying() const { return carrying; }   // ball is on your car (dribbling)
+	bool Carrying() const { return carrying; }   // ball is on your car, or you're pushing it along (dribbling)
 
 private:
 	bool carLeftFloor = false;   // jumped or drove up a wall before any touch

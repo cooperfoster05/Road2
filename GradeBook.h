@@ -24,7 +24,7 @@ struct GradeRecord
 	float lateBy = 0;           // seconds after the earliest intercept
 	std::string segGrades;      // e.g. "Approach=Clean;Takeoff=Sloppy;..."
 	int   version = Grader::kVersion;   // grader rules it was made with
-	int   shotType = 0;         // ShotType: 0 aerial, 1 ground
+	int   shotType = 0;         // ShotType: 0 aerial, 1 ground, 2 double tap, 3 dribble
 };
 
 class GradeBook

@@ -558,6 +558,7 @@ void RLCoach::RenderWindow()
 			if (ag != uiAutoGrades.end() && ag->second.overall > 0) Pill(std::format("auto {}", ag->second.overall), GradeColor(ag->second.overall));
 			if (ag != uiAutoGrades.end() && ag->second.shotType == 1) { ImGui::SameLine(); Pill("ground shot", kOk); }
 			if (ag != uiAutoGrades.end() && ag->second.shotType == 2) { ImGui::SameLine(); Pill("double tap", kGold); }
+			if (ag != uiAutoGrades.end() && ag->second.shotType == 3) { ImGui::SameLine(); Pill("dribble", kOk); }
 			if (cur->rating > 0) { ImGui::SameLine(); Pill(std::format("you {}", cur->rating), GradeColor(cur->rating)); }
 			ImGui::SameLine();
 			bool kept = cur->kept;
@@ -648,6 +649,8 @@ void RLCoach::RenderWindow()
 				case SegKind::Recovery: return IM_COL32(120, 82, 160, alpha);
 				case SegKind::Setup:    return IM_COL32(40, 130, 140, alpha);
 				case SegKind::Read:     return IM_COL32(150, 100, 60, alpha);
+				case SegKind::Dribble:  return IM_COL32(60, 140, 120, alpha);
+				case SegKind::Flick:    return IM_COL32(46, 150, 92, alpha);
 				}
 				return IM_COL32(100, 100, 100, alpha);
 			};
@@ -913,6 +916,7 @@ void RLCoach::RenderWindow()
 			Pill(std::to_string(ag->second.overall), GradeColor(ag->second.overall), 26.0f);
 			if (ag->second.shotType == 1) { ImGui::SameLine(); ImGui::TextDisabled("ground"); }
 			if (ag->second.shotType == 2) { ImGui::SameLine(); ImGui::TextDisabled("dbl tap"); }
+			if (ag->second.shotType == 3) { ImGui::SameLine(); ImGui::TextDisabled("dribble"); }
 		}
 		ImGui::NextColumn();
 		if (ImGui::GetCursorPosY() < rowTop + rowH) ImGui::SetCursorPosY(rowTop + rowH);   // keep every row the same height

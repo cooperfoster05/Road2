@@ -13,7 +13,17 @@ struct V3
 };
 
 // Which grader a rep goes to, decided from the shot touch
-enum class ShotType { Aerial = 0, Ground = 1, DoubleTap = 2 };
+enum class ShotType { Aerial = 0, Ground = 1, DoubleTap = 2, Dribble = 3 };
+
+// A dribble that ended in your final touch: the ball rode on your roof, then you flicked it (or it came off)
+struct DribbleSpan
+{
+	bool valid = false;
+	int  start = -1;              // ball settled on your roof (the carry before the flick)
+	int  lastRoof = -1;           // last tick it was still on your roof
+	int  flickJump = -1;          // the jump that started the flick (-1 = no jump: it rolled off or you bumped it)
+	int  release = -1;            // last tick of your final touch (the ball leaves the car)
+};
 
 struct ShotAnalysis
 {
@@ -61,6 +71,15 @@ struct ShotAnalysis
 	int   setupTouchTick = -1;    // your touch that sent it there
 	int   tapSurface = 0;         // 1 backboard, 2 ceiling, 3 top of a side wall / corner
 
+	// Dribbles: the ball rode on your roof into the final touch (the flick). Shot numbers above are measured
+	// once the ball has left your car.
+	bool  dribble = false;
+	int   dribbleStart = -1;      // ball settled on your roof
+	int   flickJumpTick = -1;     // jump that started the flick (-1 = no jump)
+	float dribbleSec = 0;         // time carried on the roof before the flick
+	float dribblePace = 0;        // average ground speed of the ball while you carried it
+	float flickLift = 0;          // upward speed the flick gave the ball (how much it rose off your car)
+
 	// Your car at the touch
 	bool  carGrounded = false;    // wheels on the ground when you hit it
 	float carSpeed = 0;           // car speed into the touch
@@ -77,5 +96,13 @@ namespace ShotGeometry
 	int  WallTapSurface(const Frame& before, const Frame& after);
 	bool IsWallTap(const Frame& before, const Frame& after);
 	int  LastWallTap(const std::vector<Frame>& frames, int from, int to);   // last tap tick in [from, to], or -1
+
+	// Ball sitting on your roof (dribbling)
+	bool BallOnRoof(const Frame& f);
+	// Ball on your roof, or being pushed along right in front of / beside you at your speed (pickups, hood dribbles)
+	bool BallWithCar(const Frame& f);
+	// The roof carry that leads into the touch ending at `release` (last tick of your final touch)
+	DribbleSpan FindDribble(const std::vector<Frame>& frames, int release);
+
 	ShotAnalysis Analyze(const std::vector<Frame>& frames);
 }

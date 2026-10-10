@@ -128,11 +128,31 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 	{
 		if (fr[i].touch && !fr[i - 1].touch && i + 2 < n) s.touchTick = i;
 	}
+	if (s.touchTick < 2 || s.touchTick + 2 >= n) return s;
+
+	// Dribble: the ball rode on your roof into this touch. The touch can last several ticks while you flick,
+	// so judge the shot from the moment the ball leaves your car.
+	{
+		int release = s.touchTick;
+		while (release + 1 < n && fr[release + 1].touch) release++;
+		DribbleSpan d = FindDribble(fr, release);
+		if (d.valid && release + 3 < n)
+		{
+			s.dribble = true;
+			s.dribbleStart = d.start;
+			s.flickJumpTick = d.flickJump;
+			int carryEnd = d.flickJump >= 0 ? d.flickJump : d.lastRoof;
+			s.dribbleSec = (carryEnd - d.start) / 120.0f;
+			float sum = 0;
+			for (int i = d.start; i <= carryEnd; i++) sum += std::sqrt(fr[i].ballVX * fr[i].ballVX + fr[i].ballVY * fr[i].ballVY);
+			s.dribblePace = sum / std::max(1, carryEnd - d.start + 1);
+			s.touchTick = release;
+		}
+	}
 	const int k = s.touchTick;
-	if (k < 2 || k + 2 >= n) return s;
 
 	const Frame& pre = fr[k - 1];
-	const Frame& post = fr[k + 2];   // a couple of ticks after contact, once the hit has settled
+	const Frame& post = fr[s.dribble ? k + 3 : k + 2];   // a couple of ticks after contact, once the hit has settled
 	V3 vin = BallVel(pre), vout = BallVel(post);
 
 	// The touch happens partway through the tick before it's reported
@@ -140,7 +160,9 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 	s.actualContact = Make(fr[k].touchX, fr[k].touchY, fr[k].touchZ);
 	s.shotDir = Unit(vout);
 	s.shotSpeed = Len(vout);
-	s.goalSign = (s.ballCenter.y > 0 || vout.y > 0) ? 1.0f : -1.0f;
+	// Dribbles can start anywhere on the field (free play), so the goal is the one the flick heads for
+	s.goalSign = s.dribble ? (vout.y >= 0 ? 1.0f : -1.0f) : (s.ballCenter.y > 0 || vout.y > 0) ? 1.0f : -1.0f;
+	s.flickLift = s.dribble ? vout.z : 0.0f;
 
 	// Where the shot was going
 	float cx = 0, cz = 0;
@@ -250,9 +272,65 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 			s.setupTouchTick = setup;
 		}
 	}
+	if (s.dribble && !s.doubleTap) s.type = ShotType::Dribble;
 
 	s.valid = true;
 	return s;
+}
+
+bool ShotGeometry::BallOnRoof(const Frame& f)
+{
+	float dx = f.ballX - f.carX, dy = f.ballY - f.carY, above = f.ballZ - f.carZ;
+	return dx * dx + dy * dy < 160.0f * 160.0f && above > 40.0f && above < 260.0f;
+}
+
+bool ShotGeometry::BallWithCar(const Frame& f)
+{
+	if (BallOnRoof(f)) return true;
+	// Pushing it along: close, low, and moving at about your speed
+	float dx = f.ballX - f.carX, dy = f.ballY - f.carY, above = f.ballZ - f.carZ;
+	float rvx = f.ballVX - f.carVX, rvy = f.ballVY - f.carVY;
+	return dx * dx + dy * dy < 280.0f * 280.0f && above > -40.0f && above < 260.0f && rvx * rvx + rvy * rvy < 650.0f * 650.0f;
+}
+
+DribbleSpan ShotGeometry::FindDribble(const std::vector<Frame>& fr, int release)
+{
+	constexpr int kRecentTicks = 60;   // ball was still on your roof within 0.5 s of the final touch ending
+	constexpr int kGapTicks = 30;      // short bobbles off the roof don't end the carry
+	constexpr int kMinCarry = 60;      // carried for at least 0.5 s
+	DribbleSpan d;
+	const int n = static_cast<int>(fr.size());
+	if (release < 1 || release >= n) return d;
+
+	int lastRoof = -1;
+	for (int i = release; i >= std::max(0, release - kRecentTicks); i--)
+		if (BallOnRoof(fr[i])) { lastRoof = i; break; }
+	if (lastRoof < 0) return d;
+
+	int start = lastRoof, gap = 0, roofTicks = 0, grounded = 0;
+	for (int i = lastRoof; i >= 0; i--)
+	{
+		if (BallOnRoof(fr[i]))
+		{
+			start = i;
+			gap = 0;
+			roofTicks++;
+			if (fr[i].onGround && fr[i].carZ < 100.0f) grounded++;
+		}
+		else if (++gap > kGapTicks) break;
+	}
+	// A ground dribble: long enough, mostly on the roof, and mostly with your wheels down (not an air dribble)
+	if (lastRoof - start < kMinCarry || roofTicks < kMinCarry * 3 / 4 || grounded * 10 < roofTicks * 7) return d;
+
+	// The flick: your last jump off the ground during the carry
+	for (int i = std::max(start + 1, 1); i <= release; i++)
+		if (fr[i].jump && !fr[i - 1].jump && (fr[i].onGround || fr[i - 1].onGround)) d.flickJump = i;
+
+	d.valid = true;
+	d.start = start;
+	d.lastRoof = lastRoof;
+	d.release = release;
+	return d;
 }
 
 const char* ShotGeometry::TypeName(ShotType t)
@@ -261,6 +339,7 @@ const char* ShotGeometry::TypeName(ShotType t)
 	{
 	case ShotType::Ground:    return "Ground shot";
 	case ShotType::DoubleTap: return "Double tap";
+	case ShotType::Dribble:   return "Dribble";
 	default:                  return "Aerial";
 	}
 }

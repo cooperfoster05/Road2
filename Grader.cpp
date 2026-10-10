@@ -32,7 +32,30 @@ namespace
 	// Double taps: only closeMiss is used (goals are graded by height, below). Tuned on Oct 9 double-tap reps:
 	// a miss within 245 was a 2; height in the net split 3s (all under 250) from 4s (all over 410).
 	constexpr Cutoffs kDoubleTap{ 245.0f, 350.0f, 2800.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
-	const Cutoffs& For(ShotType t) { return t == ShotType::Ground ? kGround : t == ShotType::DoubleTap ? kDoubleTap : kAerial; }
+	// Dribbles: only closeMiss is used (goals are graded by the flick, below). Tuned on Coop's 163 rated free play
+	// dribbles (Oct 10), 88% exact: a miss within 140 was a 2 (almost all of them just over the bar).
+	constexpr Cutoffs kDribble{ 140.0f, 350.0f, 2400.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
+	const Cutoffs& For(ShotType t)
+	{
+		return t == ShotType::Ground ? kGround : t == ShotType::DoubleTap ? kDoubleTap : t == ShotType::Dribble ? kDribble : kAerial;
+	}
+
+	// Dribble goals: the flick's lift (how fast it sent the ball up off your roof) and its speed split 3s from 4s.
+	// A 5 = a 4 that's also hard and headed for a corner.
+	constexpr float kFlickLift = 520.0f;       // upward speed off the flick for a "real" flick
+	constexpr float kFlickSpeed = 2400.0f;     // ball speed off the flick
+	constexpr float kFlickRocket = 2800.0f;    // 5: this hard...
+	constexpr float kFlickCornerX = 550.0f;    // ...and this far from the middle of the goal at the line
+	// Coop: a dribble you're barely moving on shouldn't score well however good the flick is.
+	// (None of the first 163 were this slow; his slowest still averaged 3s.)
+	constexpr float kDribbleSlowPace = 900.0f;
+	Grade FromDribblePace(float pace)
+	{
+		if (pace >= 1400.0f) return Grade::Clean;
+		if (pace >= 1000.0f) return Grade::Solid;
+		if (pace >= 800.0f) return Grade::Sloppy;
+		return Grade::Costly;
+	}
 
 	constexpr float kDtGoodZ = 360.0f;      // double tap goal at/above this height at the line = a 4
 	constexpr float kDtReadFast = 2600.0f;  // "hard" in the description
@@ -214,6 +237,29 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		gradeSeg(readIdx, FromReadTime(readSec), std::format("Hit it {:.2f}s after it came off {}", readSec, surface));
 	}
 
+	// ---- Dribble: the carry, then the flick ----
+	if (shot.type == ShotType::Dribble)
+	{
+		gradeSeg(findSeg(SegKind::Dribble, 0), FromDribblePace(shot.dribblePace),
+			std::format("Carried it {:.1f}s at {} on average", shot.dribbleSec, Units::Speed(shot.dribblePace)));
+		int flickIdx = findSeg(SegKind::Flick, 0);
+		if (shot.flickJumpTick < 0)
+			gradeSeg(flickIdx, Grade::Sloppy, "No flick: the ball came off your car without a jump");
+		else if (!wentIn)
+		{
+			std::string why = std::format("Flick left your car {:.1f} deg off", shot.aimErrDeg);
+			if (!shot.missDir.empty()) why += std::format(" (went {})", shot.missDir);
+			gradeSeg(flickIdx, FromAim(shot.aimErrDeg), why);
+		}
+		else
+		{
+			bool lifted = shot.flickLift >= kFlickLift, hard = shot.shotSpeed >= kFlickSpeed;
+			Grade fg = lifted && hard ? (shot.shotSpeed >= kFlickRocket ? Grade::Clean : Grade::Solid) : Grade::Sloppy;
+			gradeSeg(flickIdx, fg, std::format("Flick sent it up at {} and off at {}{}", Units::Speed(shot.flickLift),
+				Units::Speed(shot.shotSpeed), !lifted ? " (not much lift)" : !hard ? " (not much power)" : ""));
+		}
+	}
+
 	// ---- Contact: aim error, explained by where you hit the ball ----
 	int contactIdx = findSeg(SegKind::Contact, shotTouch);
 	{
@@ -251,6 +297,20 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		g.overall = high ? (great ? 5 : 4) : 3;
 		std::string why = std::format("{} goal, {}, {} ({})", "Double tap",
 			high ? "high in the net" : "low in the net", shot.shotSpeed >= kDtReadFast ? "hard" : "soft", Units::Speed(shot.shotSpeed));
+		gradeSeg(resultIdx, g.overall >= 5 ? Grade::Clean : g.overall == 4 ? Grade::Solid : Grade::Sloppy, why);
+		g.overallWhy = why;
+	}
+	else if (shot.type == ShotType::Dribble)
+	{
+		bool lifted = shot.flickLift >= kFlickLift && shot.flickJumpTick >= 0;
+		bool hard = shot.shotSpeed >= kFlickSpeed;
+		bool corner = shot.reachesGoalLine && std::fabs(shot.crossX) >= kFlickCornerX;
+		bool slowDribble = shot.dribblePace < kDribbleSlowPace;
+		g.overall = (lifted && hard) ? ((shot.shotSpeed >= kFlickRocket && corner) ? 5 : 4) : 3;
+		if (slowDribble) g.overall = std::min(g.overall, 3);
+		std::string why = std::format("Goal off the flick, {}, {} ({}){}{}", lifted ? "good lift" : "not much lift",
+			hard ? "hard" : "soft", Units::Speed(shot.shotSpeed), g.overall == 5 ? ", toward the corner" : "",
+			slowDribble ? ", but a slow dribble" : "");
 		gradeSeg(resultIdx, g.overall >= 5 ? Grade::Clean : g.overall == 4 ? Grade::Solid : Grade::Sloppy, why);
 		g.overallWhy = why;
 	}
@@ -340,7 +400,10 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 	if (g.biggestFix >= 0 && segs.segs[g.segs[g.biggestFix].segIndex].kind == SegKind::Result)
 	{
 		for (int i = 0; i < static_cast<int>(g.segs.size()); i++)
-			if (segs.segs[g.segs[i].segIndex].kind == SegKind::Contact) { g.biggestFix = i; break; }
+		{
+			SegKind k = segs.segs[g.segs[i].segIndex].kind;
+			if (k == SegKind::Contact || k == SegKind::Flick) { g.biggestFix = i; break; }
+		}
 	}
 	return g;
 }
