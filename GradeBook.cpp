@@ -137,6 +137,13 @@ void GradeBook::Refresh(const std::filesystem::path& root, ShotBook& book)
 	Save(root);
 }
 
+void GradeBook::Invalidate(const std::string& shotKey)
+{
+	std::lock_guard<std::mutex> lock(mtx);
+	for (auto& [file, r] : grades)
+		if (ShotBook::SameShot(r.shotKey, shotKey)) r.version = 0;
+}
+
 bool GradeBook::TrySet(const std::string& file, const GradeRecord& rec)
 {
 	std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);

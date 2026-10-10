@@ -125,7 +125,7 @@ RepSegments Segmenter::Split(const std::vector<Frame>& fr, int eventTick)
 	// backboard (before your final touch) is the read
 	if (r.touchTicks.size() >= 2)
 	{
-		int bb = ShotGeometry::LastBackboard(fr, r.startTick, r.lastTouch - 1);
+		int bb = ShotGeometry::LastWallTap(fr, r.startTick, r.lastTouch - 1);
 		bool floorBetween = false;
 		if (bb >= 0)
 			for (int i = bb + 1; i < r.lastTouch; i++) if (fr[i].ballZ < 110.0f && fr[i - 1].ballZ >= 110.0f) { floorBetween = true; break; }
@@ -180,6 +180,21 @@ std::string ShotEndTracker::Update(const Frame& f, bool hadPrev, float prevBallZ
 		lastTouchFrame = f.tick;
 	}
 
+	// Dribbling: you touched it within the last few ticks, or it's sitting just above your car.
+	// While that lasts the shot isn't over; when it ends (a flick, or it rolls off) we judge from there.
+	{
+		float dx = f.ballX - f.carX, dy = f.ballY - f.carY, above = f.ballZ - f.carZ;
+		bool onCar = dx * dx + dy * dy < 160.0f * 160.0f && above > 40.0f && above < 260.0f;
+		bool nowCarrying = touches > 0 && (f.tick - lastTouchFrame <= 20 || onCar);
+		if (carrying && !nowCarrying)
+		{
+			touchTick = lastTouchFrame;   // judge where it goes from the moment it left your car
+			goalSign = 0;
+			awayRun = 0;
+		}
+		carrying = nowCarrying;
+	}
+
 	// A few ticks after a ground touch, the ball's direction says which goal it was hit at
 	if (groundTouch && touches > 0 && goalSign == 0 && f.tick >= touchTick + 4)
 		goalSign = std::fabs(f.ballVY) > 200.0f ? (f.ballVY > 0 ? 1 : -1) : (f.ballY >= 0 ? 1 : -1);
@@ -188,20 +203,20 @@ std::string ShotEndTracker::Update(const Frame& f, bool hadPrev, float prevBallZ
 	// A bouncing ball with you still on or near the floor is normal in ground packs.
 	// Off the backboard (a double tap, or a pack that throws it there): the play goes on until the ball lands
 	if (f.touch) offBackboard = false;
-	if (framesSeen >= 2 && ShotGeometry::IsBackboardHit(prev2, f)) offBackboard = true;
+	if (framesSeen >= 2 && ShotGeometry::IsWallTap(prev2, f)) offBackboard = true;
 	prev2 = prev1;
 	prev1 = f;
 	framesSeen++;
 
 	bool aerialPlay = offBackboard || (touches > 0 ? !groundTouch : (carLeftFloor && f.carZ > 250.0f));
 	bool floorHit = hadPrev && framesSoFar > 30 && f.ballZ < kFloorZ && prevBallZ >= kFloorZ;
-	if (aerialPlay && floorHit)
+	if (aerialPlay && floorHit && !carrying)
 	{
 		eventTick = f.tick;
 		return "floor";
 	}
 
-	if (touches > 0 && groundTouch && goalSign != 0 && !offBackboard)
+	if (touches > 0 && groundTouch && goalSign != 0 && !offBackboard && !carrying)
 	{
 		awayRun = f.ballVY * goalSign < kTowardSpeed ? awayRun + 1 : 0;
 		if (awayRun >= kAwayTicks)

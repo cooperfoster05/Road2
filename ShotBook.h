@@ -17,10 +17,8 @@ struct ShotReference
 	float jumpSec = -1;   // seconds to the jump that led into that touch (-1 if none)
 	int   attempts = 0;
 	int   goals = 0;
-	int   doubleTaps = 0;     // attempts that were double taps (tells a double-tap drill from a normal shot)
-
-	// A double-tap drill: enough of your attempts at this shot were double taps
-	bool DoubleTapDrill() const { return attempts >= 8 && doubleTaps * 100 >= attempts * 15; }
+	int   doubleTaps = 0;     // attempts that were double taps
+	bool  doubleTapDrill = false;   // you marked this shot as a double-tap drill (a goal without one = a 1)
 };
 
 class ShotBook
@@ -38,10 +36,23 @@ public:
 	// Every shot's fastest-goal rep (the timing benchmarks); cleanup never deletes these
 	std::unordered_set<std::string> BestFiles();
 
+	// Double-tap drill marks, per shot (kept in drills.csv). Never wait on a scan, so they're safe from the menus.
+	void SetDoubleTapDrill(const std::filesystem::path& rlcoachFolder, const std::string& shotKey, bool on);
+	bool IsDoubleTapDrill(const std::string& shotKey);
+
+	// The same pack shot can land on neighbouring shot IDs (positions are rounded to 50); treat those as one shot
+	static bool SameShot(const std::string& a, const std::string& b);
+
 private:
 	ShotReference Lookup(const std::string& shotKey);   // caller holds the lock
 	struct Entry { std::string shot; bool goal = false; float touchSec = -1; float jumpSec = -1; bool doubleTap = false; };
 	std::mutex mtx;
 	std::unordered_map<std::string, Entry> entries;   // by rep file
 	bool loadedCache = false;
+
+	std::mutex drillMtx;
+	std::unordered_map<std::string, bool> drills;   // shot key -> marked (newest line in drills.csv wins)
+	bool loadedDrills = false;
+	void LoadDrills(const std::filesystem::path& rlcoachFolder);   // caller holds drillMtx
+	bool DrillLocked(const std::string& shotKey);                  // caller holds drillMtx
 };

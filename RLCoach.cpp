@@ -340,7 +340,7 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 			// Ground shot just left your car: if the simulator says it can't go in, call it a miss now,
 			// so resetting right away still keeps the rep (a goal during the post-roll still counts)
 			int lt = endTracker.LastTouchTick();
-			if (ended.empty() && endTracker.GroundPlay() && lt >= 0 && lt != predictedTouch && tick >= lt + 3 && predictor.Ready())
+			if (ended.empty() && endTracker.GroundPlay() && !endTracker.Carrying() && lt >= 0 && lt != predictedTouch && tick >= lt + 3 && predictor.Ready())
 			{
 				predictedTouch = lt;
 				const Frame& f = frames.back();
@@ -350,10 +350,16 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 				{
 					const BallSample& last = path.back();
 					bool goes_in = std::fabs(last.y) > 5215.0f && std::fabs(last.x) < 893.0f && last.z < 643.0f;
-					// Heading for the backboard = a double tap setup, not a miss
+					// Heading for the backboard, ceiling or a wall top = a double tap setup, not a miss
 					bool toBackboard = false;
 					for (const BallSample& b : path)
-						if (std::fabs(b.y) > 4900.0f && b.z > 200.0f && !(std::fabs(b.x) < 893.0f && b.z < 643.0f)) { toBackboard = true; break; }
+					{
+						float ax = std::fabs(b.x), ay = std::fabs(b.y);
+						bool backboard = ay > 4900.0f && b.z > 200.0f && !(ax < 893.0f && b.z < 643.0f);
+						bool ceiling = b.z > 1800.0f;
+						bool wallTop = b.z > 1000.0f && (ax > 3800.0f || ax + ay > 7700.0f);
+						if (backboard || ceiling || wallTop) { toBackboard = true; break; }
+					}
 					if (!goes_in && !toBackboard) { ended = "miss"; eventTick = tick; }
 				}
 			}

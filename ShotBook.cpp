@@ -23,6 +23,10 @@ namespace
 
 void ShotBook::Update(const std::filesystem::path& root)
 {
+	{
+		std::lock_guard<std::mutex> dl(drillMtx);
+		LoadDrills(root);
+	}
 	std::lock_guard<std::mutex> lock(mtx);
 	const auto cachePath = root / "shot_cache.csv";
 
@@ -123,9 +127,75 @@ std::unordered_set<std::string> ShotBook::BestFiles()
 	return out;
 }
 
+bool ShotBook::SameShot(const std::string& a, const std::string& b)
+{
+	if (a == b) return true;
+	auto parse = [](const std::string& k, int out[5]) {
+		std::stringstream ss(k);
+		std::string part;
+		int n = 0;
+		while (n < 5 && std::getline(ss, part, '_')) out[n++] = std::atoi(part.c_str());
+		return n == 5;
+	};
+	int pa[5], pb[5];
+	if (!parse(a, pa) || !parse(b, pb)) return false;
+	for (int i = 0; i < 5; i++) if (std::abs(pa[i] - pb[i]) > 100) return false;
+	return true;
+}
+
+void ShotBook::LoadDrills(const std::filesystem::path& root)
+{
+	if (loadedDrills) return;
+	std::ifstream in(root / "drills.csv");
+	std::string line;
+	std::getline(in, line); // header
+	while (std::getline(in, line))
+	{
+		if (!line.empty() && line.back() == '\r') line.pop_back();
+		auto p = Split(line);
+		if (p.size() >= 2) drills[p[0]] = p[1] == "1";
+	}
+	loadedDrills = true;
+}
+
+bool ShotBook::DrillLocked(const std::string& shotKey)
+{
+	for (const auto& [key, on] : drills)
+		if (on && SameShot(key, shotKey)) return true;
+	return false;
+}
+
+bool ShotBook::IsDoubleTapDrill(const std::string& shotKey)
+{
+	std::lock_guard<std::mutex> dl(drillMtx);
+	return DrillLocked(shotKey);
+}
+
+void ShotBook::SetDoubleTapDrill(const std::filesystem::path& root, const std::string& shotKey, bool on)
+{
+	std::lock_guard<std::mutex> dl(drillMtx);
+	LoadDrills(root);
+	// Turning it off clears every neighbouring key too, so the shot really stops being a drill
+	if (!on)
+		for (auto& [key, v] : drills) if (SameShot(key, shotKey)) v = false;
+	drills[shotKey] = on;
+	bool isNew = !std::filesystem::exists(root / "drills.csv");
+	std::ofstream out(root / "drills.csv", std::ios::app);
+	if (isNew) out << "shot_key,double_tap_drill\n";
+	if (!on)
+	{
+		for (const auto& [key, v] : drills) if (SameShot(key, shotKey)) out << key << ",0\n";
+	}
+	else out << shotKey << ",1\n";
+}
+
 ShotReference ShotBook::Lookup(const std::string& shotKey)
 {
 	ShotReference r;
+	{
+		std::lock_guard<std::mutex> dl(drillMtx);
+		r.doubleTapDrill = DrillLocked(shotKey);
+	}
 	for (const auto& [file, e] : entries)
 	{
 		if (e.shot != shotKey) continue;

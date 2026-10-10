@@ -565,6 +565,20 @@ void RLCoach::RenderWindow()
 			if (ImGui::SmallButton(kept ? "Kept" : "Keep")) ToggleKeep(watching);
 			if (kept) ImGui::PopStyleColor();
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip(kept ? "Kept forever. Click to un-keep." : "Keep this rep forever (never cleaned up)");
+
+			// Mark the whole shot as a double-tap drill: a goal without a double tap (or triple, quad...) counts as a 1
+			bool drill = shotBook.IsDoubleTapDrill(cur->shotKey);
+			ImGui::SameLine();
+			if (ImGui::Checkbox("Double-tap drill", &drill) && writer)
+			{
+				shotBook.SetDoubleTapDrill(writer->Folder(), cur->shotKey, drill);
+				gradeBook.Invalidate(cur->shotKey);
+				StartGradeRefresh();
+				RepListItem again = *cur;
+				onGame([this, again]() { ViewerLoad(again); });   // redo this rep's breakdown now
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("For this shot, a goal that isn't a double tap counts as a 1.\nBackboard, ceiling and wall-top taps all count, and so do triple and quad taps.");
 		}
 		if (!overall.empty())
 		{

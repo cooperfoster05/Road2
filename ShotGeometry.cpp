@@ -229,7 +229,7 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 	s.type = (s.carGrounded || s.ballCenter.z < kGroundShotMaxZ) ? ShotType::Ground : ShotType::Aerial;
 
 	// Double tap: the ball came off the backboard and you hit it before it touched the floor
-	int bb = LastBackboard(fr, s.startTick, k - 1);
+	int bb = LastWallTap(fr, s.startTick, k - 1);
 	if (bb >= 0)
 	{
 		bool floorBetween = false;
@@ -246,6 +246,7 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 			s.backboardTick = bb;
 			s.backboardZ = fr[bb].ballZ;
 			s.backboardX = fr[bb].ballX;
+			s.tapSurface = WallTapSurface(fr[bb - 1], fr[bb + 1]);
 			s.setupTouchTick = setup;
 		}
 	}
@@ -264,19 +265,32 @@ const char* ShotGeometry::TypeName(ShotType t)
 	}
 }
 
-bool ShotGeometry::IsBackboardHit(const Frame& before, const Frame& after)
+int ShotGeometry::WallTapSurface(const Frame& before, const Frame& after)
 {
-	// Compared two ticks apart: the bounce often lands mid-tick, leaving one in-between frame with a tiny speed.
-	// Airborne only (not a rolling ball hitting the wall beside the goal), and not inside the goal mouth.
-	bool inGoalMouth = std::fabs(after.ballX) < kGoalHalfW && after.ballZ < kGoalH;
-	return std::fabs(before.ballY) > 4800.0f && std::fabs(after.ballY) > 4800.0f && after.ballZ > 200.0f && !inGoalMouth
-		&& !before.touch && !after.touch && std::fabs(before.ballVY) > 150.0f && before.ballVY * after.ballVY < 0.0f;
+	// Frames two ticks apart (a bounce often lands mid-tick). A bounce = the ball's velocity changed by more than
+	// gravity explains, with no touch from you. Where it happened says what it bounced off.
+	if (before.touch || after.touch) return 0;
+	float evx = after.ballVX - before.ballVX, evy = after.ballVY - before.ballVY;
+	float evz = after.ballVZ - (before.ballVZ - kGravity * (2.0f / 120.0f));
+	if (evx * evx + evy * evy + evz * evz < 250.0f * 250.0f) return 0;
+	float x = std::fabs(after.ballX), y = std::fabs(after.ballY), z = after.ballZ;
+	bool inGoalMouth = x < kGoalHalfW && z < kGoalH && y > 4700.0f;
+	if (z < 200.0f || inGoalMouth) return 0;                       // floor, or inside the goal
+	if (z > 1700.0f) return 2;                                      // ceiling (and its curved edges)
+	if (y > 4700.0f) return 1;                                      // backboard / back wall
+	if (z > 1000.0f && (x > 3500.0f || x + y > 7500.0f)) return 3;  // top of a side wall or corner, into the ceiling curve
+	return 0;
 }
 
-int ShotGeometry::LastBackboard(const std::vector<Frame>& fr, int from, int to)
+bool ShotGeometry::IsWallTap(const Frame& before, const Frame& after)
+{
+	return WallTapSurface(before, after) != 0;
+}
+
+int ShotGeometry::LastWallTap(const std::vector<Frame>& fr, int from, int to)
 {
 	int found = -1;
 	for (int i = std::max(from, 1); i <= to && i + 1 < static_cast<int>(fr.size()); i++)
-		if (IsBackboardHit(fr[i - 1], fr[i + 1]) && !(found == i - 1)) found = i;
+		if (IsWallTap(fr[i - 1], fr[i + 1]) && found != i - 1) found = i;
 	return found;
 }

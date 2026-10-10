@@ -41,6 +41,8 @@ public:
 
 	// Never waits (for the game and render threads); returns false if a refresh holds the lock.
 	bool TrySet(const std::string& file, const GradeRecord& rec);
+	// Makes the next Refresh redo every rep of this shot (e.g. after it's marked as a double-tap drill)
+	void Invalidate(const std::string& shotKey);
 	struct Brief { int overall = 0; int shotType = 0; };
 	bool TryCopy(std::unordered_map<std::string, Brief>& out);
 	void Copy(std::unordered_map<std::string, int>& out);   // waits briefly if a refresh is storing a grade

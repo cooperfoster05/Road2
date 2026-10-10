@@ -52,12 +52,14 @@ struct ShotAnalysis
 	bool  dipsToFloor = false;    // on its current path the ball hits the floor before the goal line
 	float cornerDist = 0;         // distance from the nearest top corner of the goal (ball-center units)
 
-	// Double taps: the ball came off the backboard (no floor bounce) right before your final touch
+	// Double taps: the ball came off the backboard, ceiling or a wall top (no floor bounce) right before your final touch.
+	// Triple and quad taps count too: this describes the last tap before the final touch.
 	bool  doubleTap = false;
 	int   backboardTick = -1;     // when it hit the backboard
 	float backboardZ = 0;         // how high (ball center)
 	float backboardX = 0;         // how far from the middle (+/- sideways)
 	int   setupTouchTick = -1;    // your touch that sent it there
+	int   tapSurface = 0;         // 1 backboard, 2 ceiling, 3 top of a side wall / corner
 
 	// Your car at the touch
 	bool  carGrounded = false;    // wheels on the ground when you hit it
@@ -69,8 +71,11 @@ namespace ShotGeometry
 {
 	const char* TypeName(ShotType t);
 
-	// Ball bouncing off the back wall (outside the goal mouth) in ticks [from, to]: the last such tick, or -1
-	int LastBackboard(const std::vector<Frame>& frames, int from, int to);
-	bool IsBackboardHit(const Frame& before, const Frame& after);   // frames two ticks apart
+	// "Wall taps": the ball bouncing off the backboard, the ceiling, or the top of a side wall / corner
+	// (not the floor, not inside the goal). Checked on frames two ticks apart.
+	// Surface: 0 none, 1 backboard, 2 ceiling, 3 top of a side wall or corner.
+	int  WallTapSurface(const Frame& before, const Frame& after);
+	bool IsWallTap(const Frame& before, const Frame& after);
+	int  LastWallTap(const std::vector<Frame>& frames, int from, int to);   // last tap tick in [from, to], or -1
 	ShotAnalysis Analyze(const std::vector<Frame>& frames);
 }

@@ -202,12 +202,16 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 	if (shot.type == ShotType::DoubleTap)
 	{
 		int setupIdx = findSeg(SegKind::Setup, 0);
+		const char* surface = shot.tapSurface == 2 ? "the ceiling" : shot.tapSurface == 3 ? "the top of the wall" : "the backboard";
 		float ax = std::fabs(shot.backboardX);
-		gradeSeg(setupIdx, FromBackboardSpot(shot.backboardZ, ax),
-			std::format("Sent it to the backboard {:.0f} high, {:.0f} from the middle", shot.backboardZ, ax));
+		if (shot.tapSurface == 1)
+			gradeSeg(setupIdx, FromBackboardSpot(shot.backboardZ, ax),
+				std::format("Sent it to the backboard {:.0f} high, {:.0f} from the middle", shot.backboardZ, ax));
+		else
+			gradeSeg(setupIdx, Grade::Solid, std::format("Sent it off {} ({:.0f} high)", surface, shot.backboardZ));
 		int readIdx = findSeg(SegKind::Read, shotTouch);
 		float readSec = (shot.touchTick - shot.backboardTick) / 120.0f;
-		gradeSeg(readIdx, FromReadTime(readSec), std::format("Hit it {:.2f}s after it came off the backboard", readSec));
+		gradeSeg(readIdx, FromReadTime(readSec), std::format("Hit it {:.2f}s after it came off {}", readSec, surface));
 	}
 
 	// ---- Contact: aim error, explained by where you hit the ball ----
@@ -233,8 +237,8 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 			: shot.missDist <= 0 ? "Looked on target but didn't go in"
 			: std::format("Missed {} by {:.0f}", shot.missDir, shot.missDist);
 		// In a double-tap drill: set up the backboard but never got the second touch
-		if (ref.DoubleTapDrill() && shot.type != ShotType::DoubleTap
-			&& ShotGeometry::LastBackboard(fr, shot.touchTick + 1, static_cast<int>(fr.size()) - 2) >= 0)
+		if (ref.doubleTapDrill && shot.type != ShotType::DoubleTap
+			&& ShotGeometry::LastWallTap(fr, shot.touchTick + 1, static_cast<int>(fr.size()) - 2) >= 0)
 			why = "Got it to the backboard but no second touch";
 		gradeSeg(resultIdx, close ? Grade::Sloppy : Grade::Costly, why);
 		g.overall = close ? 2 : 1;
@@ -285,6 +289,18 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 
 		g.overallWhy = why;
 		if (g.overall == 5) g.overallWhy += shot.cornerDist <= C.cornerDist ? ", top corner" : ", rocket";
+	}
+
+	// You marked this shot as a double-tap drill: a goal without the double tap (or triple, quad...) doesn't count
+	// (A tap that bounced on the floor before your finish still counts as an attempt at one.)
+	bool tappedFirst = segs.touchTicks.size() >= 2
+		&& ShotGeometry::LastWallTap(fr, segs.touchTicks.front(), shot.touchTick - 1) >= 0;
+	if (wentIn && shot.type != ShotType::DoubleTap && !tappedFirst && ref.doubleTapDrill)
+	{
+		g.overall = 1;
+		g.overallWhy = "Scored without the double tap (you marked this shot as a double-tap drill)";
+		for (SegmentGrade& sg : g.segs)
+			if (sg.segIndex == resultIdx) { sg.grade = Grade::Costly; sg.why = g.overallWhy; }
 	}
 
 	// ---- Recovery: time to get back in control, landing speed, and alignment ----
