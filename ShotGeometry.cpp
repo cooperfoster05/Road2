@@ -151,8 +151,20 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 	}
 	const int k = s.touchTick;
 
+	// Air dribble: same idea, the final push can last a few ticks, so measure once it's over
+	AirDribbleSpan air;
+	int airRelease = k;
+	if (!s.dribble)
+	{
+		air = FindAirDribble(fr, k);
+		if (air.valid && (air.touches >= 3 || LastWallTap(fr, s.startTick, k - 1) < air.firstTouch))
+			while (airRelease + 1 < n && airRelease - k < 12 && fr[airRelease + 1].touch) airRelease++;
+		if (airRelease + 3 >= n) airRelease = k;
+	}
+	const int postTick = s.dribble ? k + 3 : airRelease > k ? airRelease + 3 : k + 2;
+
 	const Frame& pre = fr[k - 1];
-	const Frame& post = fr[s.dribble ? k + 3 : k + 2];   // a couple of ticks after contact, once the hit has settled
+	const Frame& post = fr[postTick];   // a couple of ticks after contact, once the hit has settled
 	V3 vin = BallVel(pre), vout = BallVel(post);
 
 	// The touch happens partway through the tick before it's reported
@@ -274,6 +286,26 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 	}
 	if (s.dribble && !s.doubleTap) s.type = ShotType::Dribble;
 
+	// Air dribble: a chain of touches in the air into the final one. A wall bounce before the chain started is
+	// just the pop off the wall, and a backboard bounce in the middle of a long chain (3+ touches, ball kept
+	// close) is part of carrying it in, so neither makes it a double tap.
+	if (!s.dribble)
+	{
+		const AirDribbleSpan& a = air;
+		if (a.valid && (!s.doubleTap || s.backboardTick < a.firstTouch || a.touches >= 3))
+		{
+			s.airDribble = true;
+			s.doubleTap = false;
+			s.type = ShotType::AirDribble;
+			s.airStart = a.start;
+			s.airFirstTouch = a.firstTouch;
+			s.airTouches = a.touches;
+			s.airSec = (k - a.start) / 120.0f;
+			s.airImpulse = a.avgImpulse;
+			s.airCloseFrac = a.closeFrac;
+		}
+	}
+
 	s.valid = true;
 	return s;
 }
@@ -291,6 +323,74 @@ bool ShotGeometry::BallWithCar(const Frame& f)
 	float dx = f.ballX - f.carX, dy = f.ballY - f.carY, above = f.ballZ - f.carZ;
 	float rvx = f.ballVX - f.carVX, rvy = f.ballVY - f.carVY;
 	return dx * dx + dy * dy < 280.0f * 280.0f && above > -40.0f && above < 260.0f && rvx * rvx + rvy * rvy < 650.0f * 650.0f;
+}
+
+AirDribbleSpan ShotGeometry::FindAirDribble(const std::vector<Frame>& fr, int finalTouch)
+{
+	constexpr int   kMergeTicks = 8;        // touch reports this close together are one touch
+	constexpr float kMaxGap = 500.0f;       // ball never got further than this from your car between touches
+	constexpr int   kMinTouches = 2;        // the final touch plus at least one before it
+	constexpr float kCloseDist = 230.0f;
+	AirDribbleSpan a;
+	const int n = static_cast<int>(fr.size());
+	if (finalTouch < 2 || finalTouch + 3 >= n) return a;
+	auto airborne = [&](int i) { return !fr[i].onGround && !fr[i - 1].onGround; };
+	auto dist = [&](const Frame& f) {
+		float dx = f.ballX - f.carX, dy = f.ballY - f.carY, dz = f.ballZ - f.carZ;
+		return std::sqrt(dx * dx + dy * dy + dz * dz);
+	};
+	if (!airborne(finalTouch)) return a;
+
+	// Touches (merged) before the final one
+	std::vector<int> touches;
+	for (int i = 1; i < finalTouch; i++)
+		if (fr[i].touch && !fr[i - 1].touch && (touches.empty() || i - touches.back() > kMergeTicks)) touches.push_back(i);
+	while (!touches.empty() && finalTouch - touches.back() <= kMergeTicks) touches.pop_back();
+
+	// Walk back while each earlier touch was in the air, you never landed, and the ball stayed close
+	std::vector<int> chain{ finalTouch };
+	for (int t = static_cast<int>(touches.size()) - 1; t >= 0; t--)
+	{
+		int tk = touches[t];
+		if (!airborne(tk)) break;
+		bool ok = true;
+		for (int i = tk; i <= chain.front() && ok; i++)
+			if ((i > tk && fr[i].onGround) || dist(fr[i]) > kMaxGap) ok = false;
+		if (!ok) break;
+		chain.insert(chain.begin(), tk);
+	}
+	if (static_cast<int>(chain.size()) < kMinTouches) return a;
+
+	int start = chain.front();
+	while (start > 0 && !fr[start].onGround) start--;
+	start++;
+
+	float impSum = 0;
+	for (size_t c = 0; c + 1 < chain.size(); c++)
+	{
+		const Frame& b = fr[chain[c] - 1];
+		const Frame& f = fr[std::min(chain[c] + 3, n - 1)];
+		float dx = f.ballVX - b.ballVX, dy = f.ballVY - b.ballVY, dz = f.ballVZ - b.ballVZ;
+		impSum += std::sqrt(dx * dx + dy * dy + dz * dz);
+	}
+	int close = 0;
+	float distSum = 0;
+	for (int i = start; i <= finalTouch; i++)
+	{
+		float d = dist(fr[i]);
+		distSum += d;
+		if (d < kCloseDist) close++;
+	}
+	int len = std::max(1, finalTouch - start + 1);
+
+	a.valid = true;
+	a.start = start;
+	a.firstTouch = chain.front();
+	a.touches = static_cast<int>(chain.size());
+	a.avgImpulse = impSum / static_cast<float>(chain.size() - 1);
+	a.closeFrac = static_cast<float>(close) / len;
+	a.meanDist = distSum / len;
+	return a;
 }
 
 DribbleSpan ShotGeometry::FindDribble(const std::vector<Frame>& fr, int release)
@@ -340,6 +440,7 @@ const char* ShotGeometry::TypeName(ShotType t)
 	case ShotType::Ground:    return "Ground shot";
 	case ShotType::DoubleTap: return "Double tap";
 	case ShotType::Dribble:   return "Dribble";
+	case ShotType::AirDribble: return "Air dribble";
 	default:                  return "Aerial";
 	}
 }

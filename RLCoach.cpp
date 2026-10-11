@@ -47,6 +47,7 @@ void RLCoach::onLoad()
 	recordingEnabled = std::make_shared<bool>(false);
 	maxRepSeconds = std::make_shared<float>(10.0f);
 	useNumpad = std::make_shared<bool>(false);
+	manualGrading = std::make_shared<bool>(true);
 	postRollSeconds = std::make_shared<float>(1.5f);
 	livePrediction = std::make_shared<bool>(false);
 	postRollMaxSeconds = std::make_shared<float>(4.0f);
@@ -93,6 +94,9 @@ void RLCoach::onLoad()
 	numpad.bindTo(useNumpad);
 	numpad.addOnValueChanged([this](std::string, CVarWrapper) { LoadRatingKeys(); });
 
+	cvarManager->registerCvar("rlcoach_manual_grading", "1", "Rate reps with the number keys (1-5 shot, 6-8 recovery)", true, true, 0, true, 1)
+		.bindTo(manualGrading);
+
 	cvarManager->registerNotifier("rlcoach_toggle_recording", [this](std::vector<std::string>) {
 		cvarManager->getCvar("rlcoach_recording").setValue(*recordingEnabled ? 0 : 1);
 	}, "Turn rep recording on or off", PERMISSION_ALL);
@@ -101,6 +105,11 @@ void RLCoach::onLoad()
 		if (args.size() < 2) return;
 		try { HandleRatingPress(std::stoi(args[1])); } catch (...) {}
 	}, "Rate the last rep 1-5", PERMISSION_ALL);
+
+	cvarManager->registerNotifier("rlcoach_rate_recovery", [this](std::vector<std::string> args) {
+		if (args.size() < 2) return;
+		try { HandleRecoveryPress(std::stoi(args[1])); } catch (...) {}
+	}, "Rate the last rep's recovery: 1 poor, 2 eh, 3 good", PERMISSION_ALL);
 
 	cvarManager->registerNotifier("rlcoach_rearm", [this](std::vector<std::string>) {
 		if (*recordingEnabled && state != RepState::Recording) EnterArmed();
@@ -188,6 +197,7 @@ void RLCoach::SetRecording(bool on)
 	touchPending = false;
 	pendingEndReason.clear();
 	queuedRating = 0;
+	queuedRecovery = 0;
 	if (on)
 	{
 		state = RepState::WaitReset;
@@ -287,6 +297,7 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 			eventTick = -1;
 			floorBeforeGoal = false;
 			queuedRating = 0;
+			queuedRecovery = 0;
 			recoverRun = 0;
 			recovered = false;
 			endTracker.Reset();
@@ -540,7 +551,7 @@ void RLCoach::GradeFinishedRep(const RepSummary& s)
 	OverallRgb(g.overall, orr, og, ob);
 	lastRepGradeLines.push_back({ { { std::format("GRADE {}: {}  ({}){}", g.overall, Grader::OverallName(g.overall), g.overallWhy,
 		!shot.valid || shot.type == ShotType::Aerial ? "" : shot.type == ShotType::Ground ? "  [ground shot]"
-		: shot.type == ShotType::Dribble ? "  [dribble]" : "  [double tap]"), orr, og, ob } } });
+		: shot.type == ShotType::Dribble ? "  [dribble]" : shot.type == ShotType::AirDribble ? "  [air dribble]" : "  [double tap]"), orr, og, ob } } });
 
 	// One line of segment grades, each grade in its own color (same colors as the rep viewer)
 	PanelGradeLine chips;
@@ -578,6 +589,7 @@ void RLCoach::FinishRep(const std::string& reason)
 		pendingEndReason.clear();
 		eventTick = -1;
 		queuedRating = 0;
+		queuedRecovery = 0;
 		return;
 	}
 
@@ -607,18 +619,22 @@ void RLCoach::FinishRep(const std::string& reason)
 	eventTick = -1;
 	floorBeforeGoal = false;
 	int ratingToApply = queuedRating;
+	int recoveryToApply = queuedRecovery;
 	queuedRating = 0;
+	queuedRecovery = 0;
 
 	if (ok)
 	{
 		lastRep = s;
 		haveLastRep = true;
 		lastRating = 0;
+		lastRecovery = 0;
 		repsThisSession++;
 		statusMessage = writer->FailedSaves() > 0
 			? std::format("Rep {} saved ({}), but {} save(s) failed this session", repsThisSession, reason, writer->FailedSaves())
 			: std::format("Rep {} saved ({})", repsThisSession, reason);
 		if (ratingToApply > 0) RateLastRep(ratingToApply);
+		if (recoveryToApply > 0) RateLastRecovery(recoveryToApply);
 	}
 	else
 	{
@@ -634,9 +650,9 @@ void RLCoach::FinishRep(const std::string& reason)
 void RLCoach::LoadRatingKeys()
 {
 	bool numpadKeys = cvarManager->getCvar("rlcoach_rate_numpad").getBoolValue();
-	const char* row[5] = { "One", "Two", "Three", "Four", "Five" };
-	const char* pad[5] = { "NumPadOne", "NumPadTwo", "NumPadThree", "NumPadFour", "NumPadFive" };
-	for (int i = 0; i < 5; i++)
+	const char* row[8] = { "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight" };
+	const char* pad[8] = { "NumPadOne", "NumPadTwo", "NumPadThree", "NumPadFour", "NumPadFive", "NumPadSix", "NumPadSeven", "NumPadEight" };
+	for (int i = 0; i < 8; i++)
 	{
 		keyIndex[i] = gameWrapper->GetFNameIndexByString(numpadKeys ? pad[i] : row[i]);
 		keyWasDown[i] = false;
@@ -645,11 +661,14 @@ void RLCoach::LoadRatingKeys()
 
 void RLCoach::UpdateRatingKeys()
 {
-	for (int i = 0; i < 5; i++)
+	for (int i = 0; i < 8; i++)
 	{
 		bool down = gameWrapper->IsKeyPressed(keyIndex[i]);
-		if (down && !keyWasDown[i] && *recordingEnabled && IsOfflinePractice())
-			HandleRatingPress(i + 1);
+		if (down && !keyWasDown[i] && *recordingEnabled && *manualGrading && IsOfflinePractice())
+		{
+			if (i < 5) HandleRatingPress(i + 1);
+			else HandleRecoveryPress(i - 4);   // 6 poor, 7 eh, 8 good
+		}
 		keyWasDown[i] = down;
 	}
 }
@@ -666,6 +685,41 @@ void RLCoach::HandleRatingPress(int rating)
 	else
 	{
 		RateLastRep(rating);
+	}
+}
+
+void RLCoach::HandleRecoveryPress(int rating)
+{
+	if (rating < 1 || rating > 3) return;
+	if (state == RepState::Recording)
+	{
+		queuedRecovery = rating;
+		statusMessage = std::format("Recovery {} saved when this rep ends", RecoveryName(rating));
+	}
+	else
+	{
+		RateLastRecovery(rating);
+	}
+}
+
+void RLCoach::RateLastRecovery(int rating)
+{
+	if (!haveLastRep || rating < 1 || rating > 3 || !writer) return;
+	writer->SaveRecoveryRating(lastRep.fileName, rating);
+	lastRecovery = rating;
+	statusMessage = std::format("Rated rep {}'s recovery: {}", repsThisSession, RecoveryName(rating));
+	repListStale = true;
+}
+
+void RLCoach::SetRecoveryRating(const std::string& file, int rating)
+{
+	if (!writer || rating < 1 || rating > 3) return;
+	for (RepListItem& it : repList)
+	{
+		if (it.file != file) continue;
+		it.recoveryRating = rating;
+		writer->SaveRecoveryRating(file, rating);
+		return;
 	}
 }
 
@@ -731,6 +785,10 @@ void RLCoach::RenderSettings()
 	bool rec = *recordingEnabled;
 	if (ImGui::Checkbox("Record reps", &rec)) setCvar("rlcoach_recording", rec ? 1.0f : 0.0f);
 	ImGui::SameLine();
+	bool manual = *manualGrading;
+	if (ImGui::Checkbox("Manual grading", &manual)) setCvar("rlcoach_manual_grading", manual ? 1.0f : 0.0f);
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Rate reps with the number keys: 1-5 the shot, 6-8 the recovery.\nTurn off to free up those keys.");
+	ImGui::SameLine();
 	bool hud = *hudEnabled;
 	if (ImGui::Checkbox("Show panel", &hud)) setCvar("rlcoach_hud", hud ? 1.0f : 0.0f);
 	ImGui::SameLine();
@@ -740,7 +798,7 @@ void RLCoach::RenderSettings()
 	if (ImGui::CollapsingHeader("Recording and rating"))
 	{
 		bool np = *useNumpad;
-		if (ImGui::Checkbox("Rate with numpad 1-5 instead of the number row", &np)) setCvar("rlcoach_rate_numpad", np ? 1.0f : 0.0f);
+		if (ImGui::Checkbox("Rate with the numpad instead of the number row", &np)) setCvar("rlcoach_rate_numpad", np ? 1.0f : 0.0f);
 		float maxS = *maxRepSeconds;
 		if (ImGui::SliderFloat("Max rep length (seconds)", &maxS, 2.0f, 30.0f, "%.0f")) setCvar("rlcoach_max_rep_seconds", maxS);
 		float post = *postRollSeconds;
@@ -748,8 +806,10 @@ void RLCoach::RenderSettings()
 		float postMax = *postRollMaxSeconds;
 		if (ImGui::SliderFloat("...and until recovered, at most (s)", &postMax, 1.0f, 8.0f, "%.1f")) setCvar("rlcoach_postroll_max_seconds", postMax);
 		ImGui::TextDisabled("Rating keys: 1 Missed, 2 Close, 3 Bad shot went in, 4 Good shot went in, 5 Great shot went in.");
+		ImGui::TextDisabled("Recovery keys: 6 Poor, 7 Eh, 8 Good (rate how you got back in control after the shot).");
 		ImGui::TextDisabled("Pressing during a rep rates that rep; after, it rates the last saved rep.");
-		ImGui::TextDisabled("Controller: bind rlcoach_toggle_recording / rlcoach_viewer in BakkesMod's Bindings tab.");
+		ImGui::TextDisabled("Controller: bind rlcoach_toggle_recording / rlcoach_viewer / rlcoach_rate 1-5 /");
+		ImGui::TextDisabled("rlcoach_rate_recovery 1-3 in BakkesMod's Bindings tab.");
 	}
 
 	if (ImGui::CollapsingHeader("Panel and units")) RenderLookSettings();

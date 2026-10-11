@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "RLCoach.h"
+#include "Ratings.h"
 #include "bakkesmod/wrappers/includes.h"
 #include "Overlay3D.h"
 #include "UiStyle.h"
@@ -559,6 +560,7 @@ void RLCoach::RenderWindow()
 			if (ag != uiAutoGrades.end() && ag->second.shotType == 1) { ImGui::SameLine(); Pill("ground shot", kOk); }
 			if (ag != uiAutoGrades.end() && ag->second.shotType == 2) { ImGui::SameLine(); Pill("double tap", kGold); }
 			if (ag != uiAutoGrades.end() && ag->second.shotType == 3) { ImGui::SameLine(); Pill("dribble", kOk); }
+			if (ag != uiAutoGrades.end() && ag->second.shotType == 4) { ImGui::SameLine(); Pill("air dribble", kGold); }
 			if (cur->rating > 0) { ImGui::SameLine(); Pill(std::format("you {}", cur->rating), GradeColor(cur->rating)); }
 			ImGui::SameLine();
 			bool kept = cur->kept;
@@ -580,6 +582,24 @@ void RLCoach::RenderWindow()
 			}
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("For this shot, a goal that isn't a double tap counts as a 1.\nBackboard, ceiling and wall-top taps all count, and so do triple and quad taps.");
+
+			// Your opinion of the recovery (same as keys 6-8 in the pack)
+			ImGui::TextDisabled("Your recovery rating:");
+			const int curRec = cur->recoveryRating;
+			const std::string recFile = watching;
+			for (int r = 1; r <= 3; r++)
+			{
+				ImGui::SameLine();
+				bool on = curRec == r;
+				if (on)
+				{
+					unsigned char cr, cg, cb;
+					RecoveryRgb(r, cr, cg, cb);
+					ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(cr / 255.0f * 0.55f, cg / 255.0f * 0.55f, cb / 255.0f * 0.55f, 1.0f));
+				}
+				if (ImGui::SmallButton(RecoveryName(r))) SetRecoveryRating(recFile, r);
+				if (on) ImGui::PopStyleColor();
+			}
 		}
 		if (!overall.empty())
 		{
@@ -651,6 +671,7 @@ void RLCoach::RenderWindow()
 				case SegKind::Read:     return IM_COL32(150, 100, 60, alpha);
 				case SegKind::Dribble:  return IM_COL32(60, 140, 120, alpha);
 				case SegKind::Flick:    return IM_COL32(46, 150, 92, alpha);
+				case SegKind::AirDribble: return IM_COL32(60, 110, 170, alpha);
 				}
 				return IM_COL32(100, 100, 100, alpha);
 			};
@@ -917,6 +938,7 @@ void RLCoach::RenderWindow()
 			if (ag->second.shotType == 1) { ImGui::SameLine(); ImGui::TextDisabled("ground"); }
 			if (ag->second.shotType == 2) { ImGui::SameLine(); ImGui::TextDisabled("dbl tap"); }
 			if (ag->second.shotType == 3) { ImGui::SameLine(); ImGui::TextDisabled("dribble"); }
+			if (ag->second.shotType == 4) { ImGui::SameLine(); ImGui::TextDisabled("air drib"); }
 		}
 		ImGui::NextColumn();
 		if (ImGui::GetCursorPosY() < rowTop + rowH) ImGui::SetCursorPosY(rowTop + rowH);   // keep every row the same height

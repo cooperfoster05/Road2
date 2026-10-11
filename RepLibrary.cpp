@@ -112,6 +112,19 @@ std::vector<RepListItem> RepLibrary::ListReps(const std::filesystem::path& root)
 		}
 	}
 
+	// Recovery ratings (newest line wins)
+	std::unordered_map<std::string, int> recoveries;
+	{
+		std::ifstream rin(root / "recovery_ratings.csv");
+		std::string line;
+		std::getline(rin, line); // header
+		while (std::getline(rin, line))
+		{
+			auto p = SplitCsv(TrimCr(line));
+			if (p.size() >= 2) recoveries[p[0]] = std::atoi(p[1].c_str());
+		}
+	}
+
 	// Keep marks (newest line wins)
 	std::unordered_map<std::string, bool> kept;
 	{
@@ -160,6 +173,8 @@ std::vector<RepListItem> RepLibrary::ListReps(const std::filesystem::path& root)
 		if (it.mode.rfind("import:", 0) == 0) { it.imported = true; it.importedFrom = it.mode.substr(7); }
 		auto r = ratings.find(it.file);
 		it.rating = r == ratings.end() ? 0 : r->second;
+		auto rr = recoveries.find(it.file);
+		it.recoveryRating = rr == recoveries.end() ? 0 : rr->second;
 		auto k = kept.find(it.file);
 		it.kept = k != kept.end() && k->second;
 		it.hasRecording = recorded.count(it.file) > 0;

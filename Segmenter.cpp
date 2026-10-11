@@ -28,6 +28,7 @@ const char* Segmenter::Name(SegKind k)
 	case SegKind::Read:     return "Backboard read";
 	case SegKind::Dribble:  return "Dribble";
 	case SegKind::Flick:    return "Flick";
+	case SegKind::AirDribble: return "Air dribble";
 	}
 	return "";
 }
@@ -131,9 +132,26 @@ RepSegments Segmenter::Split(const std::vector<Frame>& fr, int eventTick)
 		}
 	}
 
+	// Air dribble: getting it up (driving, the wall, the pop), the touches in the air, then the final touch.
+	// Uses the same call ShotGeometry makes, so the segments always match the shot type.
+	if (!r.dribble)
+	{
+		ShotAnalysis sa = ShotGeometry::Analyze(fr);
+		if (sa.valid && sa.type == ShotType::AirDribble)
+		{
+			const int shotTouch = static_cast<int>(r.touchTicks.size());
+			const int k = sa.touchTick;
+			r.airDribble = true;
+			r.lastTouch = k;
+			add(SegKind::Approach, 0, sa.airStart - 1, shotTouch);
+			add(SegKind::AirDribble, sa.airStart, k - kContactBefore - 1, shotTouch);
+			add(SegKind::Contact, std::max(sa.airStart, k - kContactBefore), k + kContactAfter, shotTouch);
+		}
+	}
+
 	// Lead-in and contact for each touch
 	int cursor = 0;
-	for (size_t t = 0; t < r.touchTicks.size() && !r.dribble; t++)
+	for (size_t t = 0; t < r.touchTicks.size() && !r.dribble && !r.airDribble; t++)
 	{
 		int k = r.touchTicks[t];
 		int a = std::max(k - kContactBefore, cursor);
@@ -145,7 +163,7 @@ RepSegments Segmenter::Split(const std::vector<Frame>& fr, int eventTick)
 
 	// Double tap: the touch that sent the ball to the backboard is the setup, and the stretch after the
 	// backboard (before your final touch) is the read
-	if (r.touchTicks.size() >= 2 && !r.dribble)
+	if (r.touchTicks.size() >= 2 && !r.dribble && !r.airDribble)
 	{
 		int bb = ShotGeometry::LastWallTap(fr, r.startTick, r.lastTouch - 1);
 		bool floorBetween = false;

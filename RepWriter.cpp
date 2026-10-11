@@ -164,6 +164,17 @@ bool RepWriter::SaveRating(const std::string& repFile, int rating)
 	return true;
 }
 
+bool RepWriter::SaveRecoveryRating(const std::string& repFile, int rating)
+{
+	std::string at = NowStamp("%Y-%m-%d %H:%M:%S");
+	Enqueue([this, repFile, rating, at]() {
+		std::ofstream out = OpenAppend(root / "recovery_ratings.csv", "file,recovery,rated_at");
+		if (out) out << std::format("{},{},{}\n", repFile, rating, at);
+		if (!out) failed++;
+	});
+	return true;
+}
+
 void RepWriter::SetKept(const std::string& repFile, bool kept)
 {
 	std::string at = NowStamp("%Y-%m-%d %H:%M:%S");

@@ -25,6 +25,8 @@ public:
 
 	// Appends a rating line to ratings.csv (the newest line for a file wins)
 	bool SaveRating(const std::string& repFile, int rating);
+	// Appends your recovery rating (1 poor, 2 eh, 3 good) to recovery_ratings.csv (newest line wins)
+	bool SaveRecoveryRating(const std::string& repFile, int rating);
 
 	// Adds a summary line for a rep whose recording was already stored (used by import)
 	void AddIndexRow(const RepSummary& summary);

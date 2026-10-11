@@ -163,7 +163,7 @@ int RLCoach::TrimStorage(const std::filesystem::path& root, const std::filesyste
 		bool safe = it.kept || best.count(it.file) || rec->second.file == session;
 		if (safe) { total += bytes; continue; }
 		double age = AgeDays(it.savedAt, now);
-		double limit = it.rating > 0 ? keepRatedD : keepD;
+		double limit = (it.rating > 0 || it.recoveryRating > 0) ? keepRatedD : keepD;
 		if (age > limit) { drop.insert(it.file); continue; }
 		total += bytes;
 		mayTrim.push_back({ &it, bytes });
@@ -174,7 +174,7 @@ int RLCoach::TrimStorage(const std::filesystem::path& root, const std::filesyste
 	if (total > cap)
 	{
 		std::stable_sort(mayTrim.begin(), mayTrim.end(), [](const auto& a, const auto& b) {
-			bool ar = a.first->rating > 0, br = b.first->rating > 0;
+			bool ar = a.first->rating > 0 || a.first->recoveryRating > 0, br = b.first->rating > 0 || b.first->recoveryRating > 0;
 			if (ar != br) return !ar;
 			return a.first->savedAt < b.first->savedAt;
 		});

@@ -169,7 +169,7 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 			add(std::format("{}  {}", viewerGrade.overall, Grader::OverallName(viewerGrade.overall)), r, g, b, false, 1.15f);
 			if (viewerShot.valid && viewerShot.type != ShotType::Aerial)
 				add(std::format("Graded as a {}", viewerShot.type == ShotType::Ground ? "ground shot"
-					: viewerShot.type == ShotType::Dribble ? "dribble" : "double tap"), 150, 160, 178, true);
+					: viewerShot.type == ShotType::Dribble ? "dribble" : viewerShot.type == ShotType::AirDribble ? "air dribble" : "double tap"), 150, 160, 178, true);
 			add(viewerGrade.overallWhy, 150, 160, 178, true);
 		}
 		if (viewerGrade.biggestFix >= 0)
@@ -231,6 +231,8 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 
 		if (*recordingEnabled && state == RepState::Recording && queuedRating > 0)
 			add(std::format("This rep will be rated {}: {}", queuedRating, RatingName(queuedRating)), 120, 230, 120);
+		if (*recordingEnabled && state == RepState::Recording && queuedRecovery > 0)
+			add(std::format("Recovery will be rated {}", RecoveryName(queuedRecovery)), 120, 230, 120);
 
 		if (*recordingEnabled && haveLastRep)
 		{
@@ -238,8 +240,19 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 			add(std::format("{}   {:.2f}s   {} touch{}", lastRep.endReason, lastRep.durationS,
 				lastRep.touches, lastRep.touches == 1 ? "" : "es"), 150, 160, 178, true);
 			for (const PanelGradeLine& gl : lastRepGradeLines) addChunks(gl.chunks);
-			if (lastRating == 0) add("Rate it: 1 Missed  2 Close  3 Bad-in  4 Good-in  5 Great-in", 255, 200, 0);
-			else add(std::format("You rated it {}: {}", lastRating, RatingName(lastRating)), 120, 230, 120);
+			if (*manualGrading)
+			{
+				if (lastRating == 0) add("Rate it: 1 Missed  2 Close  3 Bad-in  4 Good-in  5 Great-in", 255, 200, 0);
+				else add(std::format("You rated it {}: {}", lastRating, RatingName(lastRating)), 120, 230, 120);
+				if (lastRecovery == 0) add("Recovery: 6 Poor  7 Eh  8 Good", 200, 170, 60, true);
+				else
+				{
+					unsigned char rr, rg, rb;
+					RecoveryRgb(lastRecovery, rr, rg, rb);
+					add(std::format("Recovery: {}", RecoveryName(lastRecovery)), rr, rg, rb, true);
+				}
+			}
+			else if (lastRating > 0) add(std::format("You rated it {}: {}", lastRating, RatingName(lastRating)), 120, 230, 120);
 		}
 		if (!statusMessage.empty()) add(statusMessage, 130, 138, 152, true);
 	}

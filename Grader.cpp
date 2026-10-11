@@ -35,9 +35,12 @@ namespace
 	// Dribbles: only closeMiss is used (goals are graded by the flick, below). Tuned on Coop's 163 rated free play
 	// dribbles (Oct 10), 88% exact: a miss within 140 was a 2 (almost all of them just over the bar).
 	constexpr Cutoffs kDribble{ 140.0f, 350.0f, 2400.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
+	// Air dribbles: closeMiss, and upperZ = high enough in the net for a 4 (details below)
+	constexpr Cutoffs kAirDribble{ 150.0f, 480.0f, 2400.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
 	const Cutoffs& For(ShotType t)
 	{
-		return t == ShotType::Ground ? kGround : t == ShotType::DoubleTap ? kDoubleTap : t == ShotType::Dribble ? kDribble : kAerial;
+		return t == ShotType::Ground ? kGround : t == ShotType::DoubleTap ? kDoubleTap : t == ShotType::Dribble ? kDribble
+			: t == ShotType::AirDribble ? kAirDribble : kAerial;
 	}
 
 	// Dribble goals: the flick's lift (how fast it sent the ball up off your roof) and its speed split 3s from 4s.
@@ -49,6 +52,21 @@ namespace
 	// Coop: a dribble you're barely moving on shouldn't score well however good the flick is.
 	// (None of the first 163 were this slow; his slowest still averaged 3s.)
 	constexpr float kDribbleSlowPace = 900.0f;
+	// Air dribbles, tuned on Coop's 113 rated air dribbles (Oct 10), 81% exact. Goals: high in the net with a
+	// real chain of touches = 4; a 5 is also headed for a corner off soft, carried touches (his "glued to the car").
+	// Misses: close (within 150), or a long carry (5+ touches or 4.5 s) before losing it = 2.
+	constexpr int   kAdChainFor4 = 3;          // touches in the air, the final one included
+	constexpr float kAdCornerX = 580.0f;       // 5: this far from the middle of the goal at the line...
+	constexpr float kAdSoftPush = 500.0f;      // ...off touches averaging this much push or less (carried, not hit)
+	constexpr int   kAdLongTouches = 5;
+	constexpr float kAdLongSec = 4.5f;
+	Grade FromAirControl(int touches, float push)
+	{
+		if (touches >= 5 && push <= 450.0f) return Grade::Clean;
+		if (touches >= 3 && push <= 750.0f) return Grade::Solid;
+		return Grade::Sloppy;
+	}
+
 	Grade FromDribblePace(float pace)
 	{
 		if (pace >= 1400.0f) return Grade::Clean;
@@ -260,8 +278,25 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		}
 	}
 
+	// ---- Air dribble: how well you carried it ----
+	if (shot.type == ShotType::AirDribble)
+	{
+		int before = shot.airTouches - 1;
+		std::string why = std::format("{} touch{} in the air before the shot, {} of push each on average, ball close to your car {:.0f}% of the time",
+			before, before == 1 ? "" : "es", Units::Speed(shot.airImpulse), shot.airCloseFrac * 100.0f);
+		Grade cg = FromAirControl(shot.airTouches, shot.airImpulse);
+		if (cg == Grade::Sloppy)
+			why += shot.airTouches < kAdChainFor4 ? " (barely carried it)" : " (hitting it more than carrying it)";
+		gradeSeg(findSeg(SegKind::AirDribble, 0), cg, why);
+	}
+
 	// ---- Contact: aim error, explained by where you hit the ball ----
 	int contactIdx = findSeg(SegKind::Contact, shotTouch);
+	// Pushed in from right at the goal line: the angle math means nothing that close, and it went in
+	float toLine = 5120.0f - shot.ballCenter.y * shot.goalSign;
+	if (wentIn && toLine < 500.0f)
+		gradeSeg(contactIdx, Grade::Clean, std::format("Finished it from {:.0f} out", std::max(0.0f, toLine)));
+	else
 	{
 		std::string why = std::format("Shot left your car {:.1f} deg off", shot.aimErrDeg);
 		if (shot.contactErr > 15.0f)
@@ -278,7 +313,10 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 	if (!wentIn)
 	{
 		bool close = shot.reachesGoalLine && shot.missDist <= C.closeMiss
-			&& (shot.type != ShotType::DoubleTap || shot.missDist > 0.0f);
+			&& ((shot.type != ShotType::DoubleTap && shot.type != ShotType::AirDribble) || shot.missDist > 0.0f);
+		// Air dribbles: carrying it a long way before losing it still counts as close
+		bool longCarry = shot.type == ShotType::AirDribble && (shot.airTouches >= kAdLongTouches || shot.airSec >= kAdLongSec);
+		close = close || longCarry;
 		std::string why = !shot.reachesGoalLine ? "Never reached the goal line"
 			: shot.missDist <= 0 ? "Looked on target but didn't go in"
 			: std::format("Missed {} by {:.0f}", shot.missDir, shot.missDist);
@@ -297,6 +335,20 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		g.overall = high ? (great ? 5 : 4) : 3;
 		std::string why = std::format("{} goal, {}, {} ({})", "Double tap",
 			high ? "high in the net" : "low in the net", shot.shotSpeed >= kDtReadFast ? "hard" : "soft", Units::Speed(shot.shotSpeed));
+		gradeSeg(resultIdx, g.overall >= 5 ? Grade::Clean : g.overall == 4 ? Grade::Solid : Grade::Sloppy, why);
+		g.overallWhy = why;
+	}
+	else if (shot.type == ShotType::AirDribble)
+	{
+		bool high = shot.reachesGoalLine && shot.crossZ >= kAirDribble.upperZ;
+		bool chain = shot.airTouches >= kAdChainFor4;
+		bool corner = shot.reachesGoalLine && std::fabs(shot.crossX) >= kAdCornerX;
+		bool soft = shot.airImpulse <= kAdSoftPush;
+		g.overall = (high && chain) ? ((corner && soft) ? 5 : 4) : 3;
+		std::string why = std::format("Air dribble goal, {}, {} touch{} in the air", high ? "high in the net" : "low in the net",
+			shot.airTouches, shot.airTouches == 1 ? "" : "es");
+		if (g.overall == 5) why += ", carried into the corner";
+		else if (high && !chain) why += " (not much of a carry)";
 		gradeSeg(resultIdx, g.overall >= 5 ? Grade::Clean : g.overall == 4 ? Grade::Solid : Grade::Sloppy, why);
 		g.overallWhy = why;
 	}

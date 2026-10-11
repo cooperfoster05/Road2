@@ -8,8 +8,9 @@
 
 // Setup and Read only appear in double taps: the touch that sends the ball to the backboard, and the time
 // from there until your final touch. Dribble and Flick only appear in dribbles: carrying the ball on your roof,
-// then the jump and flip that send it off.
-enum class SegKind { Approach, Takeoff, Flight, Contact, Result, Recovery, Setup, Read, Dribble, Flick };
+// then the jump and flip that send it off. AirDribble only appears in air dribbles: from leaving the ground or
+// wall to the final touch.
+enum class SegKind { Approach, Takeoff, Flight, Contact, Result, Recovery, Setup, Read, Dribble, Flick, AirDribble };
 
 struct Segment
 {
@@ -30,6 +31,7 @@ struct RepSegments
 	int recoveredTick = -1;       // back in control after the last touch (-1 = not within the rep)
 	bool whiff = false;           // never touched the ball
 	bool dribble = false;         // carried on the roof into the final touch (lastTouch = when the flick let go)
+	bool airDribble = false;      // a chain of touches in the air into the final touch
 };
 
 namespace Segmenter

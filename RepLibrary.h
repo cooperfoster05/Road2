@@ -16,6 +16,7 @@ struct RepListItem
 	int   touches = 0;
 	bool  goal = false;
 	int   rating = 0;   // 0 = not rated
+	int   recoveryRating = 0;   // your recovery rating: 1 poor, 2 eh, 3 good, 0 = not rated
 	int   eventTick = -1; // tick where the shot ended (goal, floor, timeout); -1 if unknown
 	bool  floorBeforeGoal = false;
 	bool  kept = false;          // starred: never cleaned up

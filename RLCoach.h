@@ -66,6 +66,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::shared_ptr<bool>  recordingEnabled;  // rlcoach_recording (data farming on/off, starts off every session)
 	std::shared_ptr<float> maxRepSeconds;     // rlcoach_max_rep_seconds
 	std::shared_ptr<bool>  useNumpad;         // rlcoach_rate_numpad (rate with numpad 1-5 instead of number row)
+	std::shared_ptr<bool>  manualGrading;     // rlcoach_manual_grading (rating keys 1-5 and recovery keys 6-8 on/off)
 	std::shared_ptr<float> postRollSeconds;   // rlcoach_postroll_seconds (minimum recording after the shot, catches late goals)
 	std::shared_ptr<float> postRollMaxSeconds;// rlcoach_postroll_max_seconds (keep going until you recover, up to this long)
 	std::shared_ptr<bool>  livePrediction;    // rlcoach_live_prediction (draw the predicted ball path while you play)
@@ -142,6 +143,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	Vector armedCarLoc, armedBallLoc;
 	int   armedTicks = 0;
 	int   queuedRating = 0;         // rating pressed during a rep, applied when it saves
+	int   queuedRecovery = 0;       // recovery rating pressed during a rep, applied when it saves
 	int   recoverRun = 0;           // ticks in a row the car has been back in control after the shot
 	ShotEndTracker endTracker;      // when the shot is over (floor for aerials, stopped heading to goal for ground shots)
 	int   predictedTouch = -1;      // the ground touch we already asked the ball predictor about
@@ -159,8 +161,9 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void GradeFinishedRep(const RepSummary& s);
 	bool  haveLastRep = false;
 	int   lastRating = 0;
-	int   keyIndex[5] = {};
-	bool  keyWasDown[5] = {};
+	int   lastRecovery = 0;          // your recovery rating of the last rep (1 poor, 2 eh, 3 good)
+	int   keyIndex[8] = {};          // 1-5 rate the shot, 6-8 rate the recovery
+	bool  keyWasDown[8] = {};
 	std::string statusMessage;
 
 	// Latest input, for the HUD
@@ -184,6 +187,9 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void UpdateRatingKeys();
 	void RateLastRep(int rating);
 	void HandleRatingPress(int rating);
+	void HandleRecoveryPress(int rating);
+	void RateLastRecovery(int rating);
+	void SetRecoveryRating(const std::string& file, int rating);   // from the rep viewer
 	void LoadRatingKeys();
 
 	// ---- Test tools ----

@@ -13,7 +13,19 @@ struct V3
 };
 
 // Which grader a rep goes to, decided from the shot touch
-enum class ShotType { Aerial = 0, Ground = 1, DoubleTap = 2, Dribble = 3 };
+enum class ShotType { Aerial = 0, Ground = 1, DoubleTap = 2, Dribble = 3, AirDribble = 4 };
+
+// An air dribble that ended in your final touch: touches in a row in the air, no landing, ball kept close
+struct AirDribbleSpan
+{
+	bool  valid = false;
+	int   start = -1;             // your car left the ground or wall
+	int   firstTouch = -1;        // first touch of the air chain
+	int   touches = 0;            // touches in the air chain, the final touch included
+	float avgImpulse = 0;         // average speed change you gave the ball per touch before the final one (small = carried)
+	float closeFrac = 0;          // share of the air time the ball was within 230 of your car
+	float meanDist = 0;           // average ball-to-car distance in the air
+};
 
 // A dribble that ended in your final touch: the ball rode on your roof, then you flicked it (or it came off)
 struct DribbleSpan
@@ -80,6 +92,15 @@ struct ShotAnalysis
 	float dribblePace = 0;        // average ground speed of the ball while you carried it
 	float flickLift = 0;          // upward speed the flick gave the ball (how much it rose off your car)
 
+	// Air dribbles: touches in a row in the air leading into the final touch
+	bool  airDribble = false;
+	int   airStart = -1;          // your car left the ground or wall
+	int   airFirstTouch = -1;
+	int   airTouches = 0;         // the final touch included
+	float airSec = 0;             // from leaving the ground/wall to the final touch
+	float airImpulse = 0;         // average push per touch before the final one (small = carried, big = hit)
+	float airCloseFrac = 0;       // share of the air time the ball stayed within 230 of your car
+
 	// Your car at the touch
 	bool  carGrounded = false;    // wheels on the ground when you hit it
 	float carSpeed = 0;           // car speed into the touch
@@ -103,6 +124,8 @@ namespace ShotGeometry
 	bool BallWithCar(const Frame& f);
 	// The roof carry that leads into the touch ending at `release` (last tick of your final touch)
 	DribbleSpan FindDribble(const std::vector<Frame>& frames, int release);
+	// The chain of touches in the air that ends at `finalTouch` (a touch tick)
+	AirDribbleSpan FindAirDribble(const std::vector<Frame>& frames, int finalTouch);
 
 	ShotAnalysis Analyze(const std::vector<Frame>& frames);
 }
