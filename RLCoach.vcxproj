@@ -113,6 +113,8 @@
     <ClCompile Include="ShotGeometry.cpp" />
     <ClCompile Include="Segmenter.cpp" />
     <ClCompile Include="ShotBook.cpp" />
+    <ClCompile Include="Habits.cpp" />
+    <ClCompile Include="Coach.cpp" />
     <ClCompile Include="Grader.cpp" />
     <ClCompile Include="GradeBook.cpp" />
     <ClCompile Include="RLCoachViewer.cpp" />
@@ -166,6 +168,8 @@
     <ClInclude Include="ShotGeometry.h" />
     <ClInclude Include="Segmenter.h" />
     <ClInclude Include="ShotBook.h" />
+    <ClInclude Include="Habits.h" />
+    <ClInclude Include="Coach.h" />
     <ClInclude Include="Grader.h" />
     <ClInclude Include="GradeBook.h" />
     <ClInclude Include="RepStore.h" />

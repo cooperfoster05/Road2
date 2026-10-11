@@ -106,6 +106,12 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 			? std::format("{}: {}  ({})", viewerGrade.overall, Grader::OverallName(viewerGrade.overall), viewerGrade.overallWhy)
 			: std::string();
 	}
+	// v2: the coach's root cause (and one more note) for this rep
+	{
+		std::vector<CoachNote> notes = coachBook.Notes(viewerFrames, viewerShot, viewerGrade.overall, habitBook);
+		std::lock_guard<std::mutex> lock(uiSegMutex);
+		uiNotes = std::move(notes);
+	}
 
 	// Predicted ball path from the moment the ball starts moving, for comparing against what really happened
 	viewerPred.clear();
@@ -149,6 +155,7 @@ void RLCoach::ViewerExit()
 		uiSegTotal = 0;
 		uiGrades.clear();
 		uiOverall.clear();
+		uiNotes.clear();
 	}
 	uiViewerActive = false;
 	uiViewerPlaying = false;
@@ -460,6 +467,8 @@ void RLCoach::StartGradeRefresh()
 	gradeThread = std::thread([this, root]() {
 		shotBook.Update(root);
 		gradeBook.Refresh(root, shotBook);
+		habitBook.Update(root);
+		coachBook.Update(root);
 		gradeThreadBusy = false;
 	});
 }
@@ -534,6 +543,7 @@ void RLCoach::RenderWindow()
 		int scrub = static_cast<int>(uiViewerPlayhead.load());
 		std::vector<Segment> segs;
 		std::vector<UiGrade> grades;
+		std::vector<CoachNote> notes;
 		std::string overall, watching;
 		int segTotal = 0;
 		{
@@ -541,6 +551,7 @@ void RLCoach::RenderWindow()
 			segs = uiSegs;
 			segTotal = uiSegTotal;
 			grades = uiGrades;
+			notes = uiNotes;
 			overall = uiOverall;
 			watching = uiViewerFile;
 		}
@@ -610,6 +621,14 @@ void RLCoach::RenderWindow()
 			ImGui::PushStyleColor(ImGuiCol_Text, GradeColor(o));
 			ImGui::TextWrapped("Grade %s", overall.c_str());
 			ImGui::PopStyleColor();
+		}
+		// v2 coaching: the root cause first, then one more; hover for the numbers behind it
+		for (const CoachNote& n : notes)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, n.rootCause ? ImVec4(1.0f, 0.80f, 0.50f, 1.0f) : ImVec4(0.85f, 0.78f, 0.62f, 1.0f));
+			ImGui::TextWrapped("%s %s", n.label.c_str(), n.cue.c_str());
+			ImGui::PopStyleColor();
+			if (ImGui::IsItemHovered() && !n.detail.empty()) ImGui::SetTooltip("%s", n.detail.c_str());
 		}
 
 		// Transport

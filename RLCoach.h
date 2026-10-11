@@ -15,6 +15,8 @@
 #include "ShotBook.h"
 #include "Grader.h"
 #include "GradeBook.h"
+#include "Habits.h"
+#include "Coach.h"
 #include "ControllerOverlay.h"
 #include <mutex>
 #include <thread>
@@ -110,6 +112,8 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 
 	// Auto grades for the rep list, filled in on a worker thread
 	GradeBook gradeBook;
+	HabitBook habitBook;               // v2: your goals' habits per mechanic, for the "why" notes
+	CoachBook coachBook;               // v2: the coaching playbook, and which checks your reps back up
 	std::thread gradeThread;
 	std::atomic<bool> gradeThreadBusy{ false };
 	std::unordered_map<std::string, GradeBook::Brief> uiAutoGrades;   // render thread copy
@@ -122,6 +126,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	struct UiGrade { int segIndex; std::string name; std::string why; bool biggest; };
 	std::vector<UiGrade> uiGrades;
 	std::string uiOverall;
+	std::vector<CoachNote> uiNotes;     // v2 coaching notes for the rep being watched
 	std::string uiViewerFile;   // the rep being watched
 
 	// ---- Rep detection ----

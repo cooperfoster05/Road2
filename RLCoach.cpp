@@ -587,6 +587,10 @@ void RLCoach::GradeFinishedRep(const RepSummary& s)
 		lastRepGradeLines.push_back({ { { "Nothing to fix on this one", 115, 230, 115 } } });
 	}
 
+	// v2 coaching: the root cause first, then one more (numbers are in the rep viewer, on hover)
+	for (const CoachNote& n : coachBook.Notes(frames, shot, g.overall, habitBook))
+		lastRepGradeLines.push_back({ { { n.label + " " + n.cue, 255, 205, 130 } } });
+
 	gradeBook.TrySet(s.fileName, GradeBook::Make(g, shot, segs, s.shotKey, ref.bestFile, false));
 }
 
@@ -825,6 +829,21 @@ void RLCoach::RenderSettings()
 	if (ImGui::CollapsingHeader("Panel and units")) RenderLookSettings();
 	if (ImGui::CollapsingHeader("Controller overlay")) RenderPadSettings();
 	if (ImGui::CollapsingHeader("Storage and sharing")) RenderStorageSettings();
+
+	if (ImGui::CollapsingHeader("Coaching checks"))
+	{
+		ImGui::TextWrapped("Known mistakes for each mechanic, from how top players coach it. A check only shows up in your "
+			"notes once your rated reps back it: it has to happen clearly more on your misses than on your goals.");
+		std::vector<std::string> lines = coachBook.Summary();
+		if (lines.empty()) ImGui::TextDisabled("Still measuring your reps...");
+		for (const std::string& l : lines)
+		{
+			bool on = l.rfind("[on]", 0) == 0;
+			ImGui::PushStyleColor(ImGuiCol_Text, on ? ImVec4(0.55f, 0.85f, 0.55f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+			ImGui::TextWrapped("%s", l.c_str());
+			ImGui::PopStyleColor();
+		}
+	}
 
 	if (ImGui::CollapsingHeader("Ball prediction (RocketSim)"))
 	{
