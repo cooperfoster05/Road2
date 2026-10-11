@@ -72,7 +72,9 @@ namespace
 	}
 
 	std::string CachePath(const std::filesystem::path& root) { return (root / "habits_cache.csv").string(); }
-	std::string CacheHeader() { return std::format("file,type,goal,nose_late,nose_touch,boost_frac,car_speed,v{}", Grader::kVersion); }
+	std::string CacheHeader() { return std::format("file,type,goal,nose_late,nose_touch,boost_frac,car_speed,flip,v{}", Grader::kVersion); }
+	constexpr int kMinFlicks = 15;          // tries of a flick before comparing it
+	constexpr float kFlickGap = 0.20f;      // another flick of yours goes in this much more often = worth a note
 }
 
 HabitMetrics Habits::Measure(const std::vector<Frame>& fr, const ShotAnalysis& shot)
@@ -132,7 +134,7 @@ void HabitBook::Update(const std::filesystem::path& root)
 			std::stringstream ss(line);
 			std::string cell;
 			while (std::getline(ss, cell, ',')) p.push_back(cell);
-			if (p.size() < 7) continue;
+			if (p.size() < 8) continue;
 			Entry e;
 			e.type = std::atoi(p[1].c_str());
 			e.goal = p[2] == "1";
@@ -140,6 +142,7 @@ void HabitBook::Update(const std::filesystem::path& root)
 			e.m.noseTouch = std::strtof(p[4].c_str(), nullptr);
 			e.m.boostFrac = std::strtof(p[5].c_str(), nullptr);
 			e.m.carSpeed = std::strtof(p[6].c_str(), nullptr);
+			e.flip = std::atoi(p[7].c_str());
 			e.m.valid = true;
 			loaded[p[0]] = e;
 		}
@@ -166,15 +169,22 @@ void HabitBook::Update(const std::filesystem::path& root)
 		e.goal = item.goal;
 		e.m = Habits::Measure(frames, shot);
 		if (!e.m.valid) continue;
+		e.flip = shot.type == ShotType::Dribble && shot.flipTick >= 0 ? static_cast<int>(shot.flipKind) : 0;
 		loaded[item.file] = e;
-		if (out) out << std::format("{},{},{},{:.2f},{:.2f},{:.3f},{:.0f}\n", item.file, e.type, e.goal ? 1 : 0,
-			e.m.noseLate, e.m.noseTouch, e.m.boostFrac, e.m.carSpeed);
+		if (out) out << std::format("{},{},{},{:.2f},{:.2f},{:.3f},{:.0f},{}\n", item.file, e.type, e.goal ? 1 : 0,
+			e.m.noseLate, e.m.noseTouch, e.m.boostFrac, e.m.carSpeed, e.flip);
 	}
 
 	// Yardsticks: your goals, per shot type
 	Stat fresh[kTypes][kHabits];
+	int fN[kFlips] = {}, fGoals[kFlips] = {};
 	for (const auto& [file, e] : loaded)
 	{
+		if (e.type == static_cast<int>(ShotType::Dribble) && e.flip > 0 && e.flip < kFlips)
+		{
+			fN[e.flip]++;
+			if (e.goal) fGoals[e.flip]++;
+		}
 		if (!e.goal || e.type < 0 || e.type >= kTypes) continue;
 		for (int h = 0; h < kHabits; h++)
 		{
@@ -187,6 +197,7 @@ void HabitBook::Update(const std::filesystem::path& root)
 	entries = std::move(loaded);
 	for (int t = 0; t < kTypes; t++)
 		for (int h = 0; h < kHabits; h++) stats[t][h] = fresh[t][h];
+	for (int f = 0; f < kFlips; f++) { flickN[f] = fN[f]; flickGoals[f] = fGoals[f]; }
 	ready = true;
 }
 
@@ -234,6 +245,47 @@ std::vector<HabitNote> HabitBook::Notes(const ShotAnalysis& shot, const HabitMet
 		notes.push_back(note);
 	}
 	std::sort(notes.begin(), notes.end(), [](const HabitNote& a, const HabitNote& b) { return a.severity > b.severity; });
+
+	// Flick choice: another kind of flick of yours goes in a lot more often (needs 15+ tries of each)
+	int k = static_cast<int>(shot.flipKind);
+	if (shot.type == ShotType::Dribble && shot.flipTick >= 0 && k > 0 && k < kFlips && flickN[k] >= kMinFlicks)
+	{
+		double mine = static_cast<double>(flickGoals[k]) / flickN[k];
+		int best = -1;
+		double bestRate = 0;
+		for (int f = 1; f < kFlips; f++)
+		{
+			if (f == k || flickN[f] < kMinFlicks) continue;
+			double r = static_cast<double>(flickGoals[f]) / flickN[f];
+			if (r > bestRate) { bestRate = r; best = f; }
+		}
+		if (best > 0 && bestRate - mine >= kFlickGap)
+		{
+			HabitNote note;
+			note.habit = Habit::FlickChoice;
+			std::string other = ShotGeometry::FlipName(static_cast<FlipKind>(best), true);
+			std::string used = ShotGeometry::FlipName(shot.flipKind, true);
+			note.cue = std::format("Your {}s go in more often than your {}s", other, used);
+			note.detail = std::format("{}: {:.0f}% of {} in   {}: {:.0f}% of {} in", other, bestRate * 100.0, flickN[best],
+				used, mine * 100.0, flickN[k]);
+			note.severity = 0.5f;
+			notes.push_back(note);
+		}
+	}
 	if (notes.size() > 2) notes.resize(2);
 	return notes;
+}
+
+std::vector<std::string> HabitBook::FlickSummary()
+{
+	std::vector<std::string> out;
+	std::lock_guard<std::mutex> lock(mtx);
+	if (!ready) return out;
+	for (int f = 1; f < kFlips; f++)
+	{
+		if (flickN[f] == 0) continue;
+		out.push_back(std::format("{}: {} tries, {:.0f}% went in", ShotGeometry::FlipName(static_cast<FlipKind>(f), true),
+			flickN[f], 100.0 * flickGoals[f] / flickN[f]));
+	}
+	return out;
 }

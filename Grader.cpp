@@ -71,6 +71,20 @@ namespace
 		return Grade::Sloppy;
 	}
 
+	// "45 flick (left)" etc.
+	std::string FlickWords(const ShotAnalysis& s)
+	{
+		if (s.flipTick < 0) return "flick";
+		std::string name = ShotGeometry::FlipName(s.flipKind, true);
+		bool sided = s.flipKind == FlipKind::DiagonalFront || s.flipKind == FlipKind::Side || s.flipKind == FlipKind::DiagonalBack;
+		return sided ? name + (s.flipRight ? " (right)" : " (left)") : name;
+	}
+	std::string Capital(std::string s)
+	{
+		if (!s.empty() && s[0] >= 'a' && s[0] <= 'z') s[0] = static_cast<char>(s[0] - 'a' + 'A');
+		return s;
+	}
+
 	Grade FromDribblePace(float pace)
 	{
 		if (pace >= 1400.0f) return Grade::Clean;
@@ -269,7 +283,7 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 			gradeSeg(flickIdx, Grade::Sloppy, "No flick: the ball came off your car without a jump");
 		else if (!wentIn)
 		{
-			std::string why = std::format("Flick left your car {:.1f} deg off", shot.aimErrDeg);
+			std::string why = std::format("{} left your car {:.1f} deg off", Capital(FlickWords(shot)), shot.aimErrDeg);
 			if (!shot.missDir.empty()) why += std::format(" (went {})", shot.missDir);
 			gradeSeg(flickIdx, FromAim(shot.aimErrDeg), why);
 		}
@@ -277,7 +291,7 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		{
 			bool lifted = shot.flickLift >= kFlickLift, hard = shot.shotSpeed >= kFlickSpeed;
 			Grade fg = lifted && hard ? (shot.shotSpeed >= kFlickRocket ? Grade::Clean : Grade::Solid) : Grade::Sloppy;
-			gradeSeg(flickIdx, fg, std::format("Flick sent it up at {} and off at {}{}", Units::Speed(shot.flickLift),
+			gradeSeg(flickIdx, fg, std::format("{} sent it up at {} and off at {}{}", Capital(FlickWords(shot)), Units::Speed(shot.flickLift),
 				Units::Speed(shot.shotSpeed), !lifted ? " (not much lift)" : !hard ? " (not much power)" : ""));
 		}
 	}
@@ -303,8 +317,9 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 				shot.resets > 1 ? std::format(" ({} resets this play)", shot.resets) : std::string()));
 		float held = shot.resetDodge >= 0 ? (shot.resetDodge - shot.resetTick) / 120.0f : 0.0f;
 		Grade fg = shot.flipShot ? Grade::Clean : shot.resetDodge >= 0 ? Grade::Sloppy : Grade::Costly;
-		std::string why = shot.flipShot ? std::format("Held the flip {:.2f}s, then hit the shot with it", held)
-			: shot.resetDodge >= 0 ? std::format("Flipped {:.2f}s after the reset, but not into the shot", held)
+		std::string flipName = ShotGeometry::FlipName(shot.flipKind, false);
+		std::string why = shot.flipShot ? std::format("Held the flip {:.2f}s, then hit the shot with a {}", held, flipName)
+			: shot.resetDodge >= 0 ? std::format("Used a {} {:.2f}s after the reset, but not into the shot", flipName, held)
 			: "Never used the flip you got back";
 		gradeSeg(findSeg(SegKind::Flip, 0), fg, why);
 	}
@@ -390,7 +405,7 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		bool slowDribble = shot.dribblePace < kDribbleSlowPace;
 		g.overall = (lifted && hard) ? ((shot.shotSpeed >= kFlickRocket && corner) ? 5 : 4) : 3;
 		if (slowDribble) g.overall = std::min(g.overall, 3);
-		std::string why = std::format("Goal off the flick, {}, {} ({}){}{}", lifted ? "good lift" : "not much lift",
+		std::string why = std::format("Goal off a {}, {}, {} ({}){}{}", FlickWords(shot), lifted ? "good lift" : "not much lift",
 			hard ? "hard" : "soft", Units::Speed(shot.shotSpeed), g.overall == 5 ? ", toward the corner" : "",
 			slowDribble ? ", but a slow dribble" : "");
 		gradeSeg(resultIdx, g.overall >= 5 ? Grade::Clean : g.overall == 4 ? Grade::Solid : Grade::Sloppy, why);
@@ -449,7 +464,6 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 	int recIdx = findSeg(SegKind::Recovery, 0);
 	if (recIdx >= 0)
 	{
-		const Segment& rs = segs.segs[recIdx];
 		if (segs.recoveredTick < 0)
 		{
 			int afterTouch = static_cast<int>(fr.size()) - 1 - segs.lastTouch;
@@ -458,14 +472,31 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		}
 		else
 		{
-			float t = (segs.recoveredTick - rs.start) / 120.0f;
+			// Fitted to Coop's recovery ratings (Oct 11, 131 rated: 56% exact vs 34% for the old time-based formula).
+			// What separated his good / eh / poor: speed kept into the landing, landing lined up with where you're
+			// going, and using a flip to get moving again. How fast you got "in control" barely mattered.
+			const int n = static_cast<int>(fr.size());
 			auto speedAt = [&](int i) { const Frame& f = fr[i]; return std::sqrt(f.carVX * f.carVX + f.carVY * f.carVY + f.carVZ * f.carVZ); };
-			float kept = speedAt(segs.recoveredTick) / std::max(1.0f, speedAt(std::max(0, segs.lastTouch - 1)));
-			float score = 0.40f * 1.0f                                              // aligned by definition once recovered
-				+ 0.35f * std::min(1.0f, kept)
-				+ 0.25f * std::max(0.0f, std::min(1.0f, 1.0f - (t - 0.5f) / 2.0f));
-			Grade rg = score >= 0.80f ? Grade::Clean : score >= 0.65f ? Grade::Solid : score >= 0.50f ? Grade::Sloppy : Grade::Costly;
-			gradeSeg(recIdx, rg, std::format("Back in control {:.2f}s after the touch, kept {:.0f}% of your speed", t, std::min(1.0f, kept) * 100));
+			int land = -1;
+			for (int i = segs.lastTouch + 1; i < n; i++) if (ShotGeometry::OnSurface(fr[i])) { land = i; break; }
+			if (land < 0) land = segs.recoveredTick;
+			const Frame& lf = fr[land];
+			float landSpeed = speedAt(land);
+			float pitch = lf.carPitch * 3.14159265f / 32768.0f, yaw = lf.carYaw * 3.14159265f / 32768.0f;
+			float align = landSpeed < 300.0f ? 1.0f
+				: (std::cos(pitch) * std::cos(yaw) * lf.carVX + std::cos(pitch) * std::sin(yaw) * lf.carVY + std::sin(pitch) * lf.carVZ) / landSpeed;
+			float kept = landSpeed / std::max(1.0f, speedAt(std::max(0, segs.lastTouch - 1)));
+			bool flipped = false;
+			for (int i = segs.lastTouch + 5; i < std::min(n, segs.lastTouch + 400); i++)
+				if (fr[i].jump && !fr[i - 1].jump) { flipped = true; break; }
+			bool poor = align < 0.3f || !flipped || landSpeed < 900.0f;
+			bool good = !poor && kept >= 0.9f;
+			std::string why = good ? std::format("Landed lined up and kept {:.0f}% of your speed", std::min(1.0f, kept) * 100.0f)
+				: align < 0.3f ? "Landed sideways to where you were going"
+				: !flipped ? "Didn't use a flip to get moving again after the touch"
+				: landSpeed < 900.0f ? std::format("Landed slow ({})", Units::Speed(landSpeed))
+				: std::format("Landed and kept {:.0f}% of your speed", std::min(1.0f, kept) * 100.0f);
+			gradeSeg(recIdx, good ? Grade::Clean : poor ? Grade::Sloppy : Grade::Solid, why);
 		}
 	}
 

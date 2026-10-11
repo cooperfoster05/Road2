@@ -757,14 +757,42 @@ void RLCoach::RenderWindow()
 			ImGui::SameLine();
 			ImGui::TextDisabled("scrub to pick the moment; the lead-in still applies");
 		}
+		// The part of the rep the coach's root cause is in: its Practice button is highlighted
+		int rootSeg = -1;
+		if (!notes.empty() && notes[0].rootCause)
+			for (int i = 0; i < static_cast<int>(segs.size()); i++)
+				if (segs[i].kind == notes[0].seg) rootSeg = i;
+		bool rootListed = false;
+		for (const UiGrade& ug : grades) if (ug.segIndex == rootSeg && !ug.name.empty()) rootListed = true;
+		auto practiceButton = [&](int si) {
+			bool root = si == rootSeg;
+			if (root)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.42f, 0.10f, 1.0f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.78f, 0.55f, 0.15f, 1.0f));
+			}
+			ImGui::PushID(si + 2000);
+			if (ImGui::SmallButton("Practice")) onGame([this, si]() { PracticeStart(si); });
+			ImGui::PopID();
+			if (root)
+			{
+				ImGui::PopStyleColor(2);
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("The root cause is in this part: %s", notes[0].cue.c_str());
+			}
+		};
+		// Root cause in a part that has no grade line (e.g. the pop before a flip reset): give it its own line
+		if (rootSeg >= 0 && !rootListed)
+		{
+			practiceButton(rootSeg);
+			ImGui::SameLine();
+			ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.50f, 1.0f), "%s: root cause is here", Segmenter::Name(segs[rootSeg].kind));
+		}
 		for (const UiGrade& ug : grades)
 		{
 			if (ug.name.empty() || ug.segIndex < 0 || ug.segIndex >= static_cast<int>(segs.size())) continue;
 			const Segment& sg = segs[ug.segIndex];
 			int si = ug.segIndex;
-			ImGui::PushID(si + 2000);
-			if (ImGui::SmallButton("Practice")) onGame([this, si]() { PracticeStart(si); });
-			ImGui::PopID();
+			practiceButton(si);
 			ImGui::SameLine();
 			Pill(ug.name, SegGradeColor(ug.name), 84.0f);
 			ImGui::SameLine();

@@ -24,6 +24,7 @@ struct CoachNote
 	std::string cue;          // what to do, in plain words (shown)
 	std::string detail;       // the number behind it (shown on hover)
 	bool rootCause = false;   // the earliest broken step in the chain
+	SegKind seg = SegKind::Approach;   // the part of the rep it happened in (its Practice button gets highlighted)
 };
 
 namespace Coach
@@ -33,7 +34,7 @@ namespace Coach
 
 	Values Measure(const std::vector<Frame>& frames, const ShotAnalysis& shot);
 	// Up to 2 notes: the root cause first, then one more check or your own-habit note
-	std::vector<CoachNote> Combine(const std::vector<int>& firing, const Values& v, int overall,
+	std::vector<CoachNote> Combine(const std::vector<int>& firing, const Values& v, int overall, ShotType type,
 		const std::vector<HabitNote>& habits);
 	const char* CheckId(int check);
 }

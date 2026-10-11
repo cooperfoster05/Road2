@@ -22,7 +22,7 @@ struct HabitMetrics
 	float carSpeed = 0;      // your car's speed at the touch
 };
 
-enum class Habit { NoseLate = 0, NoseTouch = 1, BoostFrac = 2, CarSpeed = 3 };
+enum class Habit { NoseLate = 0, NoseTouch = 1, BoostFrac = 2, CarSpeed = 3, FlickChoice = 4 };
 
 struct HabitNote
 {
@@ -45,6 +45,8 @@ public:
 	void Update(const std::filesystem::path& root);
 	// Up to 2 notes for one rep (empty while the book is still loading, or when nothing stands out)
 	std::vector<HabitNote> Notes(const ShotAnalysis& shot, const HabitMetrics& m);
+	// Your flicks off a dribble: how often each kind goes in (settings readout)
+	std::vector<std::string> FlickSummary();
 
 private:
 	struct Stat
@@ -55,8 +57,9 @@ private:
 		double Mean() const { return n ? sum / n : 0; }
 		double Sd() const;
 	};
-	struct Entry { int type = 0; bool goal = false; HabitMetrics m; };
-	static constexpr int kTypes = 6, kHabits = 4;
+	struct Entry { int type = 0; bool goal = false; int flip = 0; HabitMetrics m; };
+	static constexpr int kTypes = 6, kHabits = 4, kFlips = 6;
+	int flickN[kFlips] = {}, flickGoals[kFlips] = {};   // dribbles only, by FlipKind
 
 	std::mutex mtx;
 	std::unordered_map<std::string, Entry> entries;

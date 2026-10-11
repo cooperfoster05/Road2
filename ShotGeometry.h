@@ -27,6 +27,9 @@ struct AirDribbleSpan
 	float meanDist = 0;           // average ball-to-car distance in the air
 };
 
+// Which way you flipped: front, diagonal front, side (a "90"), diagonal back (a "45"), back
+enum class FlipKind { None = 0, Front = 1, DiagonalFront = 2, Side = 3, DiagonalBack = 4, Back = 5 };
+
 // A dribble that ended in your final touch: the ball rode on your roof, then you flicked it (or it came off)
 struct DribbleSpan
 {
@@ -110,6 +113,12 @@ struct ShotAnalysis
 	bool  flipShot = false;       // the final touch came off that flip (within 1/3 s of starting it)
 	bool  resetAfterAirDribble = false;   // air dribble touches before the reset
 
+	// The flip that made the shot: the flick on a dribble, the flip off the reset on a flip reset
+	int   flipTick = -1;
+	FlipKind flipKind = FlipKind::None;
+	bool  flipRight = false;      // flipped to your right
+	float flipDelay = 0;          // dribbles: time from the jump to the flip
+
 	// Your car at the touch
 	bool  carGrounded = false;    // wheels on the ground when you hit it
 	float carSpeed = 0;           // car speed into the touch
@@ -142,4 +151,9 @@ namespace ShotGeometry
 	bool IsFlipReset(const Frame& before, const Frame& now);
 
 	ShotAnalysis Analyze(const std::vector<Frame>& frames);
+
+	// From the stick at the moment you flipped
+	FlipKind ClassifyFlip(const Frame& atFlip, bool& right);
+	// "45 flick", "90 flick", "front flip"... (flick = off a dribble)
+	std::string FlipName(FlipKind kind, bool flick);
 }

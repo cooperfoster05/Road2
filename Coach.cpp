@@ -23,6 +23,7 @@ namespace
 		const char* id;
 		ShotType type;
 		int order;            // position in the mechanic's chain: lower = earlier
+		SegKind seg;          // the part of the rep it happens in
 		bool firesAbove;      // true: fires when the value is above the threshold; false: below
 		float threshold;
 		const char* cue;
@@ -34,35 +35,35 @@ namespace
 	// Sources: r/RocketLeagueSchool, Dot Esports and Dignitas guides, Steam air dribble thread (see design doc).
 	const Check kList[Coach::kChecks] = {
 		// Flip resets: pop -> approach -> the reset -> the flip -> the shot
-		{ "fr_pop_low", ShotType::FlipReset, 1, false, 1550.0f,
+		{ "fr_pop_low", ShotType::FlipReset, 1, SegKind::Approach, false, 1550.0f,
 			"Pop it higher off the wall so you have time to get under it", "Ball peaked about {} high off your pop", Shown::Plain },
-		{ "fr_rushed", ShotType::FlipReset, 2, true, 500.0f,
+		{ "fr_rushed", ShotType::FlipReset, 2, SegKind::Reset, true, 500.0f,
 			"Don't rush the reset: match the ball's speed and float into it", "Closing on the ball at {} right before the reset", Shown::Speed },
-		{ "fr_boost_in", ShotType::FlipReset, 2, true, 0.45f,
+		{ "fr_boost_in", ShotType::FlipReset, 2, SegKind::Reset, true, 0.45f,
 			"Ease off boost as you reach the ball for the reset", "Boosting {} of the half second before the reset", Shown::Percent },
-		{ "fr_low_reset", ShotType::FlipReset, 3, false, 1450.0f,
+		{ "fr_low_reset", ShotType::FlipReset, 3, SegKind::Reset, false, 1450.0f,
 			"Get the reset higher up: you met the ball too close to the floor", "Got the reset {} high", Shown::Plain },
-		{ "fr_flip_far", ShotType::FlipReset, 4, true, 300.0f,
+		{ "fr_flip_far", ShotType::FlipReset, 4, SegKind::Flip, true, 300.0f,
 			"Wait until the ball is in reach before you flip", "Flipped with the ball {} away", Shown::Plain },
-		{ "fr_slow_shot", ShotType::FlipReset, 5, false, 1300.0f,
+		{ "fr_slow_shot", ShotType::FlipReset, 5, SegKind::Contact, false, 1300.0f,
 			"Carry more speed into the shot", "Hit it at {}", Shown::Speed },
 		// Aerials
-		{ "ae_hold_boost", ShotType::Aerial, 1, true, 0.80f,
+		{ "ae_hold_boost", ShotType::Aerial, 1, SegKind::Flight, true, 0.80f,
 			"Feather your boost instead of holding it", "Held boost for {} of the flight", Shown::Percent },
 		// Double taps: setup -> read
-		{ "dt_high_board", ShotType::DoubleTap, 1, true, 1200.0f,
+		{ "dt_high_board", ShotType::DoubleTap, 1, SegKind::Setup, true, 1200.0f,
 			"Hit the backboard lower so it comes back to you sooner", "Ball hit the backboard {} high", Shown::Plain },
-		{ "dt_flew_up", ShotType::DoubleTap, 2, true, 950.0f,
+		{ "dt_flew_up", ShotType::DoubleTap, 2, SegKind::Read, true, 950.0f,
 			"Don't fly up with the ball: wait under where it comes off the backboard", "You were {} high when it hit the backboard", Shown::Plain },
 		// Dribbles: the carry into the flick
-		{ "dr_ball_back", ShotType::Dribble, 1, false, 40.0f,
+		{ "dr_ball_back", ShotType::Dribble, 1, SegKind::Dribble, false, 40.0f,
 			"Get the ball further forward on your roof before you jump to flick", "Ball was {} ahead of your car's center when you jumped", Shown::Plain },
 		// Air dribbles: the touches
-		{ "ad_off_center", ShotType::AirDribble, 1, true, 65.0f,
+		{ "ad_off_center", ShotType::AirDribble, 1, SegKind::AirDribble, true, 65.0f,
 			"Keep the ball centered on your nose", "Ball sat {} off-center at your touches", Shown::Plain },
-		{ "ad_hard_touch", ShotType::AirDribble, 1, true, 800.0f,
+		{ "ad_hard_touch", ShotType::AirDribble, 1, SegKind::AirDribble, true, 800.0f,
 			"Softer touches: feather boost so you don't knock it away", "Each touch pushed it {} on average", Shown::Speed },
-		{ "ad_falling", ShotType::AirDribble, 1, true, 0.74f,
+		{ "ad_falling", ShotType::AirDribble, 1, SegKind::AirDribble, true, 0.74f,
 			"Touch the ball on its way up, not as it falls", "{} of your touches came as the ball was falling", Shown::Percent },
 	};
 
@@ -101,6 +102,20 @@ namespace
 		size_t at = s.find("{}");
 		if (at != std::string::npos) s.replace(at, 2, num);
 		return s;
+	}
+
+	// Where an own-habit note happens in the rep
+	SegKind HabitSeg(Habit h, ShotType t)
+	{
+		switch (h)
+		{
+		case Habit::NoseLate:
+			return t == ShotType::DoubleTap ? SegKind::Read : t == ShotType::AirDribble ? SegKind::AirDribble
+				: t == ShotType::FlipReset ? SegKind::Flip : SegKind::Flight;
+		case Habit::BoostFrac: return SegKind::Flight;
+		case Habit::FlickChoice: return SegKind::Flick;
+		default: return t == ShotType::Dribble ? SegKind::Flick : SegKind::Contact;
+		}
 	}
 
 	std::string CachePath(const std::filesystem::path& root) { return (root / "coach_cache.csv").string(); }
@@ -203,7 +218,7 @@ Coach::Values Coach::Measure(const std::vector<Frame>& fr, const ShotAnalysis& s
 	return v;
 }
 
-std::vector<CoachNote> Coach::Combine(const std::vector<int>& firing, const Values& v, int overall,
+std::vector<CoachNote> Coach::Combine(const std::vector<int>& firing, const Values& v, int overall, ShotType type,
 	const std::vector<HabitNote>& habits)
 {
 	std::vector<CoachNote> notes;
@@ -212,12 +227,14 @@ std::vector<CoachNote> Coach::Combine(const std::vector<int>& firing, const Valu
 	for (int c : firing)
 	{
 		if (notes.size() >= 2) break;
-		notes.push_back(CoachNote{ notes.empty() ? first : "Also:", kList[c].cue, Show(kList[c], v[c]), notes.empty() });
+		notes.push_back(CoachNote{ notes.empty() ? first : "Also:", kList[c].cue, Show(kList[c], v[c]), notes.empty(), kList[c].seg });
 	}
 	for (const HabitNote& h : habits)
 	{
 		if (notes.size() >= 2) break;
-		notes.push_back(CoachNote{ notes.empty() ? first : "Also:", h.cue, h.detail, notes.empty() });
+		// Flick choice is a suggestion from your own numbers, never a root cause
+		bool tip = h.habit == Habit::FlickChoice;
+		notes.push_back(CoachNote{ tip ? "Tip:" : notes.empty() ? first : "Also:", h.cue, h.detail, notes.empty() && !tip, HabitSeg(h.habit, type) });
 	}
 	return notes;
 }
@@ -348,5 +365,5 @@ std::vector<CoachNote> CoachBook::Notes(const std::vector<Frame>& frames, const 
 	Coach::Values v = Coach::Measure(frames, shot);
 	std::vector<int> firing = Firing(shot, v);
 	std::vector<HabitNote> own = habits.Notes(shot, Habits::Measure(frames, shot));
-	return Coach::Combine(firing, v, overall, own);
+	return Coach::Combine(firing, v, overall, shot.type, own);
 }

@@ -333,6 +333,17 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 		s.airDribble = false;
 	}
 
+	// The flip behind the shot: your flick off a dribble, or the flip you used off a reset
+	if (s.dribble && s.flickJumpTick >= 0)
+	{
+		for (int i = s.flickJumpTick + 1; i < std::min(n, s.flickJumpTick + 150); i++)
+			if (fr[i].jump && !fr[i - 1].jump && !OnSurface(fr[i])) { s.flipTick = i; break; }
+		if (s.flipTick >= 0) s.flipDelay = (s.flipTick - s.flickJumpTick) / 120.0f;
+	}
+	else if (s.type == ShotType::FlipReset)
+		s.flipTick = s.resetDodge;
+	if (s.flipTick >= 0) s.flipKind = ClassifyFlip(fr[s.flipTick], s.flipRight);
+
 	s.valid = true;
 	return s;
 }
@@ -475,6 +486,33 @@ DribbleSpan ShotGeometry::FindDribble(const std::vector<Frame>& fr, int release)
 	d.lastRoof = lastRoof;
 	d.release = release;
 	return d;
+}
+
+FlipKind ShotGeometry::ClassifyFlip(const Frame& f, bool& right)
+{
+	// Stick forward (pitch -1) = front flip, back (+1) = backflip, sideways = side flip
+	right = f.yaw > 0.0f;
+	if (std::sqrt(f.pitch * f.pitch + f.yaw * f.yaw) < 0.3f) return FlipKind::None;
+	float fromFront = std::fabs(std::atan2(f.yaw, -f.pitch)) * 57.29578f;   // 0 = straight front, 180 = straight back
+	if (fromFront < 22.5f) return FlipKind::Front;
+	if (fromFront < 67.5f) return FlipKind::DiagonalFront;
+	if (fromFront < 112.5f) return FlipKind::Side;
+	if (fromFront < 157.5f) return FlipKind::DiagonalBack;
+	return FlipKind::Back;
+}
+
+std::string ShotGeometry::FlipName(FlipKind k, bool flick)
+{
+	const char* what = flick ? "flick" : "flip";
+	switch (k)
+	{
+	case FlipKind::Front:         return std::string("front ") + what;
+	case FlipKind::DiagonalFront: return std::string("diagonal front ") + what;
+	case FlipKind::Side:          return flick ? "90 flick" : "side flip";
+	case FlipKind::DiagonalBack:  return flick ? "45 flick" : "diagonal back flip";
+	case FlipKind::Back:          return std::string("back ") + what;
+	default:                      return flick ? "flick" : "flip";
+	}
 }
 
 const char* ShotGeometry::TypeName(ShotType t)

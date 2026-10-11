@@ -834,6 +834,12 @@ void RLCoach::RenderSettings()
 	{
 		ImGui::TextWrapped("Known mistakes for each mechanic, from how top players coach it. A check only shows up in your "
 			"notes once your rated reps back it: it has to happen clearly more on your misses than on your goals.");
+		std::vector<std::string> flicks = habitBook.FlickSummary();
+		if (!flicks.empty())
+		{
+			ImGui::TextDisabled("Your flicks off a dribble:");
+			for (const std::string& f : flicks) ImGui::BulletText("%s", f.c_str());
+		}
 		std::vector<std::string> lines = coachBook.Summary();
 		if (lines.empty()) ImGui::TextDisabled("Still measuring your reps...");
 		for (const std::string& l : lines)
