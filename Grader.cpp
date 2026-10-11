@@ -37,10 +37,14 @@ namespace
 	constexpr Cutoffs kDribble{ 140.0f, 350.0f, 2400.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
 	// Air dribbles: closeMiss, and upperZ = high enough in the net for a 4 (details below)
 	constexpr Cutoffs kAirDribble{ 150.0f, 480.0f, 2400.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
+	// Flip resets, tuned on Coop's 117 rated flip resets (Oct 11): closeMiss, upperZ for a 4, and fast = the speed
+	// a 4 needs. Most of his goals were 3s; height in the net (and not dribbling it in slowly) made the 4s.
+	constexpr Cutoffs kFlipReset{ 250.0f, 450.0f, 1700.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
+	constexpr float kFrGreatZ = 560.0f, kFrGreatSpeed = 2400.0f;   // a 5: top of the net and hard
 	const Cutoffs& For(ShotType t)
 	{
 		return t == ShotType::Ground ? kGround : t == ShotType::DoubleTap ? kDoubleTap : t == ShotType::Dribble ? kDribble
-			: t == ShotType::AirDribble ? kAirDribble : kAerial;
+			: t == ShotType::AirDribble ? kAirDribble : t == ShotType::FlipReset ? kFlipReset : kAerial;
 	}
 
 	// Dribble goals: the flick's lift (how fast it sent the ball up off your roof) and its speed split 3s from 4s.
@@ -290,6 +294,21 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		gradeSeg(findSeg(SegKind::AirDribble, 0), cg, why);
 	}
 
+	// ---- Flip reset: getting it, then using it ----
+	if (shot.type == ShotType::FlipReset)
+	{
+		float toReset = (shot.resetTick - shot.resetTakeoff) / 120.0f;
+		gradeSeg(findSeg(SegKind::Reset, 0), Grade::Solid,
+			std::format("Got the reset {:.2f}s after leaving the {}{}", toReset, shot.resetAfterAirDribble ? "wall or ground, off an air dribble" : "wall or ground",
+				shot.resets > 1 ? std::format(" ({} resets this play)", shot.resets) : std::string()));
+		float held = shot.resetDodge >= 0 ? (shot.resetDodge - shot.resetTick) / 120.0f : 0.0f;
+		Grade fg = shot.flipShot ? Grade::Clean : shot.resetDodge >= 0 ? Grade::Sloppy : Grade::Costly;
+		std::string why = shot.flipShot ? std::format("Held the flip {:.2f}s, then hit the shot with it", held)
+			: shot.resetDodge >= 0 ? std::format("Flipped {:.2f}s after the reset, but not into the shot", held)
+			: "Never used the flip you got back";
+		gradeSeg(findSeg(SegKind::Flip, 0), fg, why);
+	}
+
 	// ---- Contact: aim error, explained by where you hit the ball ----
 	int contactIdx = findSeg(SegKind::Contact, shotTouch);
 	// Pushed in from right at the goal line: the angle math means nothing that close, and it went in
@@ -313,7 +332,7 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 	if (!wentIn)
 	{
 		bool close = shot.reachesGoalLine && shot.missDist <= C.closeMiss
-			&& ((shot.type != ShotType::DoubleTap && shot.type != ShotType::AirDribble) || shot.missDist > 0.0f);
+			&& ((shot.type != ShotType::DoubleTap && shot.type != ShotType::AirDribble && shot.type != ShotType::FlipReset) || shot.missDist > 0.0f);
 		// Air dribbles: carrying it a long way before losing it still counts as close
 		bool longCarry = shot.type == ShotType::AirDribble && (shot.airTouches >= kAdLongTouches || shot.airSec >= kAdLongSec);
 		close = close || longCarry;
@@ -335,6 +354,17 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		g.overall = high ? (great ? 5 : 4) : 3;
 		std::string why = std::format("{} goal, {}, {} ({})", "Double tap",
 			high ? "high in the net" : "low in the net", shot.shotSpeed >= kDtReadFast ? "hard" : "soft", Units::Speed(shot.shotSpeed));
+		gradeSeg(resultIdx, g.overall >= 5 ? Grade::Clean : g.overall == 4 ? Grade::Solid : Grade::Sloppy, why);
+		g.overallWhy = why;
+	}
+	else if (shot.type == ShotType::FlipReset)
+	{
+		bool high = shot.reachesGoalLine && shot.crossZ >= kFlipReset.upperZ;
+		bool fastEnough = shot.shotSpeed >= kFlipReset.fast;
+		bool great = high && shot.crossZ >= kFrGreatZ && shot.shotSpeed >= kFrGreatSpeed;
+		g.overall = (high && fastEnough) ? (great ? 5 : 4) : 3;
+		std::string why = std::format("Flip reset goal, {}, {} ({}){}", high ? "high in the net" : "low in the net",
+			fastEnough ? "with pace" : "slow", Units::Speed(shot.shotSpeed), shot.flipShot ? ", shot off the flip" : "");
 		gradeSeg(resultIdx, g.overall >= 5 ? Grade::Clean : g.overall == 4 ? Grade::Solid : Grade::Sloppy, why);
 		g.overallWhy = why;
 	}

@@ -29,6 +29,8 @@ const char* Segmenter::Name(SegKind k)
 	case SegKind::Dribble:  return "Dribble";
 	case SegKind::Flick:    return "Flick";
 	case SegKind::AirDribble: return "Air dribble";
+	case SegKind::Reset:    return "Getting the reset";
+	case SegKind::Flip:     return "Using the flip";
 	}
 	return "";
 }
@@ -137,7 +139,18 @@ RepSegments Segmenter::Split(const std::vector<Frame>& fr, int eventTick)
 	if (!r.dribble)
 	{
 		ShotAnalysis sa = ShotGeometry::Analyze(fr);
-		if (sa.valid && sa.type == ShotType::AirDribble)
+		if (sa.valid && sa.type == ShotType::FlipReset)
+		{
+			const int shotTouch = static_cast<int>(r.touchTicks.size());
+			const int k = sa.touchTick;
+			r.flipReset = true;
+			r.lastTouch = k;
+			add(SegKind::Approach, 0, sa.resetTakeoff - 1, shotTouch);
+			add(SegKind::Reset, sa.resetTakeoff, sa.resetTick, shotTouch);
+			add(SegKind::Flip, sa.resetTick + 1, k - kContactBefore - 1, shotTouch);
+			add(SegKind::Contact, std::max(sa.resetTick + 1, k - kContactBefore), k + kContactAfter, shotTouch);
+		}
+		else if (sa.valid && sa.type == ShotType::AirDribble)
 		{
 			const int shotTouch = static_cast<int>(r.touchTicks.size());
 			const int k = sa.touchTick;
@@ -151,7 +164,7 @@ RepSegments Segmenter::Split(const std::vector<Frame>& fr, int eventTick)
 
 	// Lead-in and contact for each touch
 	int cursor = 0;
-	for (size_t t = 0; t < r.touchTicks.size() && !r.dribble && !r.airDribble; t++)
+	for (size_t t = 0; t < r.touchTicks.size() && !r.dribble && !r.airDribble && !r.flipReset; t++)
 	{
 		int k = r.touchTicks[t];
 		int a = std::max(k - kContactBefore, cursor);
@@ -163,7 +176,7 @@ RepSegments Segmenter::Split(const std::vector<Frame>& fr, int eventTick)
 
 	// Double tap: the touch that sent the ball to the backboard is the setup, and the stretch after the
 	// backboard (before your final touch) is the read
-	if (r.touchTicks.size() >= 2 && !r.dribble && !r.airDribble)
+	if (r.touchTicks.size() >= 2 && !r.dribble && !r.airDribble && !r.flipReset)
 	{
 		int bb = ShotGeometry::LastWallTap(fr, r.startTick, r.lastTouch - 1);
 		bool floorBetween = false;

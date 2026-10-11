@@ -286,10 +286,31 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 	}
 	if (s.dribble && !s.doubleTap) s.type = ShotType::Dribble;
 
+	// Flip reset: the flip came back mid-air at the ball, before the final touch (wheels brushing the ball on
+	// the shot itself isn't one)
+	for (int i = std::max(1, s.startTick); i < k - 3; i++)
+	{
+		if (!IsFlipReset(fr[i - 1], fr[i])) continue;
+		s.resets++;
+		s.resetTick = i;
+	}
+	if (s.resets > 0)
+	{
+		s.flipReset = true;
+		int t = s.resetTick - 3;
+		while (t > 0 && !OnSurface(fr[t])) t--;
+		s.resetTakeoff = t + 1;
+		for (int i = s.resetTick + 1; i <= k; i++)
+			if (fr[i].jump && !fr[i - 1].jump && !OnSurface(fr[i])) { s.resetDodge = i; break; }
+		s.flipShot = s.resetDodge >= 0 && k - s.resetDodge >= 0 && k - s.resetDodge <= 40;
+		AirDribbleSpan before = FindAirDribble(fr, s.resetTick - 1);
+		s.resetAfterAirDribble = before.valid;
+	}
+
 	// Air dribble: a chain of touches in the air into the final one. A wall bounce before the chain started is
 	// just the pop off the wall, and a backboard bounce in the middle of a long chain (3+ touches, ball kept
 	// close) is part of carrying it in, so neither makes it a double tap.
-	if (!s.dribble)
+	if (!s.dribble && !s.flipReset)
 	{
 		const AirDribbleSpan& a = air;
 		if (a.valid && (!s.doubleTap || s.backboardTick < a.firstTouch || a.touches >= 3))
@@ -304,6 +325,12 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 			s.airImpulse = a.avgImpulse;
 			s.airCloseFrac = a.closeFrac;
 		}
+	}
+	if (s.flipReset && !s.dribble)
+	{
+		s.type = ShotType::FlipReset;
+		s.doubleTap = false;
+		s.airDribble = false;
 	}
 
 	s.valid = true;
@@ -323,6 +350,23 @@ bool ShotGeometry::BallWithCar(const Frame& f)
 	float dx = f.ballX - f.carX, dy = f.ballY - f.carY, above = f.ballZ - f.carZ;
 	float rvx = f.ballVX - f.carVX, rvy = f.ballVY - f.carVY;
 	return dx * dx + dy * dy < 280.0f * 280.0f && above > -40.0f && above < 260.0f && rvx * rvx + rvy * rvy < 650.0f * 650.0f;
+}
+
+bool ShotGeometry::OnSurface(const Frame& f)
+{
+	if (!f.onGround) return false;
+	float x = std::fabs(f.carX), y = std::fabs(f.carY);
+	bool openAir = f.carZ > 250.0f && f.carZ < 1900.0f && x < 3800.0f && y < 4900.0f && x + y < 7600.0f;
+	return !openAir;
+}
+
+bool ShotGeometry::IsFlipReset(const Frame& before, const Frame& now)
+{
+	if (!now.hasFlip || before.hasFlip) return false;
+	float x = std::fabs(now.carX), y = std::fabs(now.carY);
+	bool openAir = now.carZ > 250.0f && now.carZ < 1900.0f && x < 3800.0f && y < 4900.0f && x + y < 7600.0f;
+	float dx = now.ballX - now.carX, dy = now.ballY - now.carY, dz = now.ballZ - now.carZ;
+	return openAir && dx * dx + dy * dy + dz * dz < 200.0f * 200.0f;
 }
 
 AirDribbleSpan ShotGeometry::FindAirDribble(const std::vector<Frame>& fr, int finalTouch)
@@ -441,6 +485,7 @@ const char* ShotGeometry::TypeName(ShotType t)
 	case ShotType::DoubleTap: return "Double tap";
 	case ShotType::Dribble:   return "Dribble";
 	case ShotType::AirDribble: return "Air dribble";
+	case ShotType::FlipReset: return "Flip reset";
 	default:                  return "Aerial";
 	}
 }

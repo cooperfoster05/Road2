@@ -13,7 +13,7 @@ struct V3
 };
 
 // Which grader a rep goes to, decided from the shot touch
-enum class ShotType { Aerial = 0, Ground = 1, DoubleTap = 2, Dribble = 3, AirDribble = 4 };
+enum class ShotType { Aerial = 0, Ground = 1, DoubleTap = 2, Dribble = 3, AirDribble = 4, FlipReset = 5 };
 
 // An air dribble that ended in your final touch: touches in a row in the air, no landing, ball kept close
 struct AirDribbleSpan
@@ -101,6 +101,15 @@ struct ShotAnalysis
 	float airImpulse = 0;         // average push per touch before the final one (small = carried, big = hit)
 	float airCloseFrac = 0;       // share of the air time the ball stayed within 230 of your car
 
+	// Flip resets: your wheels touched the ball in the air and gave you your flip back before the final touch
+	bool  flipReset = false;
+	int   resetTick = -1;         // the (last) reset before the final touch
+	int   resets = 0;             // resets during the play
+	int   resetTakeoff = -1;      // your car left the ground or wall on the way to the reset
+	int   resetDodge = -1;        // the flip you used after the reset (-1 = never flipped)
+	bool  flipShot = false;       // the final touch came off that flip (within 1/3 s of starting it)
+	bool  resetAfterAirDribble = false;   // air dribble touches before the reset
+
 	// Your car at the touch
 	bool  carGrounded = false;    // wheels on the ground when you hit it
 	float carSpeed = 0;           // car speed into the touch
@@ -126,6 +135,11 @@ namespace ShotGeometry
 	DribbleSpan FindDribble(const std::vector<Frame>& frames, int release);
 	// The chain of touches in the air that ends at `finalTouch` (a touch tick)
 	AirDribbleSpan FindAirDribble(const std::vector<Frame>& frames, int finalTouch);
+	// Touching the floor, a wall or the ceiling (the game also reports "on ground" for a moment when your wheels
+	// touch the ball in the air: that's a flip reset, not a surface)
+	bool OnSurface(const Frame& f);
+	// You got your flip back in the air with the ball right there: a flip reset (needs the car's flip state)
+	bool IsFlipReset(const Frame& before, const Frame& now);
 
 	ShotAnalysis Analyze(const std::vector<Frame>& frames);
 }

@@ -403,7 +403,16 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 			bool minDone = since >= static_cast<int>(*postRollSeconds * kTickRate);
 			bool maxDone = since >= static_cast<int>(*postRollMaxSeconds * kTickRate);
 			bool needRecovery = touchCount > 0 && !recovered;
-			if ((minDone && !needRecovery) || maxDone)
+			// A slow shot that's still rolling or bouncing toward the net: keep going until it's in or stops
+			// (up to 6 s more), so late goals aren't saved as misses
+			const Frame& lf = frames.back();
+			float dirY = lf.ballVY >= 0.0f ? 1.0f : -1.0f;
+			float toLine = 5120.0f - lf.ballY * dirY;
+			float tLine = std::fabs(lf.ballVY) > 1.0f ? toLine / std::fabs(lf.ballVY) : 1e9f;
+			bool rollingIn = std::fabs(lf.ballVY) > 300.0f && toLine > 0.0f && tLine < 6.0f
+				&& std::fabs(lf.ballX + lf.ballVX * tLine) < 950.0f;
+			bool hardMax = since >= static_cast<int>((*postRollMaxSeconds + 6.0f) * kTickRate);
+			if (((minDone && !needRecovery) || maxDone) && (!rollingIn || hardMax))
 			{
 				FinishRep(pendingEndReason);
 				state = RepState::WaitReset;
@@ -551,7 +560,8 @@ void RLCoach::GradeFinishedRep(const RepSummary& s)
 	OverallRgb(g.overall, orr, og, ob);
 	lastRepGradeLines.push_back({ { { std::format("GRADE {}: {}  ({}){}", g.overall, Grader::OverallName(g.overall), g.overallWhy,
 		!shot.valid || shot.type == ShotType::Aerial ? "" : shot.type == ShotType::Ground ? "  [ground shot]"
-		: shot.type == ShotType::Dribble ? "  [dribble]" : shot.type == ShotType::AirDribble ? "  [air dribble]" : "  [double tap]"), orr, og, ob } } });
+		: shot.type == ShotType::Dribble ? "  [dribble]" : shot.type == ShotType::AirDribble ? "  [air dribble]"
+		: shot.type == ShotType::FlipReset ? "  [flip reset]" : "  [double tap]"), orr, og, ob } } });
 
 	// One line of segment grades, each grade in its own color (same colors as the rep viewer)
 	PanelGradeLine chips;
