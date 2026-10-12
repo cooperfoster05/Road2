@@ -490,12 +490,12 @@ void RLCoach::StartWhatIf(int depth)
 	whatIfBusy = true;
 	whatIfDepth = depth;
 	whatIfThread = std::thread([this, fr = std::move(fr), item, ref, depth]() {
-		// Below normal priority and capped (3 s, or 8 s searching deeper), so the game never waits on it
+		// Below normal priority and capped (3 s, or 20 s searching deeper), so the game never waits on it
 		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 		WhatIfResult r;
 		try
 		{
-			r = WhatIf::Search(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, depth >= 2 ? 8.0f : 3.0f, depth);
+			r = WhatIf::Search(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, depth >= 2 ? 20.0f : 3.0f, depth);
 		}
 		catch (...)
 		{
@@ -983,7 +983,7 @@ void RLCoach::RenderWindow()
 			ImGui::Indent(28.0f);
 			if (whatIfBusy && mine)
 			{
-				ImGui::TextDisabled(whatIfDepth >= 2 ? "What if...  searching deeper (a few seconds)" : "What if...  simulating small changes to this shot");
+				ImGui::TextDisabled(whatIfDepth >= 2 ? "What if...  searching deeper (up to about 15 seconds)" : "What if...  simulating small changes to this shot");
 			}
 			else if (!mine || st == WhatIfStatus::None)
 			{
@@ -1067,7 +1067,7 @@ void RLCoach::RenderWindow()
 					if (ImGui::SmallButton("Search deeper")) onGame([this]() { StartWhatIf(2); });
 					ImGui::PopStyleColor(2);
 					if (ImGui::IsItemHovered())
-						ImGui::SetTooltip("About 5x more tries: finer timing and angles, and two or three changes together.\nTakes a few seconds in the background.");
+						ImGui::SetTooltip("About 10x more tries: wider timing and aim, finer angles, and up to three changes together.\nTakes up to about 15 seconds in the background.");
 				}
 			}
 			ImGui::Unindent(28.0f);

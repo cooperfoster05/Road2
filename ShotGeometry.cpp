@@ -197,6 +197,31 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 		}
 	}
 
+	// Did it bounce on the floor on the way to the goal line? Watched in the recording when it gets that far;
+	// otherwise judged from its path. Hitting the crossbar or a post first doesn't count (crossbar-downs are fine).
+	{
+		bool decided = false;
+		for (int i = postTick + 1; i < n; i++)
+		{
+			const Frame& a = fr[i - 1];
+			const Frame& b = fr[i];
+			if (b.touch) break;   // you touched it again
+			if (std::fabs(b.ballY) > kGoalY - 20.0f) { decided = true; break; }   // reached the line
+			float dvx = b.ballVX - a.ballVX, dvy = b.ballVY - a.ballVY, dvz = b.ballVZ - a.ballVZ;
+			bool hit = dvx * dvx + dvy * dvy + (dvz + kGravity / 120.0f) * (dvz + kGravity / 120.0f) > 250.0f * 250.0f;
+			bool nearFrame = std::fabs(b.ballY) > kGoalY - 300.0f && std::fabs(b.ballX) < kGoalHalfW + 250.0f &&
+				(b.ballZ > kGoalH - 250.0f || std::fabs(b.ballX) > kGoalHalfW - 250.0f);
+			if (hit && nearFrame) { decided = true; break; }   // crossbar or post
+			if (b.ballZ < kBallR + 50.0f && a.ballVZ < -50.0f && b.ballVZ > 0.0f)
+			{
+				s.bouncedIn = std::fabs(b.ballY) < kGoalY - 250.0f;   // a drop right on the line is the bar's doing
+				decided = true;
+				break;
+			}
+		}
+		if (!decided) s.bouncedIn = s.dipsToFloor;
+	}
+
 	// Closest on-target spot to where it was going (or the middle of the net if it never got there)
 	float tx = 0.0f, tz = 300.0f;
 	if (s.reachesGoalLine)

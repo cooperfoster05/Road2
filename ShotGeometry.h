@@ -75,6 +75,7 @@ struct ShotAnalysis
 	// Shot quality
 	float shotSpeed = 0;          // ball speed off your car
 	bool  dipsToFloor = false;    // on its current path the ball hits the floor before the goal line
+	bool  bouncedIn = false;      // it hit the floor on the way to the goal line (crossbar and post rattles don't count)
 	float cornerDist = 0;         // distance from the nearest top corner of the goal (ball-center units)
 
 	// Double taps: the ball came off the backboard, ceiling or a wall top (no floor bounce) right before your final touch.

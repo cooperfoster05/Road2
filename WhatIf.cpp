@@ -194,7 +194,7 @@ namespace
 	float Quality(const SimRun& r)
 	{
 		float q = r.grade.overall * 10000.0f;
-		if (r.wentIn) q += 5000.0f - std::min(5000.0f, r.shot.cornerDist) + r.shot.shotSpeed * 0.5f;
+		if (r.wentIn) q += 5000.0f - std::min(5000.0f, r.shot.cornerDist) + r.shot.shotSpeed * 0.5f - (r.shot.bouncedIn ? 3000.0f : 0.0f);
 		else q -= r.shot.reachesGoalLine ? std::min(5000.0f, r.shot.missDist) : 5000.0f;
 		return q;
 	}
@@ -529,7 +529,9 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 	};
 	for (const Edit& e : seeds) { if (stop()) break; tryEdit(e); }
 
-	const int budget = depth >= 2 ? 1200 : 260;   // simulator runs (each about 2-4 ms)
+	const int budget = depth >= 2 ? 3000 : 260;   // simulator runs (each about 2-4 ms)
+	const int shiftMax = depth >= 2 ? 42 : 30;    // how far the flip can move (ticks)
+	const float aimMax = depth >= 2 ? 1.0f : 0.8f;
 	std::mt19937 rng(12345u + static_cast<unsigned>(n));
 	auto pick = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
 	auto mutate = [&](Edit e) {
@@ -537,11 +539,11 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 		for (int c = 0; c < changes; c++)
 		{
 			int what = pick(0, 5);
-			if (what == 0 && F >= 0) e.flipShift = std::clamp(e.flipShift + pick(-6, 6), -30, 30);
+			if (what == 0 && F >= 0) e.flipShift = std::clamp(e.flipShift + pick(-6, 6), -shiftMax, shiftMax);
 			else if (what == 1 && F >= 0) e.flipAngle = (e.flipAngle == kKeep ? (pick(0, 7) - 3) * 45 : e.flipAngle) + pick(-30, 30);
 			else if (what == 1 && F < 0) { e.flipInto = pick(3, 20); e.flipIntoAngle = pick(-60, 60); }
-			else if (what == 2 && airborne) { e.aimPitch = std::clamp(e.aimPitch + pick(-4, 4) * 0.1f, -0.8f, 0.8f); e.aimTicks = pick(1, 4) * 12; }
-			else if (what == 3 && airborne) { e.aimYaw = std::clamp(e.aimYaw + pick(-4, 4) * 0.1f, -0.8f, 0.8f); e.aimTicks = pick(1, 4) * 12; }
+			else if (what == 2 && airborne) { e.aimPitch = std::clamp(e.aimPitch + pick(-4, 4) * 0.1f, -aimMax, aimMax); e.aimTicks = pick(1, depth >= 2 ? 6 : 4) * 12; }
+			else if (what == 3 && airborne) { e.aimYaw = std::clamp(e.aimYaw + pick(-4, 4) * 0.1f, -aimMax, aimMax); e.aimTicks = pick(1, depth >= 2 ? 6 : 4) * 12; }
 			else if (what == 4) e.boost = pick(0, 3);
 			else if (what == 5 && airborne) e.roll = pick(-1, 1);
 			if (e.flipAngle != kKeep) { while (e.flipAngle > 180) e.flipAngle -= 360; while (e.flipAngle < -180) e.flipAngle += 360; }
@@ -585,7 +587,7 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 	int checked = 0;
 	for (int bi : better)
 	{
-		if (checked++ >= (depth >= 2 ? 16 : 8) || stop()) break;
+		if (checked++ >= (depth >= 2 ? 80 : 12) || stop()) break;
 		const Tried& t = tried[bi];
 		std::vector<CarControls> c;
 		apply(t.e, c);

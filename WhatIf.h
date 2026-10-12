@@ -51,7 +51,7 @@ namespace WhatIf
 	int StartTick(const std::vector<Frame>& frames);
 
 	// Runs the search; stops early if cancel is set or maxSeconds runs out.
-	// depth 1: about 260 simulator runs (around a second). depth 2 ("search deeper"): about 1,200.
+	// depth 1: about 260 simulator runs (around a second). depth 2 ("search deeper"): about 3,000 (several seconds).
 	// carBody: 0 Octane (Fennec and friends), 1 Dominus, 2 Plank (Batmobile), 3 Breakout, 4 Hybrid, 5 Merc.
 	WhatIfResult Search(const std::vector<Frame>& frames, bool wentIn, bool floorBeforeGoal, int eventTick,
 		const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds, int depth = 1);

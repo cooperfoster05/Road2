@@ -448,6 +448,17 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		if (g.overall == 5) g.overallWhy += shot.cornerDist <= C.cornerDist ? ", top corner" : ", rocket";
 	}
 
+	// Bounced in off the floor on the way: where it ended up doesn't count for much (Oct 12: every bounced goal
+	// you've rated is a 3, all shot types). Crossbar-downs and post-ins aren't bounces.
+	bool bouncedGoal = wentIn && (shot.bouncedIn || bounced);
+	if (bouncedGoal && g.overall > 3)
+	{
+		g.overall = 3;
+		if (g.overallWhy.find("bounced") == std::string::npos) g.overallWhy += ", bounced in";
+		for (SegmentGrade& sg : g.segs)
+			if (sg.segIndex == resultIdx && (sg.grade == Grade::Clean || sg.grade == Grade::Solid)) { sg.grade = Grade::Sloppy; sg.why = g.overallWhy; }
+	}
+
 	// You marked this shot as a double-tap drill: a goal without the double tap (or triple, quad...) doesn't count
 	// (A tap that bounced on the floor before your finish still counts as an attempt at one.)
 	bool tappedFirst = segs.touchTicks.size() >= 2
