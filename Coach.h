@@ -37,6 +37,11 @@ namespace Coach
 	std::vector<CoachNote> Combine(const std::vector<int>& firing, const Values& v, int overall, ShotType type,
 		const std::vector<HabitNote>& habits);
 	const char* CheckId(int check);
+	// For the what-if engine: whether a check fires on a measured value, where it happens, its cue, its number in words
+	bool Fires(int check, float value);
+	SegKind SegOf(int check);
+	const char* CueOf(int check);
+	std::string DetailOf(int check, float value);
 }
 
 // Which checks your rated reps back up, per mechanic (rebuilt in the background, measurements cached in coach_cache.csv)

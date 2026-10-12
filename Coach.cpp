@@ -124,6 +124,15 @@ namespace
 
 const char* Coach::CheckId(int c) { return (c >= 0 && c < kChecks) ? kList[c].id : ""; }
 
+bool Coach::Fires(int c, float v)
+{
+	if (c < 0 || c >= kChecks || v < 0) return false;
+	return kList[c].firesAbove ? v > kList[c].threshold : v < kList[c].threshold;
+}
+SegKind Coach::SegOf(int c) { return (c >= 0 && c < kChecks) ? kList[c].seg : SegKind::Approach; }
+const char* Coach::CueOf(int c) { return (c >= 0 && c < kChecks) ? kList[c].cue : ""; }
+std::string Coach::DetailOf(int c, float v) { return (c >= 0 && c < kChecks) ? Show(kList[c], v) : std::string(); }
+
 Coach::Values Coach::Measure(const std::vector<Frame>& fr, const ShotAnalysis& s)
 {
 	Values v;

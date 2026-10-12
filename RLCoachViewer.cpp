@@ -94,6 +94,14 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 	viewerShot = ShotGeometry::Analyze(viewerFrames);
 	viewerSegs = Segmenter::Split(viewerFrames, ViewerEventTick(item));
 	uiWhatIfStart = WhatIf::StartTick(viewerFrames);
+	{
+		SegKind keySeg;
+		std::string keyName;
+		bool hasKey = WhatIf::KeyMoment(viewerFrames, keySeg, keyName);
+		uiWhatIfKeyKind = hasKey ? static_cast<int>(keySeg) : -1;
+		std::lock_guard<std::mutex> lock(uiSegMutex);
+		uiWhatIfKeyWhat = keyName;
+	}
 
 	// Grades: timing compares against your fastest goal on the same shot
 	ShotReference viewerRef;
@@ -157,6 +165,7 @@ void RLCoach::ViewerExit()
 	uiShowingWhatIf = false;
 	viewerRealFrames.clear();
 	uiWhatIfStart = -1;
+	uiWhatIfKeyKind = -1;
 	viewerActive = false;
 	viewerPlaying = false;
 	viewerFrames.clear();
@@ -471,7 +480,7 @@ void RLCoach::CancelWhatIf()
 	whatIfFile.clear();
 }
 
-void RLCoach::StartWhatIf(int depth)
+void RLCoach::StartWhatIf(int depth, WhatIfPoint point)
 {
 	if (!viewerActive || viewerFrames.empty() || whatIfBusy || !predictor.Ready()) return;
 	if (viewerShowingWhatIf) ViewerShowWhatIf(false);
@@ -481,6 +490,17 @@ void RLCoach::StartWhatIf(int depth)
 	RepListItem item = viewerRep;
 	ShotReference ref;
 	shotBook.TryGet(item.shotKey, ref);   // same benchmark the breakdown used
+	// Stage 2: the coach's checks that fire on the way to the key moment (backed by your reps); if no goal turns up,
+	// the search still looks for a way in that fixes them
+	std::vector<int> fix;
+	if (point == WhatIfPoint::KeyMoment)
+	{
+		SegKind keySeg;
+		std::string keyName;
+		if (WhatIf::KeyMoment(viewerFrames, keySeg, keyName))
+			for (int c : coachBook.Firing(viewerShot, Coach::Measure(viewerFrames, viewerShot)))
+				if (Coach::SegOf(c) == keySeg) fix.push_back(c);
+	}
 	{
 		std::lock_guard<std::mutex> lock(whatIfMutex);
 		whatIf = WhatIfResult{};
@@ -489,13 +509,14 @@ void RLCoach::StartWhatIf(int depth)
 	whatIfCancel = false;
 	whatIfBusy = true;
 	whatIfDepth = depth;
-	whatIfThread = std::thread([this, fr = std::move(fr), item, ref, depth]() {
+	whatIfRunningPoint = static_cast<int>(point);
+	whatIfThread = std::thread([this, fr = std::move(fr), item, ref, depth, point, fix]() {
 		// Below normal priority and capped (3 s, or 20 s searching deeper), so the game never waits on it
 		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 		WhatIfResult r;
 		try
 		{
-			r = WhatIf::Search(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, depth >= 2 ? 20.0f : 3.0f, depth);
+			r = WhatIf::Search(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, depth >= 2 ? 20.0f : 4.0f, depth, point, &fix);
 		}
 		catch (...)
 		{
@@ -520,7 +541,7 @@ void RLCoach::ViewerShowWhatIf(bool on)
 		int start = 0;
 		{
 			std::lock_guard<std::mutex> lock(whatIfMutex);
-			if (whatIf.status != WhatIfStatus::Found || whatIfFile != viewerRep.file || whatIf.frames.size() < 2) return;
+			if ((whatIf.status != WhatIfStatus::Found && whatIf.status != WhatIfStatus::CleanerWayIn) || whatIfFile != viewerRep.file || whatIf.frames.size() < 2) return;
 			alt = whatIf.frames;
 			start = whatIf.startTick;
 		}
@@ -555,7 +576,7 @@ void RLCoach::PracticeWhatIf()
 	std::string cue;
 	{
 		std::lock_guard<std::mutex> lock(whatIfMutex);
-		if (whatIf.status != WhatIfStatus::Found || whatIfFile != viewerRep.file) return;
+		if ((whatIf.status != WhatIfStatus::Found && whatIf.status != WhatIfStatus::CleanerWayIn) || whatIfFile != viewerRep.file) return;
 		alt = whatIf.frames;
 		start = whatIf.startTick;
 		cue = whatIf.cue;
@@ -595,7 +616,7 @@ void RLCoach::DrawWhatIfPath(CanvasWrapper& canvas)
 	};
 
 	std::lock_guard<std::mutex> lock(whatIfMutex);
-	if (whatIf.status != WhatIfStatus::Found || whatIfFile != viewerRep.file) return;
+	if ((whatIf.status != WhatIfStatus::Found && whatIf.status != WhatIfStatus::CleanerWayIn) || whatIfFile != viewerRep.file) return;
 	if (viewerShowingWhatIf)
 	{
 		draw(viewerRealFrames, whatIf.startTick, 200, 200, 200, 110, false);
@@ -957,9 +978,10 @@ void RLCoach::RenderWindow()
 			ImGui::SameLine();
 			ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.50f, 1.0f), "%s: root cause is here", Segmenter::Name(segs[rootSeg].kind));
 		}
-		// v3 "What if": sits under the part of the breakdown where the change would happen
-		// (the flick or flip that made the shot, or the contact / read just before the touch)
-		int whatIfSeg = -1;
+		// v3 "What if": a row under the part of the breakdown where the change would happen. At the shot (the
+		// flick or flip that made it, or the contact / read just before the touch), and stage 2: on the way to the
+		// key moment that set it up (getting the reset, the setup touch, the first air dribble touch).
+		int whatIfSeg = -1, whatIfKeySeg = -1;
 		{
 			int start = uiWhatIfStart;
 			auto eligible = [](SegKind k) { return k == SegKind::Flick || k == SegKind::Flip || k == SegKind::Contact || k == SegKind::Read; };
@@ -968,22 +990,53 @@ void RLCoach::RenderWindow()
 			if (whatIfSeg < 0 && start >= 0)
 				for (int i = 0; i < static_cast<int>(segs.size()); i++)
 					if (segs[i].kind == SegKind::Contact || segs[i].kind == SegKind::Flick || segs[i].kind == SegKind::Flip) whatIfSeg = i;
+			int keyKind = uiWhatIfKeyKind;
+			if (keyKind >= 0)
+				for (int i = 0; i < static_cast<int>(segs.size()); i++)
+					if (static_cast<int>(segs[i].kind) == keyKind && segs[i].kind != SegKind::Recovery) { whatIfKeySeg = i; break; }
+			if (whatIfKeySeg == whatIfSeg) whatIfKeySeg = -1;
 		}
-		auto whatIfRow = [&]() {
+		std::string keyWhat;
+		{
+			std::lock_guard<std::mutex> lock(uiSegMutex);
+			keyWhat = uiWhatIfKeyWhat;
+		}
+		auto whatIfRow = [&](WhatIfPoint point) {
 			WhatIfStatus st;
-			std::string cue, detail, file, note;
+			std::string cue, detail, file, note, fixes;
 			int wGrade = 0, wDepth = 1;
 			bool wIn = false;
+			WhatIfPoint wPoint;
 			{
 				std::lock_guard<std::mutex> lock(whatIfMutex);
-				st = whatIf.status; cue = whatIf.cue; detail = whatIf.detail; file = whatIfFile;
-				wGrade = whatIf.grade; wIn = whatIf.wentIn; note = whatIf.note; wDepth = whatIf.depth;
+				st = whatIf.status; cue = whatIf.cue; detail = whatIf.detail; file = whatIfFile; fixes = whatIf.fixes;
+				wGrade = whatIf.grade; wIn = whatIf.wentIn; note = whatIf.note; wDepth = whatIf.depth; wPoint = whatIf.point;
 			}
-			bool mine = file == watching;
+			const bool key = point == WhatIfPoint::KeyMoment;
+			const bool mine = file == watching && wPoint == point;
+			const bool busyHere = whatIfBusy && file == watching && whatIfRunningPoint == static_cast<int>(point);
+			const int hereSeg = key ? whatIfKeySeg : whatIfSeg;
+			const ImVec4 pink(1.0f, 0.55f, 0.85f, 1.0f), gold(1.0f, 0.80f, 0.50f, 1.0f);
+			auto purpleButton = [](const char* label) {
+				ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.20f, 0.42f, 1.0f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.62f, 0.28f, 0.58f, 1.0f));
+				bool clicked = ImGui::SmallButton(label);
+				ImGui::PopStyleColor(2);
+				return clicked;
+			};
+			auto deeperButton = [&]() {
+				if (wDepth >= 2 || !predictor.Ready()) return;
+				if (purpleButton("Search deeper")) onGame([this, point]() { StartWhatIf(2, point); });
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("About 10x more tries: wider timing and aim, finer angles, and up to three changes together.\nTakes up to about 15 seconds in the background.");
+			};
+			ImGui::PushID(key ? 7001 : 7000);
 			ImGui::Indent(28.0f);
-			if (whatIfBusy && mine)
+			if (busyHere)
 			{
-				ImGui::TextDisabled(whatIfDepth >= 2 ? "What if...  searching deeper (up to about 15 seconds)" : "What if...  simulating small changes to this shot");
+				std::string busyText = whatIfDepth >= 2 ? "What if...  searching deeper (up to about 15 seconds)"
+					: key ? "What if...  trying different ways into " + keyWhat : "What if...  simulating small changes to this shot";
+				ImGui::TextDisabled("%s", busyText.c_str());
 			}
 			else if (!mine || st == WhatIfStatus::None)
 			{
@@ -994,27 +1047,41 @@ void RLCoach::RenderWindow()
 				}
 				else
 				{
-					ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.20f, 0.42f, 1.0f));
-					ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.62f, 0.28f, 0.58f, 1.0f));
-					if (ImGui::SmallButton("What if?")) onGame([this]() { StartWhatIf(); });
-					ImGui::PopStyleColor(2);
+					if (purpleButton("What if?")) onGame([this, point]() { StartWhatIf(1, point); });
 					if (ImGui::IsItemHovered())
-						ImGui::SetTooltip("Replays your inputs from just before the shot in the simulator, then tries small changes:\n"
-							"flip timing and direction, flipping into the touch, boost, air roll and aim.\n"
-							"Shows the best one that would have scored better, if there is one.");
+					{
+						if (key)
+							ImGui::SetTooltip("Replays your inputs from up to half a second before %s, tries different ways into it\n"
+								"(boost, aim, air roll), then plays your shot out from there, with small changes to the shot too.\n"
+								"Shows the best one that would have scored better, or else a way in that fixes what the coach flagged.", keyWhat.c_str());
+						else
+							ImGui::SetTooltip("Replays your inputs from just before the shot in the simulator, then tries small changes:\n"
+								"flip timing and direction, flipping or jumping into the touch, steering, boost, air roll and aim.\n"
+								"Shows the best one that would have scored better, if there is one.");
+					}
 					ImGui::SameLine();
-					ImGui::TextDisabled("try small changes to this shot in the simulator");
+					std::string hint = key ? "try different ways into " + keyWhat + " in the simulator" : "try small changes to this shot in the simulator";
+					ImGui::TextDisabled("%s", hint.c_str());
 				}
 			}
-			else if (st == WhatIfStatus::Found)
+			else if (st == WhatIfStatus::Found || st == WhatIfStatus::CleanerWayIn)
 			{
-				ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.85f, 1.0f), "What if: %s", cue.c_str());
+				ImGui::TextColored(pink, "What if: %s", cue.c_str());
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", detail.c_str());
-				ImGui::SameLine();
-				ImGui::PushStyleColor(ImGuiCol_Text, GradeColor(wGrade));
-				ImGui::Text("-> %d%s", wGrade, wIn ? ", goal" : "");
-				ImGui::PopStyleColor();
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", detail.c_str());
+				if (st == WhatIfStatus::Found)
+				{
+					ImGui::SameLine();
+					ImGui::PushStyleColor(ImGuiCol_Text, GradeColor(wGrade));
+					ImGui::Text("-> %d%s", wGrade, wIn ? ", goal" : "");
+					ImGui::PopStyleColor();
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", detail.c_str());
+				}
+				else
+				{
+					ImGui::TextColored(gold, "No goal from a different way in, but it cleans up what the coach flagged:");
+					ImGui::TextColored(gold, "%s", fixes.c_str());
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", detail.c_str());
+				}
 				bool showing = uiShowingWhatIf;
 				if (ImGui::SmallButton(showing ? "Back to your rep" : "Watch it"))
 					onGame([this, showing]() { ViewerShowWhatIf(!showing); });
@@ -1023,6 +1090,7 @@ void RLCoach::RenderWindow()
 				ImGui::SameLine();
 				if (ImGui::SmallButton("Practice it")) onGame([this]() { PracticeWhatIf(); });
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Practice from where the what-if starts, with its path drawn faintly to follow.");
+				if (st == WhatIfStatus::CleanerWayIn) { ImGui::SameLine(); deeperButton(); }
 			}
 			else
 			{
@@ -1041,38 +1109,32 @@ void RLCoach::RenderWindow()
 				int fixSeg = -1;
 				std::string fixWhy;
 				for (const UiGrade& g : grades) if (g.biggest) { fixSeg = g.segIndex; fixWhy = g.why; }
-				const ImVec4 gold(1.0f, 0.80f, 0.50f, 1.0f);
-				if (rootSeg >= 0 && rootSeg != whatIfSeg)
+				if (rootSeg >= 0 && rootSeg != hereSeg)
 				{
-					ImGui::TextColored(gold, "Root cause, earlier (%s): %s", Segmenter::Name(segs[rootSeg].kind), notes[0].cue.c_str());
+					ImGui::TextColored(gold, "Root cause, %s (%s): %s", segs[rootSeg].start < segs[hereSeg >= 0 ? hereSeg : rootSeg].start ? "earlier" : "later",
+						Segmenter::Name(segs[rootSeg].kind), notes[0].cue.c_str());
 					if (ImGui::IsItemHovered() && !notes[0].detail.empty()) ImGui::SetTooltip("%s", notes[0].detail.c_str());
 					ImGui::SameLine();
 					practiceThere(rootSeg);
+					if (!key && rootSeg == whatIfKeySeg) ImGui::TextDisabled("(there's a What if? for %s on that line too)", keyWhat.c_str());
 				}
 				else if (rootSeg >= 0)
 				{
 					ImGui::TextColored(gold, "The coach's call for this part: %s", notes[0].cue.c_str());
 					if (ImGui::IsItemHovered() && !notes[0].detail.empty()) ImGui::SetTooltip("%s", notes[0].detail.c_str());
 				}
-				else if (fixSeg >= 0 && fixSeg < static_cast<int>(segs.size()) && fixSeg != whatIfSeg)
+				else if (fixSeg >= 0 && fixSeg < static_cast<int>(segs.size()) && fixSeg != hereSeg)
 				{
-					ImGui::TextColored(gold, "Biggest fix, earlier (%s): %s", Segmenter::Name(segs[fixSeg].kind), fixWhy.c_str());
+					ImGui::TextColored(gold, "Biggest fix (%s): %s", Segmenter::Name(segs[fixSeg].kind), fixWhy.c_str());
 					ImGui::SameLine();
 					practiceThere(fixSeg);
 				}
-				if (st == WhatIfStatus::NothingBetter && wDepth < 2 && predictor.Ready())
-				{
-					ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.20f, 0.42f, 1.0f));
-					ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.62f, 0.28f, 0.58f, 1.0f));
-					if (ImGui::SmallButton("Search deeper")) onGame([this]() { StartWhatIf(2); });
-					ImGui::PopStyleColor(2);
-					if (ImGui::IsItemHovered())
-						ImGui::SetTooltip("About 10x more tries: wider timing and aim, finer angles, and up to three changes together.\nTakes up to about 15 seconds in the background.");
-				}
+				if (st == WhatIfStatus::NothingBetter) deeperButton();
 			}
 			ImGui::Unindent(28.0f);
+			ImGui::PopID();
 		};
-		bool whatIfListed = false;
+		bool whatIfListed = false, whatIfKeyListed = false;
 		for (const UiGrade& ug : grades)
 		{
 			if (ug.name.empty() || ug.segIndex < 0 || ug.segIndex >= static_cast<int>(segs.size())) continue;
@@ -1091,12 +1153,18 @@ void RLCoach::RenderWindow()
 				onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
 			}
 			ImGui::PopID();
-			if (si == whatIfSeg && !whatIfListed) { whatIfListed = true; whatIfRow(); }
+			if (si == whatIfKeySeg && !whatIfKeyListed) { whatIfKeyListed = true; whatIfRow(WhatIfPoint::KeyMoment); }
+			if (si == whatIfSeg && !whatIfListed) { whatIfListed = true; whatIfRow(WhatIfPoint::Shot); }
+		}
+		if (whatIfKeySeg >= 0 && !whatIfKeyListed)
+		{
+			ImGui::TextDisabled("%s:", Segmenter::Name(segs[whatIfKeySeg].kind));
+			whatIfRow(WhatIfPoint::KeyMoment);
 		}
 		if (whatIfSeg >= 0 && !whatIfListed)
 		{
 			ImGui::TextDisabled("%s:", Segmenter::Name(segs[whatIfSeg].kind));
-			whatIfRow();
+			whatIfRow(WhatIfPoint::Shot);
 		}
 
 		{

@@ -6,6 +6,7 @@
 
 #include "RepData.h"
 #include "ShotBook.h"
+#include "Segmenter.h"
 #include <atomic>
 #include <string>
 #include <vector>
@@ -18,11 +19,18 @@ enum class WhatIfStatus
 	CantSimulate,   // the sim's replay of your real inputs didn't match what happened, so its "what ifs" can't be trusted
 	NothingBetter,  // no small change did better
 	Found,
+	CleanerWayIn,   // stage 2: no goal found, but a way into the key moment that fixes what the coach flagged
 	Cancelled
 };
 
+// Where the change happens: at the shot (stage 1), or on the way to the moment that set it up (stage 2:
+// getting the reset, the setup touch of a double tap, the first touch of an air dribble)
+enum class WhatIfPoint { Shot, KeyMoment };
+
 struct WhatIfResult
 {
+	WhatIfPoint point = WhatIfPoint::Shot;
+	std::string what;         // stage 2: "the reset", "the setup touch", "the first touch"
 	WhatIfStatus status = WhatIfStatus::None;
 	int   startTick = -1;     // where the simulator takes over from your real rep
 	int   realGrade = 0;      // your real shot's grade
@@ -38,6 +46,7 @@ struct WhatIfResult
 	std::vector<Frame> frames;    // your real rep up to startTick, then the what-if
 	int   eventTick = -1;
 
+	std::string fixes;        // CleanerWayIn: what it fixes, in words ("Closing on the ball at 34 km/h -> 12 km/h")
 	std::string note;         // how the search went (for the hover)
 	int   depth = 1;
 	int   tries = 0;
@@ -46,15 +55,21 @@ struct WhatIfResult
 
 namespace WhatIf
 {
-	// The moment the search starts from: just before the flip that made the shot, or 0.3 s before the touch.
-	// -1 if the rep has no shot to work from.
-	int StartTick(const std::vector<Frame>& frames);
+	// The moment the search starts from: just before the flip that made the shot, or 0.3 s before the touch
+	// (stage 2: up to half a second before the key moment). -1 if there's nothing to work from.
+	int StartTick(const std::vector<Frame>& frames, WhatIfPoint point = WhatIfPoint::Shot);
 
+	// Stage 2: does this rep have a key moment to work on, which breakdown line is it, and what to call it
+	bool KeyMoment(const std::vector<Frame>& frames, SegKind& seg, std::string& what);
+
+	// fixChecks (stage 2): the coach's checks that fire on this rep on the way to the key moment and are backed by
+	// your reps. If no goal turns up, the search still looks for a way in that fixes them.
 	// Runs the search; stops early if cancel is set or maxSeconds runs out.
 	// depth 1: about 260 simulator runs (around a second). depth 2 ("search deeper"): about 3,000 (several seconds).
 	// carBody: 0 Octane (Fennec and friends), 1 Dominus, 2 Plank (Batmobile), 3 Breakout, 4 Hybrid, 5 Merc.
 	WhatIfResult Search(const std::vector<Frame>& frames, bool wentIn, bool floorBeforeGoal, int eventTick,
-		const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds, int depth = 1);
+		const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds, int depth = 1,
+		WhatIfPoint point = WhatIfPoint::Shot, const std::vector<int>* fixChecks = nullptr);
 
 	const char* StatusText(WhatIfStatus s);
 }

@@ -252,7 +252,10 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	ShotAnalysis viewerRealShot;
 	std::atomic<bool> uiShowingWhatIf{ false };
 	std::atomic<int> whatIfDepth{ 1 };    // the search running (or last run): 1 normal, 2 deeper
-	void StartWhatIf(int depth = 1);      // game thread: searches the rep being watched
+	std::atomic<int> whatIfRunningPoint{ 0 };   // which what-if is running: WhatIfPoint as an int
+	std::atomic<int> uiWhatIfKeyKind{ -1 };     // stage 2: the breakdown line (SegKind) of the key moment, -1 = none
+	std::string uiWhatIfKeyWhat;                // "the reset", "the setup touch"... (uiSegMutex)
+	void StartWhatIf(int depth = 1, WhatIfPoint point = WhatIfPoint::Shot);   // game thread: searches the rep being watched
 	void CancelWhatIf();                  // any thread: stops a search and forgets the last result
 	void ViewerShowWhatIf(bool on);       // game thread: play the what-if (or go back to your rep)
 	void PracticeWhatIf();                // game thread: practice from where the what-if starts, its path drawn faintly
