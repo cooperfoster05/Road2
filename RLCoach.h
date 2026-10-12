@@ -251,7 +251,8 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::vector<Frame> viewerRealFrames;  // your rep, kept while the what-if plays
 	ShotAnalysis viewerRealShot;
 	std::atomic<bool> uiShowingWhatIf{ false };
-	void StartWhatIf();                   // game thread: searches the rep being watched
+	std::atomic<int> whatIfDepth{ 1 };    // the search running (or last run): 1 normal, 2 deeper
+	void StartWhatIf(int depth = 1);      // game thread: searches the rep being watched
 	void CancelWhatIf();                  // any thread: stops a search and forgets the last result
 	void ViewerShowWhatIf(bool on);       // game thread: play the what-if (or go back to your rep)
 	void PracticeWhatIf();                // game thread: practice from where the what-if starts, its path drawn faintly

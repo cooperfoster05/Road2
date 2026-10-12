@@ -199,11 +199,38 @@ namespace
 		return q;
 	}
 
-	struct Candidate
+	// One "what if": a few small changes to your own inputs, all optional. Zero / kKeep = do what you did.
+	constexpr int kKeep = 9999;
+	struct Edit
 	{
-		std::string cue, detail;
-		int cost = 1;   // how big a change it is (smaller wins ties)
-		std::vector<CarControls> ctl;
+		int   flipShift = 0;       // flip shots: the flip (and everything after it) this many ticks later (- = earlier)
+		int   flipAngle = kKeep;   // flip shots: stick direction for the flip, degrees from straight forward (+ = right)
+		float aimPitch = 0;        // extra stick back (+, nose up) / forward (-) just before the flip or touch
+		float aimYaw = 0;          // extra stick right (+) / left (-)
+		int   aimTicks = 0;        // over how long
+		int   boost = 0;           // 0 yours, 1 none on the way in, 2 held the whole way, 3 let go for the last 0.2 s
+		int   roll = 0;            // 0 yours, -1 air roll left, +1 right (on the way in)
+		int   flipInto = 0;        // no-flip shots: flip this many ticks before the touch (0 = don't)
+		int   flipIntoAngle = 0;
+
+		bool Same(const Edit& o) const
+		{
+			return flipShift == o.flipShift && flipAngle == o.flipAngle && std::fabs(aimPitch - o.aimPitch) < 0.01f &&
+				std::fabs(aimYaw - o.aimYaw) < 0.01f && (aimTicks == o.aimTicks || (aimPitch == 0 && aimYaw == 0)) &&
+				boost == o.boost && roll == o.roll && flipInto == o.flipInto && (flipInto == 0 || flipIntoAngle == o.flipIntoAngle);
+		}
+		bool Empty() const { return Same(Edit{}); }
+		int Parts() const
+		{
+			return (flipShift != 0) + (flipAngle != kKeep) + (aimPitch != 0 || aimYaw != 0) + (boost != 0) + (roll != 0) + (flipInto != 0);
+		}
+		// How big a change it is: smaller wins ties
+		float Cost() const
+		{
+			float c = std::abs(flipShift) / 8.0f + (flipAngle != kKeep ? 1.5f : 0.0f) + (std::fabs(aimPitch) + std::fabs(aimYaw)) * 1.5f +
+				(boost ? 1.0f : 0.0f) + (roll ? 1.5f : 0.0f) + (flipInto ? 2.0f : 0.0f);
+			return c;
+		}
 	};
 
 	const CarConfig& Body(int carBody)
@@ -221,7 +248,7 @@ namespace
 
 	std::string Secs(int ticks) { return std::format("{:.2f} s", ticks / 120.0f); }
 
-	struct Plan { int s = -1, k = -1, flip = -1; };
+	struct Plan { int s = -1, k = -1, flip = -1, closer = -1; };
 
 	Plan MakePlan(const std::vector<Frame>& fr, const ShotAnalysis& shot)
 	{
@@ -239,6 +266,9 @@ namespace
 				if (fr[i].jump && !fr[i - 1].jump && fr[i].hasFlip && !fr[i + 1].hasFlip && !fr[i + 1].onGround) { p.s = p.k - 12; break; }
 		}
 		if (p.s < 2 || (p.flip >= 0 && p.s >= p.flip)) p.s = -1;
+		// A closer start for when the sim can't follow you from the first one (less room to change things, but more reps qualify)
+		p.closer = p.flip >= 0 ? p.flip - 10 : p.k - 16;
+		if (p.s < 0 || p.closer <= p.s + 4) p.closer = -1;
 		return p;
 	}
 }
@@ -254,27 +284,27 @@ const char* WhatIf::StatusText(WhatIfStatus s)
 	{
 	case WhatIfStatus::NotNeeded:     return "Already a 5: nothing to improve on here.";
 	case WhatIfStatus::NoShot:        return "No shot touch to work from.";
-	case WhatIfStatus::CantSimulate:  return "Can't simulate this one closely enough to say: replaying your own inputs didn't give the same result.";
-	case WhatIfStatus::NothingBetter: return "No small change at the shot does better. What decided it happened earlier.";
+	case WhatIfStatus::CantSimulate:  return "The simulator can't follow this one closely enough to say (replaying your own inputs didn't give your result).";
+	case WhatIfStatus::NothingBetter: return "No small change at the shot would have saved it.";
 	case WhatIfStatus::Cancelled:     return "Stopped.";
 	default:                          return "";
 	}
 }
 
 WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floorBeforeGoal, int eventTick,
-	const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds)
+	const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds, int depth)
 {
 	auto t0 = std::chrono::steady_clock::now();
 	auto elapsed = [&]() { return std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count(); };
 	auto stop = [&]() { return (cancel && cancel->load()) || elapsed() > maxSeconds; };
 
 	WhatIfResult out;
+	out.depth = depth;
 	const int n = static_cast<int>(fr.size());
 	ShotAnalysis real = ShotGeometry::Analyze(fr);
 	Plan plan = MakePlan(fr, real);
 	if (plan.s < 0) { out.status = WhatIfStatus::NoShot; return out; }
-	const int s = plan.s, k = plan.k, F = plan.flip;
-	out.startTick = s;
+	const int k = plan.k, F = plan.flip;
 
 	RepSegments realSegs = Segmenter::Split(fr, eventTick >= 0 ? eventTick : n - 1);
 	RepGrade realGrade = Grader::GradeRep(fr, realSegs, real, realIn, floorBeforeGoal, ref);
@@ -287,62 +317,163 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 	std::vector<CarControls> realCtl(n);
 	for (int i = 0; i < n; i++) realCtl[i] = ControlsOf(fr[i]);
 	const int maxTick = std::min(n + 600, k + 720);
+	auto matches = [&](const SimRun& r) { return r.wentIn == realIn && std::abs(r.grade.overall - realGrade.overall) <= 1; };
 
-	// Gate: your own inputs replayed in the sim have to give the same result (and about the same grade),
-	// from the exact start and from slightly nudged ones. Otherwise the sim can't be trusted on this rep.
-	SimRun base = Run(arena.get(), car, fr, s, realCtl, maxTick, ref, 0);
-	out.simGrade = base.grade.overall;
-	out.tries = 1;
-	int same = 0;
-	for (int j = 1; j <= kNudges; j++)
+	// Gate: your own inputs replayed in the sim (from the exact start and from 6 slightly nudged ones) have to give
+	// your result at least 3 times out of 7. A shot that only sometimes reproduces was a knife-edge one, and that's
+	// fine: a what-if then has to work almost every time, which yours didn't. If the sim can't follow you from the
+	// first start, try one closer to the shot.
+	int s = -1, baseMatches = 0;
+	SimRun base;
+	for (int start : { plan.s, plan.closer })
 	{
-		SimRun b = Run(arena.get(), car, fr, s, realCtl, maxTick, ref, j);
-		same += b.wentIn == realIn && std::abs(b.grade.overall - realGrade.overall) <= 1;
+		if (start < 0 || stop()) continue;
+		SimRun b0 = Run(arena.get(), car, fr, start, realCtl, maxTick, ref, 0);
+		int m = matches(b0) ? 1 : 0;
 		out.tries++;
+		for (int j = 1; j <= kNudges; j++)
+		{
+			SimRun b = Run(arena.get(), car, fr, start, realCtl, maxTick, ref, j);
+			m += matches(b) ? 1 : 0;
+			out.tries++;
+		}
+		out.note += std::format("Start {} before the touch: your inputs gave your result {} of 7 times.\n", Secs(k - start), m);
+		if (m >= 3) { s = start; baseMatches = m; base = std::move(b0); break; }
 	}
-	if (base.wentIn != realIn || std::abs(base.grade.overall - realGrade.overall) > 1 || same < kNudgesNeeded)
+	if (s < 0)
 	{
 		out.status = WhatIfStatus::CantSimulate;
 		out.ms = elapsed() * 1000.0f;
 		return out;
 	}
+	out.startTick = s;
+	out.simGrade = base.grade.overall;
+	const int end = F >= 0 ? F : k;   // the flip, or the touch: aim and roll changes lead up to it
 
-	// ---- The changes to try (all small, all things you could actually do) ----
-	std::vector<Candidate> cands;
-	const bool flick = real.dribble;
-	const char* flipWord = flick ? "flick" : "flip";
-	auto shifted = [&](int at, int dt) {
-		// Everything from the flip on happens dt ticks later (or earlier); a later flip holds the inputs from just before it
-		std::vector<CarControls> c = realCtl;
-		for (int i = std::min(at, at + dt); i < n; i++)
-		{
-			if (i >= at + dt) { int src = i - dt; c[i] = src < n ? realCtl[src] : CarControls(); }
-			else c[i] = realCtl[at - 1];
-		}
-		return c;
-	};
+	// ---- Turn an edit into inputs ----
 	auto stickFor = [](int deg, float& pitch, float& yaw) {
 		float r = deg * 3.14159265f / 180.0f;
 		pitch = -std::cos(r);   // stick forward = front flip
 		yaw = std::sin(r);      // + = to your right
 	};
+	auto apply = [&](const Edit& e, std::vector<CarControls>& c) -> bool {
+		c = realCtl;
+		int flipAt = end;
+		if (F >= 0)
+		{
+			flipAt = F + e.flipShift;
+			if (flipAt <= s + 1 || flipAt >= n - 1) return false;
+			if (e.flipShift != 0)
+			{
+				// Everything from the flip on happens later (or earlier); a later flip holds the inputs from just before it
+				for (int i = std::min(F, flipAt); i < n; i++)
+				{
+					if (i >= flipAt) { int src = i - e.flipShift; c[i] = src < n ? realCtl[src] : CarControls(); }
+					else c[i] = realCtl[F - 1];
+				}
+			}
+			if (c[flipAt - 1].jump) return false;   // still holding the first jump there: no new press, no flip
+			if (e.flipAngle != kKeep)
+			{
+				float p, y;
+				stickFor(e.flipAngle, p, y);
+				for (int i = flipAt; i < std::min(n, flipAt + 30); i++) { c[i].pitch = p; c[i].yaw = y; c[i].roll = 0; }
+			}
+		}
+		else if (e.flipInto > 0)
+		{
+			int at = k - e.flipInto;
+			if (at <= s + 1 || !fr[at].hasFlip || ShotGeometry::OnSurface(fr[at]) || c[at - 1].jump) return false;
+			float p, y;
+			stickFor(e.flipIntoAngle, p, y);
+			for (int i = at; i < std::min(n, at + 30); i++) { c[i].pitch = p; c[i].yaw = y; c[i].roll = 0; c[i].jump = false; }
+			c[at].jump = true;
+			if (at + 1 < n) c[at + 1].jump = true;
+			flipAt = at;
+		}
+		if (e.aimPitch != 0 || e.aimYaw != 0)
+			for (int i = std::max(s, flipAt - e.aimTicks); i < flipAt; i++)
+			{
+				c[i].pitch = std::clamp(c[i].pitch + e.aimPitch, -1.0f, 1.0f);
+				c[i].yaw = std::clamp(c[i].yaw + e.aimYaw, -1.0f, 1.0f);
+			}
+		if (e.roll != 0)
+			for (int i = s; i < flipAt; i++) c[i].roll = static_cast<float>(e.roll);
+		if (e.boost == 1) for (int i = s; i < k; i++) c[i].boost = false;
+		if (e.boost == 2) for (int i = s; i < k; i++) c[i].boost = true;
+		if (e.boost == 3) for (int i = std::max(s, k - 24); i < k; i++) c[i].boost = false;
+		return true;
+	};
 
+	// ---- What each change looks like in words ----
+	const bool flick = real.dribble;
+	const char* flipWord = flick ? "flick" : "flip";
+	bool realRight = false;
+	FlipKind realKind = F >= 0 ? ShotGeometry::ClassifyFlip(fr[F], realRight) : FlipKind::None;
+	auto flipLabel = [&](FlipKind kind, bool right) {
+		std::string side = (kind == FlipKind::Front || kind == FlipKind::Back) ? "" : (right ? " (right)" : " (left)");
+		return ShotGeometry::FlipName(kind, flick) + side;
+	};
+	auto describe = [&](const Edit& e, std::string& cue, std::string& detail) {
+		std::vector<std::string> parts, lines;
+		if (e.flipAngle != kKeep)
+		{
+			float p, y;
+			stickFor(e.flipAngle, p, y);
+			Frame probe; probe.pitch = p; probe.yaw = y;
+			bool right = false;
+			FlipKind kind = ShotGeometry::ClassifyFlip(probe, right);
+			parts.push_back(std::format("use a {} instead", flipLabel(kind, right)));
+			lines.push_back(std::format("Flip with the stick {} degrees {} of straight ahead: a {} instead of your {}.",
+				std::abs(e.flipAngle), e.flipAngle >= 0 ? "right" : "left", flipLabel(kind, right), flipLabel(realKind, realRight)));
+		}
+		if (e.flipShift != 0)
+		{
+			parts.push_back(std::format("{} {}{}", flick ? "flick" : "flip", std::abs(e.flipShift) <= 8 ? "a little " : "", e.flipShift < 0 ? "earlier" : "later"));
+			lines.push_back(std::format("The {} {} {}.", flipWord, Secs(std::abs(e.flipShift)), e.flipShift < 0 ? "earlier" : "later"));
+		}
+		if (e.flipInto > 0)
+		{
+			const char* dir = e.flipIntoAngle == 0 ? "front flip" : (e.flipIntoAngle > 0 ? "diagonal flip to the right" : "diagonal flip to the left");
+			parts.push_back(std::format("flip into the touch ({})", dir));
+			lines.push_back(std::format("A {} {} before the touch.", dir, Secs(e.flipInto)));
+		}
+		if (e.aimPitch != 0 || e.aimYaw != 0)
+		{
+			float mag = std::max(std::fabs(e.aimPitch), std::fabs(e.aimYaw));
+			std::string dir;
+			if (std::fabs(e.aimPitch) >= 0.15f) dir = e.aimPitch > 0 ? "higher" : "lower";
+			if (std::fabs(e.aimYaw) >= 0.15f) dir += std::string(dir.empty() ? "" : " and ") + (e.aimYaw > 0 ? "more to the right" : "more to the left");
+			if (dir.empty()) dir = "slightly differently";
+			parts.push_back(std::format("aim your nose {}{}{}", mag < 0.5f ? "a bit " : "", dir, F >= 0 ? " before the flip" : ""));
+			std::string stick;
+			if (e.aimPitch != 0) stick = std::format("{:.0f}% more stick {}", std::fabs(e.aimPitch) * 100.0f, e.aimPitch > 0 ? "back (nose up)" : "forward (nose down)");
+			if (e.aimYaw != 0) stick += std::format("{}{:.0f}% more stick {}", stick.empty() ? "" : " and ", std::fabs(e.aimYaw) * 100.0f, e.aimYaw > 0 ? "right" : "left");
+			stick[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(stick[0])));
+			lines.push_back(std::format("{} for the last {} before the {}.", stick, Secs(std::min(e.aimTicks, end - s)), F >= 0 ? flipWord : "touch"));
+		}
+		if (e.roll != 0)
+		{
+			parts.push_back(std::format("air roll {} on the way in", e.roll < 0 ? "left" : "right"));
+			lines.push_back(std::format("Air roll {} held for the {} before the {}.", e.roll < 0 ? "left" : "right", Secs(end - s), F >= 0 ? flipWord : "touch"));
+		}
+		if (e.boost == 1) { parts.push_back("stop boosting on the way in"); lines.push_back(std::format("No boost for the last {} before the touch.", Secs(k - s))); }
+		if (e.boost == 2) { parts.push_back("keep boosting into the touch"); lines.push_back(std::format("Boost held for the last {} before the touch.", Secs(k - s))); }
+		if (e.boost == 3) { parts.push_back("let go of boost just before the touch"); lines.push_back("No boost for the last 0.20 s before the touch."); }
+		cue.clear();
+		for (size_t i = 0; i < parts.size(); i++)
+			cue += (i == 0 ? "" : (i + 1 == parts.size() ? ", and " : ", ")) + parts[i];
+		if (!cue.empty()) cue[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(cue[0])));
+		detail.clear();
+		for (const std::string& l : lines) detail += l + "\n";
+	};
+
+	// ---- The starting set: one change at a time (all small, all things you could actually do) ----
+	std::vector<Edit> seeds;
+	bool airborne = !ShotGeometry::OnSurface(fr[std::max(s, end - 30)]) || !ShotGeometry::OnSurface(fr[end]);
 	if (F >= 0)
 	{
-		// Same flip, different timing
-		for (int dt : { -18, -12, -8, -4, 4, 8, 12, 18 })
-		{
-			if (F + dt <= s + 1 || F + dt >= n - 1) continue;
-			std::vector<CarControls> c = shifted(F, dt);
-			if (c[F + dt - 1].jump) continue;   // still holding the first jump there: no new press, no flip
-			bool little = std::abs(dt) <= 8;
-			cands.push_back({ std::format("{} {}{}", flick ? "Flick" : "Flip", little ? "a little " : "", dt < 0 ? "earlier" : "later"),
-				std::format("The same {}, {} {}.", flipWord, Secs(std::abs(dt)), dt < 0 ? "earlier" : "later"),
-				1 + std::abs(dt) / 8, std::move(c) });
-		}
-		// A different flip direction (and a touch earlier or later)
-		bool realRight = false;
-		FlipKind realKind = ShotGeometry::ClassifyFlip(fr[F], realRight);
+		for (int dt : { -18, -12, -8, -4, 4, 8, 12, 18 }) { Edit e; e.flipShift = dt; seeds.push_back(e); }
 		for (int deg : { 0, 45, -45, 90, -90, 135, -135, 180 })
 			for (int dt : { 0, -6, 6 })
 			{
@@ -351,144 +482,141 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 				Frame probe; probe.pitch = p; probe.yaw = y;
 				bool right = false;
 				FlipKind kind = ShotGeometry::ClassifyFlip(probe, right);
-				if (kind == realKind && (right == realRight || kind == FlipKind::Front || kind == FlipKind::Back)) continue;
-				int at = F + dt;
-				if (at <= s + 1 || at >= n - 1) continue;
-				std::vector<CarControls> c = dt ? shifted(F, dt) : realCtl;
-				if (c[at - 1].jump) continue;
-				for (int i = at; i < std::min(n, at + 30); i++) { c[i].pitch = p; c[i].yaw = y; c[i].roll = 0; }
-				std::string side = (kind == FlipKind::Front || kind == FlipKind::Back) ? "" : (right ? " (right)" : " (left)");
-				std::string name = ShotGeometry::FlipName(kind, flick) + side;
-				std::string when = dt == 0 ? "" : (dt < 0 ? ", a little earlier" : ", a little later");
-				cands.push_back({ std::format("Use a {} instead{}", name, when),
-					std::format("A {} instead of your {}{}{}.", name, ShotGeometry::FlipName(realKind, flick),
-						(realKind == FlipKind::Front || realKind == FlipKind::Back) ? "" : (realRight ? " (right)" : " (left)"),
-						dt == 0 ? ", at the same moment" : std::format(", {} {}", Secs(std::abs(dt)), dt < 0 ? "earlier" : "later")),
-					2 + (dt ? 1 : 0), std::move(c) });
+				if (kind == realKind && (right == realRight || kind == FlipKind::Front || kind == FlipKind::Back) && dt == 0) continue;
+				Edit e; e.flipAngle = deg; e.flipShift = dt; seeds.push_back(e);
 			}
 	}
 	else
 	{
-		// No flip used: flip into the touch
 		for (int lead : { 4, 8, 12, 18 })
-			for (int deg : { 0, 45, -45 })
-			{
-				int at = k - lead;
-				if (at <= s + 1 || !fr[at].hasFlip || ShotGeometry::OnSurface(fr[at])) continue;
-				std::vector<CarControls> c = realCtl;
-				if (c[at - 1].jump) continue;
-				float p, y;
-				stickFor(deg, p, y);
-				for (int i = at; i < std::min(n, at + 30); i++) { c[i].pitch = p; c[i].yaw = y; c[i].roll = 0; c[i].jump = false; }
-				c[at].jump = true;
-				if (at + 1 < n) c[at + 1].jump = true;
-				const char* dir = deg == 0 ? "front flip" : (deg > 0 ? "diagonal flip to the right" : "diagonal flip to the left");
-				cands.push_back({ std::format("Flip into the touch ({})", dir),
-					std::format("A {} {} before the touch.", dir, Secs(lead)), 3, std::move(c) });
-			}
-		// Aim: nose a little up, down, left or right over the last moments before the hit (in the air only)
-		int aimFrom = std::max(s, k - 30);
-		bool airborne = !ShotGeometry::OnSurface(fr[aimFrom]) && !ShotGeometry::OnSurface(fr[k]);
-		if (airborne)
-		{
-			const char* names[4] = { "higher", "lower", "more to the left", "more to the right" };
-			for (int d = 0; d < 4; d++)
-				for (float amt : { 0.4f, 0.8f })
-				{
-					std::vector<CarControls> c = realCtl;
-					for (int i = aimFrom; i < k; i++)
-					{
-						if (d == 0) c[i].pitch = std::clamp(c[i].pitch + amt, -1.0f, 1.0f);
-						if (d == 1) c[i].pitch = std::clamp(c[i].pitch - amt, -1.0f, 1.0f);
-						if (d == 2) c[i].yaw = std::clamp(c[i].yaw - amt, -1.0f, 1.0f);
-						if (d == 3) c[i].yaw = std::clamp(c[i].yaw + amt, -1.0f, 1.0f);
-					}
-					cands.push_back({ std::format("Aim your nose {}{}", amt < 0.5f ? "a bit " : "", names[d]),
-						std::format("About {:.0f}% more stick {} for the last {} before the touch.", amt * 100.0f,
-							d == 0 ? "back (nose up)" : d == 1 ? "forward (nose down)" : d == 2 ? "left" : "right", Secs(k - aimFrom)),
-						amt < 0.5f ? 1 : 2, std::move(c) });
-				}
-		}
+			for (int deg : { 0, 45, -45 }) { Edit e; e.flipInto = lead; e.flipIntoAngle = deg; seeds.push_back(e); }
 	}
-
-	// Boost
+	if (airborne)
+		for (int d = 0; d < 4; d++)
+			for (float amt : { 0.4f, 0.8f })
+			{
+				Edit e; e.aimTicks = 30;
+				if (d == 0) e.aimPitch = amt;
+				if (d == 1) e.aimPitch = -amt;
+				if (d == 2) e.aimYaw = -amt;
+				if (d == 3) e.aimYaw = amt;
+				seeds.push_back(e);
+			}
 	{
-		std::vector<CarControls> off = realCtl, on = realCtl, late = realCtl;
-		bool anyBoost = false, anyCoast = false;
-		for (int i = s; i < k; i++) { anyBoost |= realCtl[i].boost; anyCoast |= !realCtl[i].boost; off[i].boost = false; on[i].boost = true; }
-		for (int i = std::max(s, k - 24); i < k; i++) late[i].boost = false;
-		if (anyBoost) cands.push_back({ "Stop boosting on the way in", std::format("No boost for the last {} before the touch.", Secs(k - s)), 1, std::move(off) });
-		if (anyCoast && fr[s].boostAmount > 5.0f) cands.push_back({ "Keep boosting into the touch", std::format("Boost held for the last {} before the touch.", Secs(k - s)), 1, std::move(on) });
-		bool lateBoost = false;
+		bool anyBoost = false, anyCoast = false, lateBoost = false;
+		for (int i = s; i < k; i++) { anyBoost |= realCtl[i].boost; anyCoast |= !realCtl[i].boost; }
 		for (int i = std::max(s, k - 24); i < k; i++) lateBoost |= realCtl[i].boost;
-		if (lateBoost && k - 24 > s) cands.push_back({ "Let go of boost just before the touch", "No boost for the last 0.20 s before the touch.", 1, std::move(late) });
+		if (anyBoost) { Edit e; e.boost = 1; seeds.push_back(e); }
+		if (anyCoast && fr[s].boostAmount > 5.0f) { Edit e; e.boost = 2; seeds.push_back(e); }
+		if (lateBoost && k - 24 > s) { Edit e; e.boost = 3; seeds.push_back(e); }
 	}
-	// Air roll on the way in (up to the flip, or the touch)
-	{
-		int end = F >= 0 ? F : k;
-		if (!ShotGeometry::OnSurface(fr[s]) || !ShotGeometry::OnSurface(fr[end]))
-			for (float roll : { -1.0f, 1.0f })
-			{
-				std::vector<CarControls> c = realCtl;
-				for (int i = s; i < end; i++) c[i].roll = roll;
-				cands.push_back({ roll < 0 ? "Air roll left on the way in" : "Air roll right on the way in",
-					std::format("Air roll {} held for the {} before the {}.", roll < 0 ? "left" : "right", Secs(end - s), F >= 0 ? flipWord : "touch"),
-					2, std::move(c) });
-			}
-	}
+	if (airborne) for (int r : { -1, 1 }) { Edit e; e.roll = r; seeds.push_back(e); }
 
-	// ---- Try them all ----
-	// Better means a higher grade than both your real shot and the sim's replay of it; a miss has to go in.
-	const int floor = std::max(base.grade.overall, realGrade.overall);
-	struct Scored { int idx; SimRun run; float q; };
-	std::vector<Scored> better;
-	for (int ci = 0; ci < static_cast<int>(cands.size()); ci++)
-	{
-		if (stop()) break;
-		SimRun r = Run(arena.get(), car, fr, s, cands[ci].ctl, maxTick, ref, 0);
+	// ---- Try them, then keep refining the most promising ones (two changes together, finer amounts) ----
+	struct Tried { Edit e; SimRun run; float q; };
+	std::vector<Tried> tried;
+	auto seen = [&](const Edit& e) { for (const Tried& t : tried) if (t.e.Same(e)) return true; return false; };
+	auto tryEdit = [&](const Edit& e) {
+		if (e.Empty() || seen(e) || e.Parts() > (depth >= 2 ? 3 : 2)) return;
+		std::vector<CarControls> c;
+		if (!apply(e, c)) return;
+		SimRun r = Run(arena.get(), car, fr, s, c, maxTick, ref, 0);
 		out.tries++;
-		if (r.grade.overall > floor && (r.wentIn || realIn))
-		{
-			float q = Quality(r);
-			better.push_back({ ci, std::move(r), q });
-		}
-	}
-	std::sort(better.begin(), better.end(), [&](const Scored& a, const Scored& b) {
-		if (a.run.grade.overall != b.run.grade.overall) return a.run.grade.overall > b.run.grade.overall;
-		if (cands[a.idx].cost != cands[b.idx].cost) return cands[a.idx].cost < cands[b.idx].cost;
-		return a.q > b.q;
-	});
+		float q = Quality(r) - e.Cost() * 40.0f;
+		r.frames.clear();   // keep memory down; the winner is re-run
+		r.frames.shrink_to_fit();
+		tried.push_back({ e, std::move(r), q });
+	};
+	for (const Edit& e : seeds) { if (stop()) break; tryEdit(e); }
 
-	// The winner has to keep working from slightly nudged starts, or it's luck, not advice
-	int checked = 0;
-	for (Scored& b : better)
+	const int budget = depth >= 2 ? 1200 : 260;   // simulator runs (each about 2-4 ms)
+	std::mt19937 rng(12345u + static_cast<unsigned>(n));
+	auto pick = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+	auto mutate = [&](Edit e) {
+		int changes = pick(1, 2);
+		for (int c = 0; c < changes; c++)
+		{
+			int what = pick(0, 5);
+			if (what == 0 && F >= 0) e.flipShift = std::clamp(e.flipShift + pick(-6, 6), -30, 30);
+			else if (what == 1 && F >= 0) e.flipAngle = (e.flipAngle == kKeep ? (pick(0, 7) - 3) * 45 : e.flipAngle) + pick(-30, 30);
+			else if (what == 1 && F < 0) { e.flipInto = pick(3, 20); e.flipIntoAngle = pick(-60, 60); }
+			else if (what == 2 && airborne) { e.aimPitch = std::clamp(e.aimPitch + pick(-4, 4) * 0.1f, -0.8f, 0.8f); e.aimTicks = pick(1, 4) * 12; }
+			else if (what == 3 && airborne) { e.aimYaw = std::clamp(e.aimYaw + pick(-4, 4) * 0.1f, -0.8f, 0.8f); e.aimTicks = pick(1, 4) * 12; }
+			else if (what == 4) e.boost = pick(0, 3);
+			else if (what == 5 && airborne) e.roll = pick(-1, 1);
+			if (e.flipAngle != kKeep) { while (e.flipAngle > 180) e.flipAngle -= 360; while (e.flipAngle < -180) e.flipAngle += 360; }
+		}
+		return e;
+	};
+	int guard = 0;
+	while (out.tries < budget && !stop() && guard++ < budget * 4)
 	{
-		if (checked++ >= 6 || stop()) break;
+		// Parents: the best few so far (by result, minus how big a change they are)
+		std::vector<int> order(tried.size());
+		for (size_t i = 0; i < order.size(); i++) order[i] = static_cast<int>(i);
+		std::partial_sort(order.begin(), order.begin() + std::min<size_t>(6, order.size()), order.end(),
+			[&](int a, int b) { return tried[a].q > tried[b].q; });
+		Edit parent = order.empty() ? Edit{} : tried[order[pick(0, static_cast<int>(std::min<size_t>(6, order.size())) - 1)]].e;
+		// Sometimes cross two good ones: the changes from one, plus one change from the other
+		if (order.size() >= 2 && pick(0, 3) == 0)
+		{
+			const Edit& other = tried[order[pick(0, static_cast<int>(std::min<size_t>(6, order.size())) - 1)]].e;
+			if (other.boost) parent.boost = other.boost;
+			if (other.roll) parent.roll = other.roll;
+			if (other.aimPitch != 0 || other.aimYaw != 0) { parent.aimPitch = other.aimPitch; parent.aimYaw = other.aimYaw; parent.aimTicks = other.aimTicks; }
+			tryEdit(parent);
+			continue;
+		}
+		tryEdit(mutate(parent));
+	}
+
+	// ---- Pick: a higher grade than both your shot and the sim's replay of it (a miss has to go in),
+	// then the smaller change, then the nicer shot. It has to keep working from nudged starts, or it's luck. ----
+	const int toBeat = std::max(base.grade.overall, realGrade.overall);
+	std::vector<int> better;
+	for (int i = 0; i < static_cast<int>(tried.size()); i++)
+		if (tried[i].run.grade.overall > toBeat && (tried[i].run.wentIn || realIn)) better.push_back(i);
+	std::sort(better.begin(), better.end(), [&](int a, int b) {
+		const Tried& x = tried[a]; const Tried& y = tried[b];
+		if (x.run.grade.overall != y.run.grade.overall) return x.run.grade.overall > y.run.grade.overall;
+		if (std::fabs(x.e.Cost() - y.e.Cost()) > 0.01f) return x.e.Cost() < y.e.Cost();
+		return x.q > y.q;
+	});
+	int checked = 0;
+	for (int bi : better)
+	{
+		if (checked++ >= (depth >= 2 ? 16 : 8) || stop()) break;
+		const Tried& t = tried[bi];
+		std::vector<CarControls> c;
+		apply(t.e, c);
 		int held = 0;
 		for (int j = 1; j <= kNudges; j++)
 		{
-			SimRun r = Run(arena.get(), car, fr, s, cands[b.idx].ctl, maxTick, ref, 100 + j);
+			SimRun r = Run(arena.get(), car, fr, s, c, maxTick, ref, 100 + j);
 			out.tries++;
-			held += r.grade.overall > floor && (r.wentIn || realIn);
+			held += r.grade.overall > toBeat && (r.wentIn || realIn);
+			if (j - held > kNudges - kNudgesNeeded) break;
 		}
 		if (held < kNudgesNeeded) continue;
-		const Candidate& c = cands[b.idx];
+		SimRun win = Run(arena.get(), car, fr, s, c, maxTick, ref, 0);
+		std::string lines;
+		describe(t.e, out.cue, lines);
 		out.status = WhatIfStatus::Found;
-		out.cue = c.cue;
-		out.grade = b.run.grade.overall;
-		out.wentIn = b.run.wentIn;
-		out.gradeWhy = b.run.grade.overallWhy;
+		out.grade = win.grade.overall;
+		out.wentIn = win.wentIn;
+		out.gradeWhy = win.grade.overallWhy;
 		out.held = held;
 		out.heldOf = kNudges;
-		out.eventTick = b.run.eventTick;
-		out.detail = std::format("{}\nWould have been a {} ({}).\nSimulated from {} before your touch with your own inputs, changing only this. "
-			"It worked from {} of {} slightly different starts.\nYour own inputs in the sim: a {} (your real shot: {}).",
-			c.detail, out.grade, out.gradeWhy, Secs(k - s), held, kNudges, base.grade.overall, realGrade.overall);
-		out.frames = std::move(b.run.frames);
+		out.eventTick = win.eventTick;
+		out.detail = std::format("{}Would have been a {} ({}).\nSimulated from {} before your touch with your own inputs, changing only what is listed above. "
+			"It worked from {} of {} slightly different starts; your own inputs gave your result {} of 7 times.\nYour own inputs in the sim: a {} (your real shot: {}).",
+			lines, out.grade, out.gradeWhy, Secs(k - s), held, kNudges, baseMatches, base.grade.overall, realGrade.overall);
+		out.frames = std::move(win.frames);
 		break;
 	}
 	if (out.status != WhatIfStatus::Found)
 		out.status = (cancel && cancel->load()) ? WhatIfStatus::Cancelled : WhatIfStatus::NothingBetter;
+	out.note += std::format("{} tries in {:.0f} ms.", out.tries, elapsed() * 1000.0f);
 	out.ms = elapsed() * 1000.0f;
 	return out;
 }

@@ -38,6 +38,8 @@ struct WhatIfResult
 	std::vector<Frame> frames;    // your real rep up to startTick, then the what-if
 	int   eventTick = -1;
 
+	std::string note;         // how the search went (for the hover)
+	int   depth = 1;
 	int   tries = 0;
 	float ms = 0;
 };
@@ -48,10 +50,11 @@ namespace WhatIf
 	// -1 if the rep has no shot to work from.
 	int StartTick(const std::vector<Frame>& frames);
 
-	// Runs the search (about a tenth of a second; stops early if cancel is set or maxSeconds runs out).
+	// Runs the search; stops early if cancel is set or maxSeconds runs out.
+	// depth 1: about 260 simulator runs (around a second). depth 2 ("search deeper"): about 1,200.
 	// carBody: 0 Octane (Fennec and friends), 1 Dominus, 2 Plank (Batmobile), 3 Breakout, 4 Hybrid, 5 Merc.
 	WhatIfResult Search(const std::vector<Frame>& frames, bool wentIn, bool floorBeforeGoal, int eventTick,
-		const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds);
+		const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds, int depth = 1);
 
 	const char* StatusText(WhatIfStatus s);
 }

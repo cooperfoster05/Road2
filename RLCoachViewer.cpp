@@ -10,6 +10,9 @@
 #include <ctime>
 #include <format>
 #include <functional>
+#ifndef NOMINMAX
+#define NOMINMAX       // keep Windows.h from turning std::min / std::max into macros
+#endif
 #include <Windows.h>   // SetThreadPriority: the what-if search runs below normal priority
 
 // ============================================================
@@ -468,7 +471,7 @@ void RLCoach::CancelWhatIf()
 	whatIfFile.clear();
 }
 
-void RLCoach::StartWhatIf()
+void RLCoach::StartWhatIf(int depth)
 {
 	if (!viewerActive || viewerFrames.empty() || whatIfBusy || !predictor.Ready()) return;
 	if (viewerShowingWhatIf) ViewerShowWhatIf(false);
@@ -485,13 +488,14 @@ void RLCoach::StartWhatIf()
 	}
 	whatIfCancel = false;
 	whatIfBusy = true;
-	whatIfThread = std::thread([this, fr = std::move(fr), item, ref]() {
-		// Below normal priority and capped at 3 seconds, so the game never waits on it
+	whatIfDepth = depth;
+	whatIfThread = std::thread([this, fr = std::move(fr), item, ref, depth]() {
+		// Below normal priority and capped (3 s, or 8 s searching deeper), so the game never waits on it
 		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 		WhatIfResult r;
 		try
 		{
-			r = WhatIf::Search(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, 3.0f);
+			r = WhatIf::Search(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, depth >= 2 ? 8.0f : 3.0f, depth);
 		}
 		catch (...)
 		{
@@ -967,19 +971,19 @@ void RLCoach::RenderWindow()
 		}
 		auto whatIfRow = [&]() {
 			WhatIfStatus st;
-			std::string cue, detail, file;
-			int wGrade = 0;
+			std::string cue, detail, file, note;
+			int wGrade = 0, wDepth = 1;
 			bool wIn = false;
 			{
 				std::lock_guard<std::mutex> lock(whatIfMutex);
 				st = whatIf.status; cue = whatIf.cue; detail = whatIf.detail; file = whatIfFile;
-				wGrade = whatIf.grade; wIn = whatIf.wentIn;
+				wGrade = whatIf.grade; wIn = whatIf.wentIn; note = whatIf.note; wDepth = whatIf.depth;
 			}
 			bool mine = file == watching;
 			ImGui::Indent(28.0f);
 			if (whatIfBusy && mine)
 			{
-				ImGui::TextDisabled("What if...  simulating small changes to this shot");
+				ImGui::TextDisabled(whatIfDepth >= 2 ? "What if...  searching deeper (a few seconds)" : "What if...  simulating small changes to this shot");
 			}
 			else if (!mine || st == WhatIfStatus::None)
 			{
@@ -1023,6 +1027,48 @@ void RLCoach::RenderWindow()
 			else
 			{
 				ImGui::TextDisabled("What if: %s", WhatIf::StatusText(st));
+				if (ImGui::IsItemHovered() && !note.empty()) ImGui::SetTooltip("%s", note.c_str());
+
+				// Then point at what did decide it: the coach's root cause, or else the grades' biggest fix
+				auto practiceThere = [&](int si) {
+					ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.42f, 0.10f, 1.0f));
+					ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.78f, 0.55f, 0.15f, 1.0f));
+					ImGui::PushID(si + 3000);
+					if (ImGui::SmallButton("Practice that")) onGame([this, si]() { PracticeStart(si); });
+					ImGui::PopID();
+					ImGui::PopStyleColor(2);
+				};
+				int fixSeg = -1;
+				std::string fixWhy;
+				for (const UiGrade& g : grades) if (g.biggest) { fixSeg = g.segIndex; fixWhy = g.why; }
+				const ImVec4 gold(1.0f, 0.80f, 0.50f, 1.0f);
+				if (rootSeg >= 0 && rootSeg != whatIfSeg)
+				{
+					ImGui::TextColored(gold, "Root cause, earlier (%s): %s", Segmenter::Name(segs[rootSeg].kind), notes[0].cue.c_str());
+					if (ImGui::IsItemHovered() && !notes[0].detail.empty()) ImGui::SetTooltip("%s", notes[0].detail.c_str());
+					ImGui::SameLine();
+					practiceThere(rootSeg);
+				}
+				else if (rootSeg >= 0)
+				{
+					ImGui::TextColored(gold, "The coach's call for this part: %s", notes[0].cue.c_str());
+					if (ImGui::IsItemHovered() && !notes[0].detail.empty()) ImGui::SetTooltip("%s", notes[0].detail.c_str());
+				}
+				else if (fixSeg >= 0 && fixSeg < static_cast<int>(segs.size()) && fixSeg != whatIfSeg)
+				{
+					ImGui::TextColored(gold, "Biggest fix, earlier (%s): %s", Segmenter::Name(segs[fixSeg].kind), fixWhy.c_str());
+					ImGui::SameLine();
+					practiceThere(fixSeg);
+				}
+				if (st == WhatIfStatus::NothingBetter && wDepth < 2 && predictor.Ready())
+				{
+					ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.20f, 0.42f, 1.0f));
+					ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.62f, 0.28f, 0.58f, 1.0f));
+					if (ImGui::SmallButton("Search deeper")) onGame([this]() { StartWhatIf(2); });
+					ImGui::PopStyleColor(2);
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("About 5x more tries: finer timing and angles, and two or three changes together.\nTakes a few seconds in the background.");
+				}
 			}
 			ImGui::Unindent(28.0f);
 		};
