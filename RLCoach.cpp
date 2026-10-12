@@ -164,6 +164,8 @@ void RLCoach::StartPredictor()
 
 void RLCoach::onUnload()
 {
+	whatIfCancel = true;
+	if (whatIfThread.joinable()) whatIfThread.join();
 	PracticeExit();
 	ViewerExit();
 	housekeepStop = true;

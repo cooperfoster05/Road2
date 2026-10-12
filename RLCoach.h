@@ -17,6 +17,7 @@
 #include "GradeBook.h"
 #include "Habits.h"
 #include "Coach.h"
+#include "WhatIf.h"
 #include "ControllerOverlay.h"
 #include <mutex>
 #include <thread>
@@ -237,6 +238,24 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void DrawTargetHitbox(CanvasWrapper& canvas, const Vector& camLoc, const Vector& camFwd, const ShotAnalysis& shot,
 		const std::vector<Frame>& fr, int tick, const Vector& ballNow, bool showActual);
 	void StartPredictor();
+
+	// ---- v3 "What if" on the shot (WhatIf.h): a background search, started from the viewer ----
+	std::thread whatIfThread;
+	std::atomic<bool> whatIfBusy{ false };
+	std::atomic<bool> whatIfCancel{ false };
+	std::mutex whatIfMutex;
+	WhatIfResult whatIf;                  // latest result (whatIfMutex)
+	std::string whatIfFile;               // the rep it's for (whatIfMutex)
+	std::atomic<int> uiWhatIfStart{ -1 }; // where the search would start in the rep being watched (-1 = no shot)
+	bool viewerShowingWhatIf = false;     // game thread: the viewer is playing the what-if instead of your rep
+	std::vector<Frame> viewerRealFrames;  // your rep, kept while the what-if plays
+	ShotAnalysis viewerRealShot;
+	std::atomic<bool> uiShowingWhatIf{ false };
+	void StartWhatIf();                   // game thread: searches the rep being watched
+	void CancelWhatIf();                  // any thread: stops a search and forgets the last result
+	void ViewerShowWhatIf(bool on);       // game thread: play the what-if (or go back to your rep)
+	void PracticeWhatIf();                // game thread: practice from where the what-if starts, its path drawn faintly
+	void DrawWhatIfPath(CanvasWrapper& canvas);
 
 	// ---- Practice mode (game thread) ----
 	enum class PracticeState { Off, Frozen, Live };

@@ -126,6 +126,9 @@
     <ClCompile Include="BallPredictor.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
+    <ClCompile Include="WhatIf.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
     <ClCompile Include="GuiBase.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
@@ -237,6 +240,9 @@
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="BallPredictor.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="WhatIf.h">
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="logging.h">

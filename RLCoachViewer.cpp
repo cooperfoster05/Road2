@@ -10,6 +10,7 @@
 #include <ctime>
 #include <format>
 #include <functional>
+#include <Windows.h>   // SetThreadPriority: the what-if search runs below normal priority
 
 // ============================================================
 // Rep viewer: plays a saved rep back in free play by moving the
@@ -62,6 +63,10 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 {
 	if (!writer) return;
 	PracticeExit();   // opening a rep ends any practice set
+	CancelWhatIf();   // and forgets the last rep's what-if
+	viewerShowingWhatIf = false;
+	uiShowingWhatIf = false;
+	viewerRealFrames.clear();
 	std::vector<Frame> loaded;
 	std::string err;
 	if (!RepLibrary::LoadRep(writer->Folder(), item.file, loaded, err))
@@ -85,6 +90,7 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 
 	viewerShot = ShotGeometry::Analyze(viewerFrames);
 	viewerSegs = Segmenter::Split(viewerFrames, ViewerEventTick(item));
+	uiWhatIfStart = WhatIf::StartTick(viewerFrames);
 
 	// Grades: timing compares against your fastest goal on the same shot
 	ShotReference viewerRef;
@@ -143,6 +149,11 @@ void RLCoach::ViewerExit()
 {
 	PracticeExit();
 	if (!viewerActive) return;
+	CancelWhatIf();
+	viewerShowingWhatIf = false;
+	uiShowingWhatIf = false;
+	viewerRealFrames.clear();
+	uiWhatIfStart = -1;
 	viewerActive = false;
 	viewerPlaying = false;
 	viewerFrames.clear();
@@ -311,6 +322,7 @@ void RLCoach::DrawViewerPaths(CanvasWrapper& canvas)
 	if (!viewerPred.empty()) DrawPredictedPath(canvas, viewerPred);
 	drawPath([](const Frame& f) { return Vector(f.ballX, f.ballY, f.ballZ); }, 255, 160, 40);
 	drawPath([](const Frame& f) { return Vector(f.carX, f.carY, f.carZ); }, 90, 190, 255);
+	DrawWhatIfPath(canvas);
 
 	// Shot analysis overlays
 	if (viewerShot.valid)
@@ -441,6 +453,154 @@ void RLCoach::DrawPredictedPath(CanvasWrapper& canvas, const std::vector<BallSam
 		}
 		prev = s;
 		havePrevPt = ok;
+	}
+}
+
+// ============================================================
+// v3 "What if" on the shot (the search itself is in WhatIf.cpp)
+// ============================================================
+
+void RLCoach::CancelWhatIf()
+{
+	whatIfCancel = true;
+	std::lock_guard<std::mutex> lock(whatIfMutex);
+	whatIf = WhatIfResult{};
+	whatIfFile.clear();
+}
+
+void RLCoach::StartWhatIf()
+{
+	if (!viewerActive || viewerFrames.empty() || whatIfBusy || !predictor.Ready()) return;
+	if (viewerShowingWhatIf) ViewerShowWhatIf(false);
+	if (whatIfThread.joinable()) whatIfThread.join();   // the last search already finished (not busy)
+
+	std::vector<Frame> fr = viewerFrames;
+	RepListItem item = viewerRep;
+	ShotReference ref;
+	shotBook.TryGet(item.shotKey, ref);   // same benchmark the breakdown used
+	{
+		std::lock_guard<std::mutex> lock(whatIfMutex);
+		whatIf = WhatIfResult{};
+		whatIfFile = item.file;
+	}
+	whatIfCancel = false;
+	whatIfBusy = true;
+	whatIfThread = std::thread([this, fr = std::move(fr), item, ref]() {
+		// Below normal priority and capped at 3 seconds, so the game never waits on it
+		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+		WhatIfResult r;
+		try
+		{
+			r = WhatIf::Search(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, 3.0f);
+		}
+		catch (...)
+		{
+			r = WhatIfResult{};
+			r.status = WhatIfStatus::CantSimulate;
+		}
+		{
+			std::lock_guard<std::mutex> lock(whatIfMutex);
+			if (whatIfFile == item.file && !whatIfCancel) whatIf = std::move(r);
+		}
+		whatIfBusy = false;
+	});
+}
+
+// Plays the what-if in the viewer instead of your rep (or goes back). Same car, same overlays.
+void RLCoach::ViewerShowWhatIf(bool on)
+{
+	if (!viewerActive || on == viewerShowingWhatIf) return;
+	if (on)
+	{
+		std::vector<Frame> alt;
+		int start = 0;
+		{
+			std::lock_guard<std::mutex> lock(whatIfMutex);
+			if (whatIf.status != WhatIfStatus::Found || whatIfFile != viewerRep.file || whatIf.frames.size() < 2) return;
+			alt = whatIf.frames;
+			start = whatIf.startTick;
+		}
+		PracticeExit();
+		viewerRealFrames = std::move(viewerFrames);
+		viewerRealShot = viewerShot;
+		viewerFrames = std::move(alt);
+		viewerShot = ShotGeometry::Analyze(viewerFrames);
+		viewerShowingWhatIf = true;
+		uiViewerTotal = static_cast<int>(viewerFrames.size());
+		ViewerSeek(static_cast<float>(std::max(0, start - 60)));   // a half second of lead-in before it changes
+		viewerPlaying = true;
+		uiViewerPlaying = true;
+	}
+	else
+	{
+		viewerFrames = std::move(viewerRealFrames);
+		viewerRealFrames.clear();
+		viewerShot = viewerRealShot;
+		viewerShowingWhatIf = false;
+		uiViewerTotal = static_cast<int>(viewerFrames.size());
+		ViewerSeek(viewerPlayhead);   // clamps to your rep's length
+	}
+	uiShowingWhatIf = viewerShowingWhatIf;
+}
+
+// Practice from where the what-if starts, with its path drawn faintly as the line to follow
+void RLCoach::PracticeWhatIf()
+{
+	std::vector<Frame> alt;
+	int start = 0;
+	std::string cue;
+	{
+		std::lock_guard<std::mutex> lock(whatIfMutex);
+		if (whatIf.status != WhatIfStatus::Found || whatIfFile != viewerRep.file) return;
+		alt = whatIf.frames;
+		start = whatIf.startTick;
+		cue = whatIf.cue;
+	}
+	if (viewerShowingWhatIf) ViewerShowWhatIf(false);
+	PracticeStartAt(start);
+	if (practiceState == PracticeState::Off) return;
+	practiceRefFrames = std::move(alt);
+	practiceRefLabel = "Faint line: the what-if (" + cue + ")";
+}
+
+// While watching your rep: the what-if's car path in pink from where it changes. While watching the what-if:
+// your real car path in grey, for comparison.
+void RLCoach::DrawWhatIfPath(CanvasWrapper& canvas)
+{
+	CameraWrapper cam = gameWrapper->GetCamera();
+	if (cam.IsNull()) return;
+	Vector camLoc = cam.GetLocation();
+	Vector camFwd = RotatorToVector(cam.GetRotation());
+
+	auto draw = [&](const std::vector<Frame>& fr, int from, unsigned char r, unsigned char g, unsigned char b, unsigned char alpha, bool ball) {
+		Vector2F prev{};
+		bool havePrevPt = false;
+		for (int i = std::max(0, from); i < static_cast<int>(fr.size()); i += 2)
+		{
+			const Frame& f = fr[i];
+			Vector2F s;
+			bool ok = ToScreen(canvas, camLoc, camFwd, ball ? Vector(f.ballX, f.ballY, f.ballZ) : Vector(f.carX, f.carY, f.carZ), s);
+			if (ok && havePrevPt)
+			{
+				canvas.SetColor(r, g, b, alpha);
+				canvas.DrawLine(prev, s, 2.0f);
+			}
+			prev = s;
+			havePrevPt = ok;
+		}
+	};
+
+	std::lock_guard<std::mutex> lock(whatIfMutex);
+	if (whatIf.status != WhatIfStatus::Found || whatIfFile != viewerRep.file) return;
+	if (viewerShowingWhatIf)
+	{
+		draw(viewerRealFrames, whatIf.startTick, 200, 200, 200, 110, false);
+		draw(viewerRealFrames, whatIf.startTick, 200, 200, 200, 70, true);
+	}
+	else
+	{
+		draw(whatIf.frames, whatIf.startTick, 255, 110, 200, 200, false);
+		draw(whatIf.frames, whatIf.startTick, 255, 170, 220, 120, true);
 	}
 }
 
@@ -622,6 +782,12 @@ void RLCoach::RenderWindow()
 			ImGui::TextWrapped("Grade %s", overall.c_str());
 			ImGui::PopStyleColor();
 		}
+		if (uiShowingWhatIf)
+		{
+			ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.85f, 1.0f), "Playing the what-if (simulated), not your real rep.");
+			ImGui::SameLine();
+			if (ImGui::SmallButton("Back to your rep##top")) onGame([this]() { ViewerShowWhatIf(false); });
+		}
 		// v2 coaching: the root cause first, then one more; hover for the numbers behind it
 		for (const CoachNote& n : notes)
 		{
@@ -733,7 +899,7 @@ void RLCoach::RenderWindow()
 						gradeName.c_str(), sg.start / 120.0f, (sg.end + 1) / 120.0f, why.empty() ? "" : "\n", why.c_str());
 			}
 			// Playhead
-			float px = xOf(static_cast<int>(uiViewerPlayhead.load()));
+			float px = xOf(std::min(static_cast<int>(uiViewerPlayhead.load()), segTotal - 1));   // the what-if can run longer than your rep
 			dl->AddLine(ImVec2(px, origin.y - 3.0f), ImVec2(px, origin.y + 2 * rowH + gap + 3.0f), IM_COL32(255, 255, 255, 235), 2.0f);
 			dl->AddTriangleFilled(ImVec2(px - 5, origin.y - 7), ImVec2(px + 5, origin.y - 7), ImVec2(px, origin.y - 1), IM_COL32(255, 255, 255, 235));
 			ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 2 * rowH + gap + 8.0f));
@@ -787,6 +953,80 @@ void RLCoach::RenderWindow()
 			ImGui::SameLine();
 			ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.50f, 1.0f), "%s: root cause is here", Segmenter::Name(segs[rootSeg].kind));
 		}
+		// v3 "What if": sits under the part of the breakdown where the change would happen
+		// (the flick or flip that made the shot, or the contact / read just before the touch)
+		int whatIfSeg = -1;
+		{
+			int start = uiWhatIfStart;
+			auto eligible = [](SegKind k) { return k == SegKind::Flick || k == SegKind::Flip || k == SegKind::Contact || k == SegKind::Read; };
+			for (int i = 0; i < static_cast<int>(segs.size()); i++)
+				if (start >= 0 && eligible(segs[i].kind) && start >= segs[i].start && start <= segs[i].end) whatIfSeg = i;
+			if (whatIfSeg < 0 && start >= 0)
+				for (int i = 0; i < static_cast<int>(segs.size()); i++)
+					if (segs[i].kind == SegKind::Contact || segs[i].kind == SegKind::Flick || segs[i].kind == SegKind::Flip) whatIfSeg = i;
+		}
+		auto whatIfRow = [&]() {
+			WhatIfStatus st;
+			std::string cue, detail, file;
+			int wGrade = 0;
+			bool wIn = false;
+			{
+				std::lock_guard<std::mutex> lock(whatIfMutex);
+				st = whatIf.status; cue = whatIf.cue; detail = whatIf.detail; file = whatIfFile;
+				wGrade = whatIf.grade; wIn = whatIf.wentIn;
+			}
+			bool mine = file == watching;
+			ImGui::Indent(28.0f);
+			if (whatIfBusy && mine)
+			{
+				ImGui::TextDisabled("What if...  simulating small changes to this shot");
+			}
+			else if (!mine || st == WhatIfStatus::None)
+			{
+				if (!predictor.Ready())
+				{
+					ImGui::TextDisabled("What if?  (the simulator is still loading)");
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", predictor.Status().c_str());
+				}
+				else
+				{
+					ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.20f, 0.42f, 1.0f));
+					ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.62f, 0.28f, 0.58f, 1.0f));
+					if (ImGui::SmallButton("What if?")) onGame([this]() { StartWhatIf(); });
+					ImGui::PopStyleColor(2);
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("Replays your inputs from just before the shot in the simulator, then tries small changes:\n"
+							"flip timing and direction, flipping into the touch, boost, air roll and aim.\n"
+							"Shows the best one that would have scored better, if there is one.");
+					ImGui::SameLine();
+					ImGui::TextDisabled("try small changes to this shot in the simulator");
+				}
+			}
+			else if (st == WhatIfStatus::Found)
+			{
+				ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.85f, 1.0f), "What if: %s", cue.c_str());
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", detail.c_str());
+				ImGui::SameLine();
+				ImGui::PushStyleColor(ImGuiCol_Text, GradeColor(wGrade));
+				ImGui::Text("-> %d%s", wGrade, wIn ? ", goal" : "");
+				ImGui::PopStyleColor();
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", detail.c_str());
+				bool showing = uiShowingWhatIf;
+				if (ImGui::SmallButton(showing ? "Back to your rep" : "Watch it"))
+					onGame([this, showing]() { ViewerShowWhatIf(!showing); });
+				if (ImGui::IsItemHovered() && !showing)
+					ImGui::SetTooltip("Plays the what-if with your car. Its path is the pink line; your real one shows in grey while it plays.");
+				ImGui::SameLine();
+				if (ImGui::SmallButton("Practice it")) onGame([this]() { PracticeWhatIf(); });
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Practice from where the what-if starts, with its path drawn faintly to follow.");
+			}
+			else
+			{
+				ImGui::TextDisabled("What if: %s", WhatIf::StatusText(st));
+			}
+			ImGui::Unindent(28.0f);
+		};
+		bool whatIfListed = false;
 		for (const UiGrade& ug : grades)
 		{
 			if (ug.name.empty() || ug.segIndex < 0 || ug.segIndex >= static_cast<int>(segs.size())) continue;
@@ -805,6 +1045,12 @@ void RLCoach::RenderWindow()
 				onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
 			}
 			ImGui::PopID();
+			if (si == whatIfSeg && !whatIfListed) { whatIfListed = true; whatIfRow(); }
+		}
+		if (whatIfSeg >= 0 && !whatIfListed)
+		{
+			ImGui::TextDisabled("%s:", Segmenter::Name(segs[whatIfSeg].kind));
+			whatIfRow();
 		}
 
 		{
@@ -827,6 +1073,7 @@ void RLCoach::RenderWindow()
 			ImGui::TextColored(kGold, "Yellow ghost ball");                  ImGui::SameLine(); ImGui::TextDisabled("earliest a fast, direct aerial could have met it");
 			ImGui::TextColored(kGold, "Yellow box");                         ImGui::SameLine(); ImGui::TextDisabled("your hitbox placed and aimed to make that ideal hit");
 			ImGui::TextColored(kGood, "Green box");                          ImGui::SameLine(); ImGui::TextDisabled("your real hitbox at contact");
+			ImGui::TextColored(ImVec4(1.0f, 0.43f, 0.78f, 1.0f), "Pink");    ImGui::SameLine(); ImGui::TextDisabled("the what-if's car path (lighter: its ball path); grey = your real path while it plays");
 			ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "White dashes");       ImGui::SameLine(); ImGui::TextDisabled("predicted ball path");
 			ImGui::TreePop();
 		}
