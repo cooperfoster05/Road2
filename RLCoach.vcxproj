@@ -141,6 +141,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PreprocessorDefinitions>RS_DONT_LOG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
+    <ClCompile Include="Mechanics.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <!-- RocketSim (third_party/RocketSim, MIT license) and its bundled Bullet physics -->
     <ClCompile Include="third_party\RocketSim\src\**\*.cpp;third_party\RocketSim\libsrc\**\*.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -192,6 +195,7 @@
     <ClInclude Include="BallPredictor.h" />
     <ClInclude Include="WhatIf.h" />
     <ClInclude Include="Engine.h" />
+    <ClInclude Include="Mechanics.h" />
     <ClInclude Include="version.h" />
   </ItemGroup>
   <ItemGroup>

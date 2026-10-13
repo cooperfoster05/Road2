@@ -522,7 +522,7 @@ void RLCoach::StartWhatIf(int depth, WhatIfPoint point, int engineStart)
 			{
 				// Stage 3: the engine line, shown through the same what-if slot (Watch it, Practice it, the pink path)
 				EngineResult e = Engine::Line(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel,
-					depth >= 2 ? 25.0f : 6.0f, engineStart, depth);
+					depth >= 2 ? 60.0f : 15.0f, engineStart, depth);
 				r.point = WhatIfPoint::Engine;
 				r.depth = depth;
 				r.status = e.status == EngineStatus::Found ? WhatIfStatus::Found
@@ -1222,7 +1222,7 @@ void RLCoach::RenderWindow()
 			ImGui::PushID(7100);
 			if (busyHere)
 			{
-				ImGui::TextDisabled(whatIfDepth >= 2 ? "Engine thinking harder...  (up to about 20 seconds)" : "Engine thinking...  (a few seconds)");
+				ImGui::TextDisabled(whatIfDepth >= 2 ? "Engine thinking harder...  (up to a minute)" : "Engine thinking...  (several seconds)");
 			}
 			else if (!predictor.Ready())
 			{
@@ -1232,9 +1232,10 @@ void RLCoach::RenderWindow()
 			{
 				if (engineButton("Engine line")) onGame([this]() { StartWhatIf(1, WhatIfPoint::Engine, -1); });
 				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("A bot plays this shot as well as it can, with perfect inputs: from when the ball starts moving\n"
-						"(or right after your setup touch). It tries meeting the ball at every moment it could, and your own line\n"
-						"reshaped, and keeps whatever scores best. It shows the ceiling for the shot, not what's comfortable.");
+					ImGui::SetTooltip("A bot takes over half a second before your touch and plays the shot as well as it can, with perfect\n"
+						"inputs. It tries meeting the ball at every moment it could, and your own line reshaped, aims for 4s and 5s,\n"
+						"and only shows a line that beats your shot. It shows the ceiling for the shot, not what's comfortable.\n"
+						"For something entirely different (another setup, another approach), scrub back and use Engine from here.");
 				ImGui::SameLine();
 				if (engineButton(std::format("Engine from here ({:.2f}s)", here / 120.0f).c_str()))
 					onGame([this, here]() { StartWhatIf(1, WhatIfPoint::Engine, here); });
@@ -1261,13 +1262,20 @@ void RLCoach::RenderWindow()
 				else if (mine && st != WhatIfStatus::None)
 				{
 					ImGui::TextDisabled("%s", st == WhatIfStatus::NoShot ? "Engine: nothing to play from here." : st == WhatIfStatus::Cancelled ? "Engine: stopped."
-						: "Engine: it couldn't find a goal from here either.");
+						: "Engine: it couldn't find a line that beats your shot from here.");
 					if (ImGui::IsItemHovered() && !note.empty()) ImGui::SetTooltip("%s", note.c_str());
+					if (!note.empty())
+					{
+						// How the search went, right there (so a slow or cut-short search is easy to spot)
+						ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+						ImGui::TextWrapped("%s", note.c_str());
+						ImGui::PopStyleColor();
+					}
 					if (wDepth < 2 && st == WhatIfStatus::NothingBetter)
 					{
 						ImGui::SameLine();
 						if (engineButton("Think harder")) { int es = whatIfEngineStart; onGame([this, es]() { StartWhatIf(2, WhatIfPoint::Engine, es); }); }
-						if (ImGui::IsItemHovered()) ImGui::SetTooltip("About 5x more tries. Takes up to about 20 seconds in the background.");
+						if (ImGui::IsItemHovered()) ImGui::SetTooltip("About 5x more tries. Takes up to a minute in the background.");
 					}
 				}
 			}

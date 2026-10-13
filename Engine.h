@@ -36,7 +36,8 @@ struct EngineResult
 
 namespace Engine
 {
-	// startTick -1 = from when the ball starts moving. depth 1 about 450 sim runs, depth 2 about 2,500.
+	// startTick -1 = its default: half a second before your touch. Only lines that beat your shot count, and the search is steered
+	// toward 4s and 5s. depth 1 about 1,900 sim runs per start (a few seconds), depth 2 about 9,000.
 	EngineResult Line(const std::vector<Frame>& frames, bool wentIn, bool floorBeforeGoal, int eventTick,
 		const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds, int startTick = -1, int depth = 1);
 	const char* StatusText(EngineStatus s);

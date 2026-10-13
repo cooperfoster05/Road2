@@ -1,6 +1,7 @@
 // No pch on purpose: this file only sees RocketSim, never the BakkesMod SDK.
 #include "Engine.h"
 #include "Grader.h"
+#include "Mechanics.h"
 #include "Segmenter.h"
 #include "ShotGeometry.h"
 #include "Units.h"
@@ -105,9 +106,10 @@ namespace
 		bool dodge = false;   // dodge into the ball at the end
 		int dodgeLead = 8;    // ticks before arrival
 		bool doubleJump = true;
+		bool power = false;   // drive through it: keep boosting into the hit for a harder shot
 	};
 	
-	struct State { int jumpStarted = -1; bool doubleJumped = false; bool dodged = false; int touched = -1; };
+	struct State { int jumpStarted = -1; bool doubleJumped = false; bool dodged = false; int touched = -1; bool noJump = false; };
 	
 	inline CarControls Drive(const CarState& s, const Plan& p, int tick, State& st)
 	{
@@ -117,6 +119,8 @@ namespace
 		float T = std::max(1, tau) / 120.0f;
 		if (st.touched >= 0 && tick >= st.touched) return c;   // after the touch: hands off
 	
+		// Back on the ground after a jump (or after starting in the air): drive again
+		if (s.isOnGround && st.jumpStarted >= 0 && tick - st.jumpStarted > 24) { st.jumpStarted = -1; st.doubleJumped = false; st.dodged = false; st.noJump = false; }
 		bool airborne = !s.isOnGround || st.jumpStarted >= 0;
 		if (!airborne && (p.jumpTick < 0 || tick < p.jumpTick))
 		{
@@ -127,6 +131,12 @@ namespace
 			hd = hl > 0.1f ? hd / hl : Vec(1, 0, 0);
 			Vec P = s.pos; P.z = 0;
 			Vec C = p.target; C.z = 0;
+			if (p.jumpTick >= 0)
+			{
+				// Jumping before the hit: be short of the contact point at takeoff by how far we'll carry in the air
+				float carry = std::max(400.0f, s.vel.Length()) * (p.arriveTick - p.jumpTick) / 120.0f;
+				C = C - hd * std::min(carry, 2500.0f);
+			}
 			Vec rel = P - C;
 			float along = rel.Dot(hd);                 // + = in front of the contact point (the wrong side)
 			Vec side(-hd.y, hd.x, 0);
@@ -160,12 +170,19 @@ namespace
 			else if (need > speed + 50) { c.throttle = 1; c.boost = std::fabs(ang) < 0.35f && need > speed + 250 && speed < 2250; }
 			else if (need < speed - 100) c.throttle = speed - need > 400 ? -1.0f : 0.0f;
 			else c.throttle = Clamp1((need - speed) / 300.0f + 0.2f);
+			if (p.power && tau < 48 && std::fabs(ang) < 0.3f) { c.throttle = 1; c.boost = speed < 2280.0f; }
 			// Ground dodge into the ball
 			if (p.dodge && p.jumpTick < 0 && tau <= p.dodgeLead && tau > p.dodgeLead - 2) { c.jump = true; st.jumpStarted = tick; }
 			return c;
 		}
-		if (st.jumpStarted < 0) st.jumpStarted = tick;
-		int sinceJump = tick - st.jumpStarted;
+		if (st.jumpStarted < 0)
+		{
+			// Leaving the ground now (our jump), or already in the air without one (falling, off a bounce)
+			st.jumpStarted = tick;
+			st.noJump = !s.isOnGround;
+			if (st.noJump) st.doubleJumped = true;
+		}
+		int sinceJump = st.noJump ? 1000 : tick - st.jumpStarted;
 	
 		// Ground dodge in progress (jump, then flip toward the hit direction)
 		if (p.dodge && p.jumpTick < 0)
@@ -205,6 +222,7 @@ namespace
 		float align = s.rotMat.forward.Dot(want);
 		c.boost = !late && align > 0.8f && needAcc > 250.0f;
 		if (late && needAcc > 500.0f && align > 0.7f) c.boost = true;
+		if (p.power && tau < 36 && s.rotMat.forward.Dot(p.hitDir) > 0.7f) c.boost = true;
 		c.throttle = 1;
 		// Aerial dodge into the ball
 		if (p.dodge && !st.dodged && tau <= p.dodgeLead && s.HasFlipOrJump())
@@ -227,6 +245,7 @@ namespace
 		int  touchTick = -1;     // the bot's first touch
 		int  takeoff = -1;
 		float boostUsed = 0;
+		std::vector<CarControls> ctl;   // the bot's inputs, by tick (so its line can be refined later)
 		ShotAnalysis shot;
 		RepGrade grade;
 	};
@@ -256,7 +275,7 @@ namespace
 		Bot::State st;
 		{
 			CarState cs = car->GetState();
-			if (!cs.isOnGround) { st.jumpStarted = s - 1000; st.doubleJumped = true; }
+			if (!cs.isOnGround) { st.jumpStarted = s; st.noJump = true; st.doubleJumped = true; }
 		}
 		float boost0 = car->GetState().boost;
 		int lastTouch = -1, stopAt = -1;
@@ -269,6 +288,7 @@ namespace
 			cur.throttle = c.throttle; cur.steer = c.steer; cur.pitch = c.pitch; cur.yaw = c.yaw; cur.roll = c.roll;
 			cur.jump = c.jump; cur.boost = c.boost; cur.handbrake = c.handbrake;
 			if (r.takeoff < 0 && c.jump && before.isOnGround) r.takeoff = i;
+			if (!fixedCtl) { if (static_cast<int>(r.ctl.size()) <= i) r.ctl.resize(i + 1); r.ctl[i] = c; }
 			car->controls = c;
 			uint64_t t0 = arena->tickCount;
 			arena->Step(1);
@@ -340,13 +360,34 @@ namespace
 		return r;
 	}
 
-	float Quality(const SimRun& r)
+	// Higher is better: the grade first, then how close the shot came to the next grade up. The partial credit
+	// steers the search toward 4s and 5s (high in the net, hard, early, on line) instead of settling for a 3.
+	float Quality(const SimRun& r, const ShotReference& ref)
 	{
 		if (r.touchTick < 0) return -100000.0f;
+		const ShotAnalysis& a = r.shot;
 		float q = r.grade.overall * 10000.0f;
-		if (r.wentIn) q += 5000.0f - std::min(5000.0f, r.shot.cornerDist) + r.shot.shotSpeed * 0.5f - (r.shot.bouncedIn ? 3000.0f : 0.0f);
-		else q -= r.shot.reachesGoalLine ? std::min(5000.0f, r.shot.missDist) : 5000.0f;
-		return q - (r.touchTick - r.frames.front().tick) * 0.0f;
+		if (!r.wentIn) return q - (a.reachesGoalLine ? std::min(5000.0f, a.missDist) : 5000.0f);
+		auto ramp = [](float v, float lo, float hi) { return std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f); };
+		float credit = 0;
+		if (a.type == ShotType::Ground)
+		{
+			credit += 2.0f * ramp(a.crossZ, 200.0f, 520.0f);        // a 4 at 360, a 5 at 500
+			credit += ramp(a.shotSpeed, 1500.0f, 2100.0f);
+		}
+		else
+		{
+			float touchSec = (a.touchTick - a.startTick) / 120.0f;
+			float vsBest = ref.valid ? touchSec - ref.touchSec : 0.0f;
+			credit += ramp(a.crossZ, 150.0f, 420.0f);                  // upper half of the net at 350
+			credit += ramp(a.shotSpeed, 1800.0f, 2900.0f);             // fast at 2,800
+			credit += ref.valid ? ramp(-vsBest, -0.6f, 0.0f) : 1.0f;   // early: within 0.2 s of your best (0.05 s for a 5)
+			credit += ramp(-a.aimErrDeg, -8.0f, -1.6f);               // on line: 3.5 deg for a 4, 1.6 for a 5
+			credit += ramp(-a.cornerDist, -900.0f, -200.0f);           // toward a top corner (or a rocket) for a 5
+		}
+		q += 2000.0f * credit + a.shotSpeed * 0.2f;
+		if (a.bouncedIn) q -= 4000.0f;
+		return q;
 	}
 
 	std::string Secs(int ticks) { return std::format("{:.2f} s", ticks / 120.0f); }
@@ -376,28 +417,23 @@ const char* Engine::StatusText(EngineStatus s)
 	}
 }
 
-EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorBeforeGoal, int eventTick,
+// The engine from one start tick (Line below picks the start, and may try a second one)
+static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floorBeforeGoal, int eventTick,
 	const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds, int startTick, int depth)
 {
 	auto clock0 = std::chrono::steady_clock::now();
 	auto elapsed = [&]() { return std::chrono::duration<float>(std::chrono::steady_clock::now() - clock0).count(); };
-	auto stop = [&]() { return (cancel && cancel->load()) || elapsed() > maxSeconds; };
+	// The search gets about two thirds of the time; the rest is kept for checking its best lines hold up
+	// (if the search ran to the end of the clock, nothing would get checked and nothing would be shown)
+	auto cancelled = [&]() { return cancel && cancel->load(); };
+	auto stop = [&]() { return cancelled() || elapsed() > maxSeconds * 0.65f; };
+	auto hardStop = [&]() { return cancelled() || elapsed() > maxSeconds; };
+	float scale = 1.0f;   // shrinks the search to fit the time on slower machines
 
 	EngineResult out;
 	const int n = static_cast<int>(fr.size());
 	ShotAnalysis real = ShotGeometry::Analyze(fr);
-	// Default start: when the ball starts moving, or, if you set the shot up yourself (a pop, a push to the wall),
-	// right after that setup touch, so the engine plays the same shot you went for
-	int s = real.valid ? real.startTick : 1;
-	if (real.valid)
-	{
-		int k = real.touchTick, prevEnd = -1;
-		for (int i = k - 1; i > real.startTick; i--)
-			if (fr[i].touch && !fr[i + 1].touch && k - i > 10) { prevEnd = i; break; }
-		if (prevEnd > 0) s = std::min(k - 6, prevEnd + 8);
-	}
-	if (startTick >= 0) s = startTick;
-	s = std::clamp(s, 1, n - 2);
+	int s = std::clamp(startTick, 1, n - 2);
 	out.startTick = s;
 	{
 		RepSegments realSegs = Segmenter::Split(fr, eventTick >= 0 ? eventTick : n - 1);
@@ -435,7 +471,7 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 
 	// aimPt: the point (x, z on the goal line) the hit is pointed at; the search corrects it from where shots really go
 	struct Option { Bot::Plan plan; Vec aimPt; float reach = 150; int jumpLead = 60; };
-	auto makePlan = [&](int T, Vec aimPt, float reach, int jumpLead, bool dodge, bool doubleJump, Option& o) -> bool {
+	auto makePlan = [&](int T, Vec aimPt, float reach, int jumpLead, bool dodge, bool doubleJump, Option& o, bool power = false) -> bool {
 		int ti = T - s;
 		if (ti < 6 || ti > horizon) return false;
 		Vec B = ballPath[ti];
@@ -450,7 +486,21 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 		d = d / dl;
 		Vec C = B - d * reach;
 		bool ground = C.z < 60.0f;
-		if (ground)
+		// From the ground, a short jump into it (lifts the ball: height in the net is what makes ground 4s and 5s)
+		bool jumpShot = ground && jumpLead <= 30;
+		if (jumpShot)
+		{
+			Vec dg = d; dg.z = 0;
+			if (dg.Length() < 0.1f) return false;
+			dg = dg / dg.Length();
+			C = B - dg * reach;
+			// How far under the ball the car meets it decides the lift: the aim height (which the aim correction
+			// moves toward where the shot really went) sets it, so a shot that crossed too low gets hit lower next time
+			float under = std::clamp((aimPt.z - 300.0f) * 0.25f, -40.0f, 110.0f);
+			C.z = std::max(30.0f, B.z - under);
+			ground = false;
+		}
+		else if (ground)
 		{
 			Vec dg = d; dg.z = 0;
 			if (dg.Length() < 0.1f) return false;
@@ -472,55 +522,79 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 		o.plan.target = C;
 		o.plan.hitDir = d;
 		o.plan.arriveTick = T;
-		o.plan.jumpTick = ground || startAir ? -1 : std::max(s, T - jumpLead);
-		if (ground && !startAir) o.plan.jumpTick = -1;
-		if (startAir) o.plan.jumpTick = s;   // already flying
+		o.plan.jumpTick = ground ? -1 : std::max(s, T - jumpLead);   // (starting in the air: after landing, if it does)
 		o.plan.dodge = dodge;
-		o.plan.doubleJump = doubleJump && !dodge;
+		o.plan.doubleJump = doubleJump && !dodge && !jumpShot;
 		o.plan.dodgeLead = ground ? 14 : 8;
+		o.plan.power = power;
 		o.aimPt = aimPt;
 		o.jumpLead = jumpLead;
 		o.reach = reach;
 		return true;
 	};
 
+	// Shot-type lock (the rulebook in Mechanics.h): the engine plays the mechanic you went for, the way you went for it.
+	// A ground shot stays a ground shot, an aerial stays a real aerial (flown, not a jump-and-tip), a flip reset
+	// still gets the reset and uses the flip, however early it starts.
+	auto styleOk = [&](const SimRun& r) {
+		if (r.touchTick < 0) return false;   // it never touched the ball: whatever happened next isn't the engine's shot
+		if (!real.valid) return true;
+		return Mechanics::SameMechanic(real, fr, r.shot, r.frames, s);
+	};
+	auto styledQuality = [&](const SimRun& r) { return Quality(r, ref) - (styleOk(r) ? 0.0f : 100000.0f); };
+
 	struct Tried { Option o; SimRun run; float q; };
 	std::vector<Tried> tried;
 	auto tryOption = [&](const Option& o) {
 		SimRun r = Run(arena.get(), car, fr, s, o.plan, maxTick, ref, 5000 + out.tries);
 		out.tries++;
-		float q = Quality(r);
+		float q = styledQuality(r);
 		r.frames.clear();
 		r.frames.shrink_to_fit();
+		r.ctl.clear();
+		r.ctl.shrink_to_fit();
 		tried.push_back({ o, std::move(r), q });
 	};
 
 	// ---- Coarse: when to meet it, and how to get there (aimed at the middle, up high) ----
-	const int budget = depth >= 2 ? 1500 : 320;   // the from-scratch bot's share of the sim runs
+	int budget = depth >= 2 ? 4500 : 1000;   // the from-scratch bot's share of the sim runs
 	std::vector<Option> coarse;
 	for (int T = s + 12; T <= s + horizon; T += 4)
-		for (int jl : { 24, 48, 84, 120, 168, 230 })
-			for (int v = 0; v < 2; v++)
+		for (int jl : { 12, 18, 24, 48, 84, 120, 168, 230 })
+			for (int v = 0; v < 4; v++)
 			{
 				Option o;
-				if (!makePlan(T, aims[0], 150.0f, jl, v == 1, true, o)) continue;
+				if (!makePlan(T, aims[0], 150.0f, jl, (v & 1) == 1, true, o, (v & 2) != 0)) continue;
 				bool dup = false;
 				for (const Option& c : coarse)
-					if (c.plan.arriveTick == o.plan.arriveTick && c.plan.jumpTick == o.plan.jumpTick && c.plan.dodge == o.plan.dodge) { dup = true; break; }
+					if (c.plan.arriveTick == o.plan.arriveTick && c.plan.jumpTick == o.plan.jumpTick && c.plan.dodge == o.plan.dodge && c.plan.power == o.plan.power) { dup = true; break; }
 				if (!dup) coarse.push_back(o);
 			}
 	if (coarse.empty()) { out.status = EngineStatus::NoBall; out.ms = elapsed() * 1000.0f; return out; }
 	// Spread the coarse budget over the whole range of meeting times
 	int coarseBudget = budget * 40 / 100;
 	int step = std::max(1, static_cast<int>(coarse.size()) / std::max(1, coarseBudget));
-	for (size_t i = 0; i < coarse.size() && !stop(); i += step) tryOption(coarse[i]);
+	{
+		// Time the first few runs on this machine, and shrink the whole search to fit the clock if it's slow
+		auto c0 = std::chrono::steady_clock::now();
+		int timed = 0;
+		for (size_t i = 0; i < coarse.size() && timed < 12 && !stop(); i += step, timed++) tryOption(coarse[i]);
+		float perRun = std::chrono::duration<float>(std::chrono::steady_clock::now() - c0).count() / std::max(1, timed);
+		float planned = static_cast<float>(budget + (depth >= 2 ? 2500 + 4000 : 500 + 700) + 250);
+		scale = std::clamp(maxSeconds * 0.6f / std::max(1e-4f, perRun * planned), 0.12f, 1.0f);
+		budget = std::max(120, static_cast<int>(budget * scale));
+		coarseBudget = budget * 40 / 100;
+		size_t start = static_cast<size_t>(timed) * step;
+		step = std::max(1, static_cast<int>(coarse.size()) / std::max(1, coarseBudget));
+		for (size_t i = start; i < coarse.size() && !stop(); i += step) tryOption(coarse[i]);
+	}
 
 	// ---- Aim correction on the best few ("shooting"): play it, see where the ball really crosses the goal line,
 	// move the aim point by the miss, play it again. Each line, aimed at the middle up high and both top corners. ----
 	std::mt19937 rng(777u + static_cast<unsigned>(n));
 	auto pick = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
 	auto sameOption = [](const Option& a, const Option& b) {
-		return a.plan.arriveTick == b.plan.arriveTick && a.plan.jumpTick == b.plan.jumpTick && a.plan.dodge == b.plan.dodge &&
+		return a.plan.arriveTick == b.plan.arriveTick && a.plan.jumpTick == b.plan.jumpTick && a.plan.dodge == b.plan.dodge && a.plan.power == b.plan.power &&
 			(a.aimPt - b.aimPt).Length() < 15.0f && std::fabs(a.reach - b.reach) < 1.0f;
 	};
 	auto seenOption = [&](const Option& o) { for (const Tried& t : tried) if (sameOption(t.o, o)) return true; return false; };
@@ -537,7 +611,7 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 			next.x = std::clamp(next.x, -2500.0f, 2500.0f);
 			next.z = std::clamp(next.z, -800.0f, 2500.0f);
 			Option o2;
-			if (!makePlan(o.plan.arriveTick, next, o.reach, o.jumpLead, o.plan.dodge, o.plan.doubleJump, o2)) break;
+			if (!makePlan(o.plan.arriveTick, next, o.reach, o.jumpLead, o.plan.dodge, o.plan.doubleJump, o2, o.plan.power)) break;
 			o = o2;
 		}
 	};
@@ -546,7 +620,7 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 		for (int i = 0; i < static_cast<int>(tried.size()); i++)
 			if (tried[i].run.touchTick >= 0 && tried[i].run.shot.valid && tried[i].run.shot.shotDir.y * gs > 0.2f) order.push_back(i);
 		std::sort(order.begin(), order.end(), [&](int a, int b) { return tried[a].q > tried[b].q; });
-		int topK = depth >= 2 ? 24 : 8;
+		int topK = depth >= 2 ? 40 : 16;
 		std::vector<Option> bases;
 		for (int i = 0; i < static_cast<int>(order.size()) && static_cast<int>(bases.size()) < topK; i++) bases.push_back(tried[order[i]].o);
 		for (const Option& b : bases)
@@ -554,7 +628,7 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 			{
 				if (stop() || out.tries >= budget) break;
 				Option o;
-				if (!makePlan(b.plan.arriveTick, aims[w], b.reach, b.jumpLead, b.plan.dodge, b.plan.doubleJump, o)) continue;
+				if (!makePlan(b.plan.arriveTick, aims[w], b.reach, b.jumpLead, b.plan.dodge, b.plan.doubleJump, o, b.plan.power)) continue;
 				correct(o, aims[w], 4);
 			}
 	}
@@ -571,56 +645,49 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 		int T = par.plan.arriveTick, jl = par.jumpLead;
 		Vec aimPt = par.aimPt;
 		float reach = par.reach;
-		bool dodge = par.plan.dodge, dj = par.plan.doubleJump;
-		switch (pick(0, 4))
+		bool dodge = par.plan.dodge, dj = par.plan.doubleJump, power = par.plan.power;
+		switch (pick(0, 5))
 		{
 		case 0: aimPt = aimPt + Vec(pick(-4, 4) * 40.0f, 0, pick(-4, 4) * 40.0f); break;
 		case 1: T += pick(-8, 8); break;
 		case 2: reach = std::clamp(reach + pick(-3, 3) * 10.0f, 110.0f, 200.0f); break;
 		case 3: jl = std::max(12, jl + pick(-24, 24)); break;
 		case 4: dodge = !dodge; dj = !dodge; break;
+		case 5: power = !power; break;
 		}
 		Option o;
-		if (!makePlan(T, aimPt, reach, jl, dodge, dj, o)) continue;
+		if (!makePlan(T, aimPt, reach, jl, dodge, dj, o, power)) continue;
 		if (!seenOption(o)) tryOption(o);
 	}
 
-	// ---- Second engine: your own line, optimized. Starting from what you pressed in the 1.5 s before your touch,
-	// it reshapes the stick, steering, throttle and boost over time and moves your jumps, keeping whatever plays
-	// out best (cross-entropy search). It finds the best version of the shot you went for. ----
-	struct CemTry { std::vector<CarControls> ctl; SimRun run; float q; };
-	std::vector<CemTry> cemBest;   // the best few, inputs kept
-	if (real.valid && !stop())
-	{
-		std::vector<CarControls> realCtl(n);
-		for (int i = 0; i < n; i++)
-		{
-			const Frame& f = fr[i];
-			realCtl[i].throttle = f.throttle; realCtl[i].steer = f.steer; realCtl[i].pitch = f.pitch; realCtl[i].yaw = f.yaw;
-			realCtl[i].roll = f.roll; realCtl[i].jump = f.jump; realCtl[i].boost = f.boost; realCtl[i].handbrake = f.handbrake;
-		}
-		const int k = real.touchTick;
-		const int w0 = std::max(s, k - 180), w1 = std::min(n - 1, k + 24);
+	// ---- Refining a line (cross-entropy search): starting from a set of inputs, it reshapes the stick, steering,
+	// throttle and boost over time and moves the jumps, keeping whatever plays out best. Run on your own line
+	// (the best version of the shot you went for) and on the from-scratch bot's best lines (polishing them
+	// toward a 4 or 5: more lift, more power, a cleaner line-up). ----
+	struct CemTry { std::vector<CarControls> ctl; SimRun run; float q; int source; };   // source 0 your line, 1 the bot's
+	std::vector<CemTry> cemBest;   // the best few goals, inputs kept
+	std::mt19937 crng(4242u + static_cast<unsigned>(n));
+	std::normal_distribution<float> N01(0.0f, 1.0f);
+	auto refine = [&](const std::vector<CarControls>& seed, int touch, int cemBudget, int source) {
+		const int m = static_cast<int>(seed.size());
+		const int w0 = std::max(s, touch - 180), w1 = std::min(m - 1, touch + 24);
+		if (w1 - w0 < 20) return;
 		const int knotGap = 15, K = (w1 - w0) / knotGap + 2;
-		std::vector<std::pair<int, int>> jumps;   // your jump presses in the window: start, length
+		std::vector<std::pair<int, int>> jumps;   // jump presses in the window: start, length
 		for (int i = std::max(w0, 1); i < w1 && jumps.size() < 4; i++)
-			if (fr[i].jump && !fr[i - 1].jump) { int len = 0; while (i + len < n && fr[i + len].jump) len++; jumps.push_back({ i, len }); }
+			if (seed[i].jump && !seed[i - 1].jump) { int len = 0; while (i + len < m && seed[i + len].jump) len++; jumps.push_back({ i, len }); }
 		const int D = K * 6 + static_cast<int>(jumps.size());
 		std::vector<float> mean(D, 0.0f), sigma(D);
 		for (int d = 0; d < D; d++) sigma[d] = d >= K * 6 ? 6.0f : (d % 6 == 5 ? 0.6f : 0.35f);
 		auto build = [&](const std::vector<float>& x) {
-			std::vector<CarControls> c = realCtl;
+			std::vector<CarControls> c = seed;
+			for (size_t j = 0; j < jumps.size(); j++)
+				for (int i = jumps[j].first; i < std::min(m, jumps[j].first + jumps[j].second); i++) c[i].jump = false;
 			for (size_t j = 0; j < jumps.size(); j++)
 			{
-				int at = jumps[j].first, len = jumps[j].second;
-				for (int i = at; i < std::min(n, at + len); i++) c[i].jump = false;
-			}
-			for (size_t j = 0; j < jumps.size(); j++)
-			{
-				int at = jumps[j].first + static_cast<int>(std::lround(x[K * 6 + j])), len = jumps[j].second;
-				at = std::clamp(at, s + 1, n - 2);
-				for (int i = at; i < std::min(n, at + len); i++) c[i].jump = true;
-				if (at - 1 >= 0 && c[at - 1].jump && at - 1 >= w0) c[at - 1].jump = false;   // keep it a fresh press
+				int at = std::clamp(jumps[j].first + static_cast<int>(std::lround(x[K * 6 + j])), s + 1, m - 2), len = jumps[j].second;
+				for (int i = at; i < std::min(m, at + len); i++) c[i].jump = true;
+				if (at - 1 >= w0 && c[at - 1].jump) c[at - 1].jump = false;   // keep it a fresh press
 			}
 			for (int i = w0; i < w1; i++)
 			{
@@ -640,20 +707,18 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 			return c;
 		};
 		Bot::Plan none;
-		none.arriveTick = k + 120;
-		const int cemBudget = depth >= 2 ? 1500 : 320, pop = depth >= 2 ? 48 : 32, elites = 6;
-		std::mt19937 crng(4242u + static_cast<unsigned>(n));
-		std::normal_distribution<float> N01(0.0f, 1.0f);
+		none.arriveTick = touch + 120;
+		const int pop = depth >= 2 ? 64 : 40, elites = 8;
 		int cemTries = 0;
 		std::vector<float> bestX(D, 0.0f);
 		float bestQ = -1e12f;
 		while (cemTries < cemBudget && !stop())
 		{
 			std::vector<std::pair<float, std::vector<float>>> gen;
-			for (int m = 0; m < pop && cemTries < cemBudget && !stop(); m++)
+			for (int mm = 0; mm < pop && cemTries < cemBudget && !stop(); mm++)
 			{
 				std::vector<float> x(D);
-				if (m == 0) x = bestX;   // keep the best so far in every round
+				if (mm == 0) x = bestX;   // keep the best so far in every round
 				else
 					for (int d = 0; d < D; d++)
 					{
@@ -662,19 +727,18 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 					}
 				std::vector<CarControls> c = build(x);
 				// Each try from a slightly different start, so the search favors lines that hold up, not lucky ones
-				SimRun r = Run(arena.get(), car, fr, s, none, maxTick, ref, 1000 + cemTries, &c);
+				SimRun r = Run(arena.get(), car, fr, s, none, maxTick, ref, 1000 + out.tries, &c);
 				cemTries++;
 				out.tries++;
-				float q = Quality(r);
+				float q = styledQuality(r);
 				if (q > bestQ) { bestQ = q; bestX = x; }
 				if (r.wentIn)
 				{
-					// Keep the best few goals with their inputs for the final check
 					r.frames.clear();
 					r.frames.shrink_to_fit();
-					cemBest.push_back({ std::move(c), std::move(r), q });
+					cemBest.push_back({ std::move(c), std::move(r), q, source });
 					std::sort(cemBest.begin(), cemBest.end(), [](const CemTry& a, const CemTry& b) { return a.q > b.q; });
-					if (cemBest.size() > 16) cemBest.pop_back();
+					if (cemBest.size() > 40) cemBest.pop_back();
 				}
 				gen.push_back({ q, std::move(x) });
 			}
@@ -682,14 +746,41 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 			std::sort(gen.begin(), gen.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
 			for (int d = 0; d < D; d++)
 			{
-				float m = 0, v = 0;
-				for (int e = 0; e < elites; e++) m += gen[e].second[d];
-				m /= elites;
-				for (int e = 0; e < elites; e++) v += (gen[e].second[d] - m) * (gen[e].second[d] - m);
-				mean[d] = m;
+				float mu = 0, v = 0;
+				for (int e = 0; e < elites; e++) mu += gen[e].second[d];
+				mu /= elites;
+				for (int e = 0; e < elites; e++) v += (gen[e].second[d] - mu) * (gen[e].second[d] - mu);
+				mean[d] = mu;
 				float floorSigma = d >= K * 6 ? 1.0f : 0.04f;
 				sigma[d] = std::max(floorSigma, 0.9f * std::sqrt(v / elites));
 			}
+		}
+	};
+	// Your line
+	if (real.valid && !stop())
+	{
+		std::vector<CarControls> realCtl(n);
+		for (int i = 0; i < n; i++)
+		{
+			const Frame& f = fr[i];
+			realCtl[i].throttle = f.throttle; realCtl[i].steer = f.steer; realCtl[i].pitch = f.pitch; realCtl[i].yaw = f.yaw;
+			realCtl[i].roll = f.roll; realCtl[i].jump = f.jump; realCtl[i].boost = f.boost; realCtl[i].handbrake = f.handbrake;
+		}
+		refine(realCtl, real.touchTick, std::max(60, static_cast<int>((depth >= 2 ? 2500 : 500) * scale)), 0);
+	}
+	// The bot's best two lines that reached the ball, polished
+	{
+		std::vector<int> order;
+		for (int i = 0; i < static_cast<int>(tried.size()); i++) if (tried[i].run.touchTick >= 0) order.push_back(i);
+		std::sort(order.begin(), order.end(), [&](int a, int b) { return tried[a].q > tried[b].q; });
+		for (int i = 0; i < std::min<int>(2, static_cast<int>(order.size())) && !stop(); i++)
+		{
+			SimRun seedRun = Run(arena.get(), car, fr, s, tried[order[i]].o.plan, maxTick, ref, 0);
+			out.tries++;
+			if (seedRun.touchTick < 0 || seedRun.ctl.empty()) continue;
+			std::vector<CarControls> seed = seedRun.ctl;
+			seed.resize(std::max<size_t>(seed.size(), static_cast<size_t>(maxTick) + 1));
+			refine(seed, seedRun.touchTick, std::max(40, static_cast<int>((depth >= 2 ? 2000 : 350) * scale)), 1);
 		}
 	}
 
@@ -699,12 +790,23 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 	for (int i = 0; i < static_cast<int>(tried.size()); i++) if (tried[i].run.wentIn) picks.push_back({ tried[i].q, i, -1 });
 	for (int i = 0; i < static_cast<int>(cemBest.size()); i++) picks.push_back({ cemBest[i].q, -1, i });
 	std::sort(picks.begin(), picks.end(), [](const Pick& a, const Pick& b) { return a.q > b.q; });
-	auto replay = [&](const Pick& pk, int nudge) {
-		if (pk.botIdx >= 0) return Run(arena.get(), car, fr, s, tried[pk.botIdx].o.plan, maxTick, ref, nudge);
+	// shift: a human's timing is never frame-perfect, so the checks also jump / press everything a tick or two early or late
+	auto replay = [&](const Pick& pk, int nudge, int shift = 0) {
+		if (pk.botIdx >= 0)
+		{
+			Bot::Plan p = tried[pk.botIdx].o.plan;
+			if (p.jumpTick >= 0) p.jumpTick = std::max(s, p.jumpTick + shift);
+			return Run(arena.get(), car, fr, s, p, maxTick, ref, nudge);
+		}
 		Bot::Plan none;
 		none.arriveTick = (real.valid ? real.touchTick : s) + 120;
-		return Run(arena.get(), car, fr, s, none, maxTick, ref, nudge, &cemBest[pk.cemIdx].ctl);
+		if (shift == 0) return Run(arena.get(), car, fr, s, none, maxTick, ref, nudge, &cemBest[pk.cemIdx].ctl);
+		const std::vector<CarControls>& c0 = cemBest[pk.cemIdx].ctl;
+		std::vector<CarControls> c = c0;
+		for (int i = s; i < static_cast<int>(c.size()); i++) { int j = std::clamp(i - shift, s, static_cast<int>(c0.size()) - 1); c[i] = c0[j]; }
+		return Run(arena.get(), car, fr, s, none, maxTick, ref, nudge, &c);
 	};
+	static const int kShift[kNudges] = { -2, 2, -1, 1, 0, 0 };
 	// Your takeoff (only if you started on the ground) and boost (from the button, since free play refills it)
 	const bool startedGrounded = ShotGeometry::OnSurface(fr[s]);
 	int yourTakeoff = -1;
@@ -719,19 +821,22 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 	int checked = 0;
 	for (const Pick& pk : picks)
 	{
-		if (checked++ >= (depth >= 2 ? 40 : 20) || stop()) break;
+		if (checked >= (depth >= 2 ? 150 : 60) || cancelled() || (hardStop() && checked >= 3)) break;
+		if (pk.q < -50000.0f) continue;   // not the kind of shot you went for
+		checked++;
 		int expect = pk.botIdx >= 0 ? tried[pk.botIdx].run.grade.overall : cemBest[pk.cemIdx].run.grade.overall;
+		if (expect <= out.realGrade) continue;   // only lines that beat your shot
 		int held = 0;
 		for (int j = 1; j <= kNudges; j++)
 		{
-			SimRun r = replay(pk, 300 + j);
+			SimRun r = replay(pk, 300 + j, kShift[j - 1]);
 			out.tries++;
 			held += r.wentIn && r.grade.overall >= expect - 1;
 			if (j - held > 2) break;
 		}
 		if (held < 4) continue;
 		SimRun win = replay(pk, 0);
-		if (!win.wentIn) continue;
+		if (!win.wentIn || win.grade.overall <= out.realGrade || !styleOk(win)) continue;
 		out.status = EngineStatus::Found;
 		out.grade = win.grade.overall;
 		out.wentIn = win.wentIn;
@@ -744,27 +849,65 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 		win.boostUsed = boostTicks(win.frames, s, win.touchTick);
 		if (!startedGrounded) win.takeoff = -1;
 
-		// The cue: the biggest differences from what you did
-		std::vector<std::string> parts;
+		// The cue: the one or two biggest differences from what you did, in words (the numbers are on the hover)
+		struct Diff { float size; std::string say; };
+		std::vector<Diff> diffs;
+		auto amount = [](float size) { return size >= 3.0f ? "a lot " : (size >= 1.6f ? "" : "a bit "); };
+		// Where on the ball the car hits it (relative to the ball's center, in the car's frame at contact)
+		auto contact = [](const Frame& f, float& under, float& side) {
+			RotMat R = Angle(f.carYaw * kU2R, f.carPitch * kU2R, f.carRoll * kU2R).ToRotMat();
+			Vec rel = Vec(f.touchX - f.ballX, f.touchY - f.ballY, f.touchZ - f.ballZ);
+			under = -rel.z; side = rel.Dot(R.right);
+		};
 		if (real.valid)
 		{
 			const Frame& yh = fr[real.touchTick];
-			if (win.takeoff >= 0 && yourTakeoff >= 0 && std::abs(win.takeoff - yourTakeoff) >= 10)
-				parts.push_back(std::format("take off {} {}", Secs(std::abs(win.takeoff - yourTakeoff)), win.takeoff < yourTakeoff ? "earlier" : "later"));
-			if (win.takeoff >= 0 && yourTakeoff < 0) parts.push_back("jump for it");
-			if (win.takeoff < 0 && yourTakeoff >= 0) parts.push_back("stay on the ground");
-			if (std::abs(win.touchTick - real.touchTick) >= 10)
-				parts.push_back(std::format("meet it {} {}", Secs(std::abs(win.touchTick - real.touchTick)), win.touchTick < real.touchTick ? "sooner" : "later"));
-			if (std::fabs(hit.ballZ - yh.ballZ) >= 100.0f)
-				parts.push_back(std::format("{:.0f} {}", std::fabs(hit.ballZ - yh.ballZ), hit.ballZ > yh.ballZ ? "higher" : "lower"));
-			if (win.boostUsed - yourBoost >= 12.0f) parts.push_back("more boost");
-			if (yourBoost - win.boostUsed >= 12.0f) parts.push_back("less boost");
-			if (win.shot.shotSpeed - real.shotSpeed >= 350.0f) parts.push_back("hit it harder");
+			if (win.takeoff >= 0 && yourTakeoff >= 0 && std::abs(win.takeoff - yourTakeoff) >= 6)
+			{
+				float sz = std::abs(win.takeoff - yourTakeoff) / 8.0f;
+				diffs.push_back({ sz, std::format("jump {}{}", amount(sz), win.takeoff < yourTakeoff ? "earlier" : "later") });
+			}
+			if (win.takeoff >= 0 && yourTakeoff < 0) diffs.push_back({ 5.0f, "jump for it" });
+			if (win.takeoff < 0 && yourTakeoff >= 0) diffs.push_back({ 5.0f, "stay on the ground" });
+			if (hit.touch && yh.touch)
+			{
+				float eu, es, yu, ys;
+				contact(hit, eu, es); contact(yh, yu, ys);
+				if (std::fabs(eu - yu) >= 15.0f)
+				{
+					float sz = std::fabs(eu - yu) / 20.0f;
+					diffs.push_back({ sz, eu > yu ? std::format("get {}more under it", amount(sz)) : std::format("hit it {}flatter", amount(sz)) });
+				}
+				if (std::fabs(es - ys) >= 15.0f)
+				{
+					float sz = std::fabs(es - ys) / 20.0f;
+					diffs.push_back({ sz, std::format("hit it {}more on its {} side", amount(sz), es > ys ? "right" : "left") });
+				}
+			}
+			if (std::abs(win.touchTick - real.touchTick) >= 8)
+			{
+				float sz = std::abs(win.touchTick - real.touchTick) / 10.0f;
+				diffs.push_back({ sz, std::format("meet it {}{}", amount(sz), win.touchTick < real.touchTick ? "sooner" : "later") });
+			}
+			if (std::fabs(win.boostUsed - yourBoost) >= 10.0f)
+			{
+				float sz = std::fabs(win.boostUsed - yourBoost) / 15.0f;
+				diffs.push_back({ sz, win.boostUsed > yourBoost ? std::format("{}more boost", amount(sz)) : std::format("{}less boost", amount(sz)) });
+			}
+			if (win.shot.shotSpeed - real.shotSpeed >= 300.0f)
+			{
+				float sz = (win.shot.shotSpeed - real.shotSpeed) / 400.0f;
+				diffs.push_back({ sz, std::format("hit it {}harder", amount(sz)) });
+			}
 		}
-		std::string kind = pk.botIdx >= 0 ? "Engine" : "Engine (your line, sharpened)";
+		std::sort(diffs.begin(), diffs.end(), [](const Diff& a, const Diff& b) { return a.size > b.size; });
+		std::vector<std::string> parts;
+		for (const Diff& d : diffs) if (parts.size() < 2 && d.size >= 0.75f) parts.push_back(d.say);
+		bool yourLine = pk.botIdx < 0 && cemBest[pk.cemIdx].source == 0;
+		std::string kind = yourLine ? "Engine (your line, sharpened)" : "Engine";
 		std::string joined;
-		for (size_t i = 0; i < parts.size() && i < 3; i++) joined += (i == 0 ? "" : (i + 1 == std::min<size_t>(parts.size(), 3) ? " and " : ", ")) + parts[i];
-		if (joined.empty()) joined = std::format("meets it {} in, {:.0f} high", Secs(win.touchTick - s), hit.ballZ);
+		for (size_t i = 0; i < parts.size(); i++) joined += (i == 0 ? "" : " and ") + parts[i];
+		if (joined.empty()) joined = "same idea, cleaner contact";
 		out.cue = kind + ": " + joined;
 		if (!out.cue.empty()) out.cue[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(out.cue[0])));
 
@@ -775,21 +918,63 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 			const Frame& yh = fr[real.touchTick];
 			lines += std::format("Meets the ball at {}, {:.0f} high (you: {}, {:.0f} high).\n", Secs(win.touchTick - s), hit.ballZ, Secs(real.touchTick - s), yh.ballZ);
 			lines += std::format("Ball off the hit at {} (you: {}).\n", Units::Speed(win.shot.shotSpeed), Units::Speed(real.shotSpeed));
+			if (hit.touch && yh.touch)
+			{
+				float eu, es, yu, ys;
+				contact(hit, eu, es); contact(yh, yu, ys);
+				lines += std::format("Contact {:.0f} under the ball's center and {:.0f} {} (you: {:.0f} under, {:.0f} {}).\n",
+					eu, std::fabs(es), es >= 0 ? "right" : "left", yu, std::fabs(ys), ys >= 0 ? "right" : "left");
+			}
 		}
 		lines += std::format("Boost used: {:.0f} (you: {:.0f}).\n", win.boostUsed, yourBoost);
 		out.compare = lines;
 		out.detail = std::format("{}Would be a {} ({}).\n{}It plays perfect inputs from {} into your rep: it shows the ceiling for this shot. "
-			"It scored from {} of {} slightly different starts.", lines, out.grade, out.gradeWhy,
-			pk.botIdx >= 0 ? "The engine played this from scratch (none of your inputs). " : "The engine started from your own inputs and reshaped them. ",
+			"It scored from {} of {} slightly different starts, with the timing a tick or two early or late.", lines, out.grade, out.gradeWhy,
+			yourLine ? "The engine started from your own inputs and reshaped them. " : "The engine played this from scratch (none of your inputs). ",
 			Secs(s - (real.valid ? real.startTick : 0)), held, kNudges);
 		out.frames = std::move(win.frames);
 		break;
 	}
 	if (out.status != EngineStatus::Found)
 		out.status = (cancel && cancel->load()) ? EngineStatus::Cancelled : EngineStatus::NothingFound;
-	int touched = 0, goals = 0;
-	for (const Tried& t : tried) { touched += t.run.touchTick >= 0; goals += t.run.wentIn; }
-	out.note = std::format("{} lines tried: {} touched the ball, {} scored. {:.0f} ms.", tried.size(), touched, goals, elapsed() * 1000.0f);
+	int touched = 0, goals = 0, high = 0;
+	for (const Tried& t : tried) { touched += t.run.touchTick >= 0; goals += t.run.wentIn; high += t.run.wentIn && t.run.grade.overall >= 4; }
+	for (const CemTry& c : cemBest) high += c.run.grade.overall >= 4;
+	out.note = std::format("{} lines tried: {} touched the ball, {} scored, {} as a 4 or 5. {:.1f} s.{}", tried.size(), touched, goals, high, elapsed(),
+		scale < 0.99f ? std::format(" This computer is slower, so the search was sized down to {:.0f}% to fit the time.", scale * 100.0f) : std::string());
 	out.ms = elapsed() * 1000.0f;
 	return out;
+}
+
+static EngineResult LineOnce(const std::vector<Frame>& fr, bool realIn, bool floorBeforeGoal, int eventTick,
+	const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds, int startTick, int depth);
+
+EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorBeforeGoal, int eventTick,
+	const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds, int startTick, int depth)
+{
+	if (depth < 2) return LineOnce(fr, realIn, floorBeforeGoal, eventTick, ref, carBody, cancel, maxSeconds, startTick, 1);
+	// Thinking harder: the normal search first, then the big one, so it never comes back with less
+	auto t0 = std::chrono::steady_clock::now();
+	EngineResult quick = LineOnce(fr, realIn, floorBeforeGoal, eventTick, ref, carBody, cancel, maxSeconds * 0.25f, startTick, 1);
+	float used = std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count();
+	if (cancel && cancel->load()) return quick;
+	EngineResult deep = LineOnce(fr, realIn, floorBeforeGoal, eventTick, ref, carBody, cancel, std::max(1.0f, maxSeconds - used), startTick, 2);
+	bool qf = quick.status == EngineStatus::Found, df = deep.status == EngineStatus::Found;
+	EngineResult& best = (df && (!qf || deep.grade > quick.grade)) ? deep : quick;
+	best.tries = quick.tries + deep.tries;
+	return std::move(best);
+}
+
+static EngineResult LineOnce(const std::vector<Frame>& fr, bool realIn, bool floorBeforeGoal, int eventTick,
+	const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds, int startTick, int depth)
+{
+	const int n = static_cast<int>(fr.size());
+	if (n < 4) { EngineResult r; r.status = EngineStatus::NoBall; return r; }
+	if (startTick >= 0) return LineAt(fr, realIn, floorBeforeGoal, eventTick, ref, carBody, cancel, maxSeconds, startTick, depth);
+
+	// Default start: half a second before your touch, so the engine plays the shot you were already lined up for
+	// ("Engine from here" in the viewer picks any other moment, e.g. the start of the rep for a different setup)
+	ShotAnalysis real = ShotGeometry::Analyze(fr);
+	int s = real.valid ? std::max(real.startTick, real.touchTick - 60) : 1;
+	return LineAt(fr, realIn, floorBeforeGoal, eventTick, ref, carBody, cancel, maxSeconds, s, depth);
 }

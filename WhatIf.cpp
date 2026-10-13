@@ -2,6 +2,7 @@
 #include "WhatIf.h"
 #include "Coach.h"
 #include "Grader.h"
+#include "Mechanics.h"
 #include "Segmenter.h"
 #include "ShotGeometry.h"
 
@@ -422,7 +423,10 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 {
 	auto t0 = std::chrono::steady_clock::now();
 	auto elapsed = [&]() { return std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count(); };
-	auto stop = [&]() { return (cancel && cancel->load()) || elapsed() > maxSeconds; };
+	// The search gets about two thirds of the time; the rest is kept for checking its best finds hold up
+	auto cancelled = [&]() { return cancel && cancel->load(); };
+	auto stop = [&]() { return cancelled() || elapsed() > maxSeconds * 0.65f; };
+	auto hardStop = [&]() { return cancelled() || elapsed() > maxSeconds; };
 
 	WhatIfResult out;
 	out.depth = depth;
@@ -458,7 +462,7 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 	SimRun base;
 	for (int start : { plan.s, plan.closer })
 	{
-		if (start < 0 || stop()) continue;
+		if (start < 0 || hardStop()) continue;
 		SimRun b0 = Run(arena.get(), car, fr, start, realCtl, maxTick, ref, 0, baseKey);
 		int m = matches(b0) ? 1 : 0;
 		out.tries++;
@@ -897,7 +901,9 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 	// ---- Pick: a higher grade than both your shot and the sim's replay of it (a miss has to go in),
 	// then the smaller change, then the nicer shot. It has to keep working from nudged starts, or it's luck. ----
 	const int toBeat = std::max(base.grade.overall, realGrade.overall);
-	auto good = [&](const SimRun& r) { return !r.keyMissed && r.grade.overall > toBeat && (r.wentIn || realIn); };
+	// ...and it has to be the mechanic you attempted, done the same way (the rulebook's lock): no "it scores if you skip the reset"
+	static const std::vector<Frame> kNoFrames;
+	auto good = [&](const SimRun& r) { return !r.keyMissed && r.grade.overall > toBeat && (r.wentIn || realIn) && Mechanics::SameMechanic(real, fr, r.shot, kNoFrames, s); };
 	std::vector<int> better;
 	for (int i = 0; i < static_cast<int>(tried.size()); i++) if (good(tried[i].run)) better.push_back(i);
 	std::sort(better.begin(), better.end(), [&](int a, int b) {
@@ -909,7 +915,8 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 	int checked = 0;
 	for (int bi : better)
 	{
-		if (checked++ >= (depth >= 2 ? 80 : 12) || stop()) break;
+		if (checked >= (depth >= 2 ? 80 : 12) || cancelled() || (hardStop() && checked >= 3)) break;
+		checked++;
 		const Tried& t = tried[bi];
 		Inputs in;
 		build(t.e, in);
@@ -932,6 +939,7 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 		}
 		if (held < kNudgesNeeded) continue;
 		SimRun win = runEdit(in, 0);
+		if (!good(win)) continue;   // the line it shows has to pass too, not just its nudged copies
 		std::string lines;
 		describe(t.e, out.cue, lines);
 		out.status = WhatIfStatus::Found;
@@ -950,7 +958,7 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 		break;
 	}
 	// Stage 2 with no goal found: a way into the key moment that fixes what the coach flagged is still worth showing
-	if (out.status != WhatIfStatus::Found && keyMode && fixChecks && !fixChecks->empty() && !stop())
+	if (out.status != WhatIfStatus::Found && keyMode && fixChecks && !fixChecks->empty() && !hardStop())
 	{
 		Coach::Values realV = Coach::Measure(fr, real);
 		std::vector<int> ways;
@@ -960,7 +968,7 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 			if (std::fabs(tried[a].e.Cost() - tried[b].e.Cost()) > 0.01f) return tried[a].e.Cost() < tried[b].e.Cost();
 			return tried[a].q > tried[b].q; });
 		auto fixesAll = [&](const SimRun& r, Coach::Values& v) {
-			if (r.keyMissed) return false;
+			if (r.keyMissed || !Mechanics::SameMechanic(real, fr, r.shot, kNoFrames, s)) return false;
 			v = Coach::Measure(r.frames, r.shot);
 			for (int c : *fixChecks) if (v[c] < 0 || Coach::Fires(c, v[c])) return false;
 			return true;
@@ -968,7 +976,7 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 		int looked = 0;
 		for (int wi : ways)
 		{
-			if (looked++ >= (depth >= 2 ? 60 : 30) || stop()) break;
+			if (looked++ >= (depth >= 2 ? 60 : 30) || hardStop()) break;
 			Inputs in;
 			build(tried[wi].e, in);
 			SimRun r = runEdit(in, 0);
