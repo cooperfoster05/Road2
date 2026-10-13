@@ -24,8 +24,9 @@ enum class WhatIfStatus
 };
 
 // Where the change happens: at the shot (stage 1), or on the way to the moment that set it up (stage 2:
-// getting the reset, the setup touch of a double tap, the first touch of an air dribble)
-enum class WhatIfPoint { Shot, KeyMoment };
+// getting the reset, the setup touch of a double tap, the first touch of an air dribble). Engine (stage 3, Engine.h)
+// isn't a search here: the plugin shows the engine line through the same result slot.
+enum class WhatIfPoint { Shot, KeyMoment, Engine };
 
 struct WhatIfResult
 {

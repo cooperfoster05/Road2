@@ -8,6 +8,7 @@
 #include "third_party/RocketSim/src/RocketSim.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <format>
@@ -201,25 +202,33 @@ namespace
 			}
 			r.frames.push_back(g);
 
-			// After the shot ends, keep a half second for the recovery part of the breakdown
-			if (stopAt >= 0) { if (i + 1 >= stopAt) break; continue; }
-			auto end = [&]() { r.eventTick = i + 1; stopAt = i + 1 + 60; };
-			if (std::fabs(bs.pos.y) > 5215.0f && std::fabs(bs.pos.x) < 893.0f && bs.pos.z < 643.0f)
+			// Like the recorder: a goal ends it (even after a floor bounce); a floor bounce away from you ends the shot,
+			// but the ball is followed while it's still rolling or bouncing toward the net (up to 6 s more)
+			float dirY = bs.vel.y >= 0.0f ? 1.0f : -1.0f;
+			float toLine = 5120.0f - bs.pos.y * dirY;
+			float tLine = std::fabs(bs.vel.y) > 1.0f ? toLine / std::fabs(bs.vel.y) : 1e9f;
+			bool rollingIn = std::fabs(bs.vel.y) > 300.0f && toLine > 0.0f && tLine < 6.0f && std::fabs(bs.pos.x + bs.vel.x * tLine) < 950.0f;
+			if (!r.wentIn && std::fabs(bs.pos.y) > 5215.0f && std::fabs(bs.pos.x) < 893.0f && bs.pos.z < 643.0f)
 			{
 				r.wentIn = true;
 				r.floorFirst = bounced;
-				end();
+				r.eventTick = i + 1;
+				stopAt = i + 1 + 60;
+				continue;
+			}
+			if (stopAt >= 0)
+			{
+				if (i + 1 >= stopAt && (r.wentIn || !rollingIn || i + 1 >= r.eventTick + 900)) break;
 				continue;
 			}
 			if (lastTouch >= 0 && bs.pos.z < 100.0f && bs.vel.z > 0.0f && i + 1 - lastTouch > 10 && !ShotGeometry::BallWithCar(g))
 			{
-				// Off the floor and away from you: over, unless it's rolling in (the recorder waits for those too)
 				bounced = true;
-				bool rollingIn = std::fabs(bs.pos.x) < 1100.0f && std::fabs(bs.vel.y) > 300.0f &&
-					((bs.vel.y > 0 && bs.pos.y > 2500.0f) || (bs.vel.y < 0 && bs.pos.y < -2500.0f));
-				if (!rollingIn) { end(); continue; }
+				r.eventTick = i + 1;
+				stopAt = i + 1 + 60;
+				continue;
 			}
-			if (lastTouch >= 0 && i + 1 - lastTouch > 480) end();
+			if (lastTouch >= 0 && i + 1 - lastTouch > 480) { r.eventTick = i + 1; stopAt = i + 1 + 60; }
 		}
 		if (r.eventTick < 0) r.eventTick = static_cast<int>(r.frames.size()) - 1;
 		r.shot = ShotGeometry::Analyze(r.frames);

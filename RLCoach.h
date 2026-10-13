@@ -253,9 +253,11 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::atomic<bool> uiShowingWhatIf{ false };
 	std::atomic<int> whatIfDepth{ 1 };    // the search running (or last run): 1 normal, 2 deeper
 	std::atomic<int> whatIfRunningPoint{ 0 };   // which what-if is running: WhatIfPoint as an int
+	std::atomic<int> whatIfEngineStart{ -1 };   // where the last engine line took over (-1 = its default start)
 	std::atomic<int> uiWhatIfKeyKind{ -1 };     // stage 2: the breakdown line (SegKind) of the key moment, -1 = none
 	std::string uiWhatIfKeyWhat;                // "the reset", "the setup touch"... (uiSegMutex)
-	void StartWhatIf(int depth = 1, WhatIfPoint point = WhatIfPoint::Shot);   // game thread: searches the rep being watched
+	// game thread: searches the rep being watched (engineStart: where the engine takes over, -1 = its default)
+	void StartWhatIf(int depth = 1, WhatIfPoint point = WhatIfPoint::Shot, int engineStart = -1);
 	void CancelWhatIf();                  // any thread: stops a search and forgets the last result
 	void ViewerShowWhatIf(bool on);       // game thread: play the what-if (or go back to your rep)
 	void PracticeWhatIf();                // game thread: practice from where the what-if starts, its path drawn faintly

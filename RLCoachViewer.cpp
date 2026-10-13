@@ -4,6 +4,7 @@
 #include "bakkesmod/wrappers/includes.h"
 #include "Overlay3D.h"
 #include "UiStyle.h"
+#include "Engine.h"
 
 #include <algorithm>
 #include <cmath>
@@ -480,7 +481,7 @@ void RLCoach::CancelWhatIf()
 	whatIfFile.clear();
 }
 
-void RLCoach::StartWhatIf(int depth, WhatIfPoint point)
+void RLCoach::StartWhatIf(int depth, WhatIfPoint point, int engineStart)
 {
 	if (!viewerActive || viewerFrames.empty() || whatIfBusy || !predictor.Ready()) return;
 	if (viewerShowingWhatIf) ViewerShowWhatIf(false);
@@ -510,13 +511,40 @@ void RLCoach::StartWhatIf(int depth, WhatIfPoint point)
 	whatIfBusy = true;
 	whatIfDepth = depth;
 	whatIfRunningPoint = static_cast<int>(point);
-	whatIfThread = std::thread([this, fr = std::move(fr), item, ref, depth, point, fix]() {
+	if (point == WhatIfPoint::Engine) whatIfEngineStart = engineStart;
+	whatIfThread = std::thread([this, fr = std::move(fr), item, ref, depth, point, fix, engineStart]() {
 		// Below normal priority and capped (3 s, or 20 s searching deeper), so the game never waits on it
 		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 		WhatIfResult r;
 		try
 		{
-			r = WhatIf::Search(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, depth >= 2 ? 20.0f : 4.0f, depth, point, &fix);
+			if (point == WhatIfPoint::Engine)
+			{
+				// Stage 3: the engine line, shown through the same what-if slot (Watch it, Practice it, the pink path)
+				EngineResult e = Engine::Line(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel,
+					depth >= 2 ? 25.0f : 6.0f, engineStart, depth);
+				r.point = WhatIfPoint::Engine;
+				r.depth = depth;
+				r.status = e.status == EngineStatus::Found ? WhatIfStatus::Found
+					: e.status == EngineStatus::NoBall ? WhatIfStatus::NoShot
+					: e.status == EngineStatus::Cancelled ? WhatIfStatus::Cancelled : WhatIfStatus::NothingBetter;
+				r.startTick = e.startTick;
+				r.realGrade = e.realGrade;
+				r.cue = e.cue;
+				r.detail = e.detail;
+				r.grade = e.grade;
+				r.wentIn = e.wentIn;
+				r.gradeWhy = e.gradeWhy;
+				r.held = e.held;
+				r.heldOf = e.heldOf;
+				r.frames = std::move(e.frames);
+				r.eventTick = e.eventTick;
+				r.note = e.note;
+				r.tries = e.tries;
+				r.ms = e.ms;
+			}
+			else
+				r = WhatIf::Search(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, depth >= 2 ? 20.0f : 4.0f, depth, point, &fix);
 		}
 		catch (...)
 		{
@@ -1165,6 +1193,85 @@ void RLCoach::RenderWindow()
 		{
 			ImGui::TextDisabled("%s:", Segmenter::Name(segs[whatIfSeg].kind));
 			whatIfRow(WhatIfPoint::Shot);
+		}
+
+		// ---- Stage 3: the engine line. A bot plays the shot perfectly (none of your inputs), or your own line
+		// reshaped, whichever plays out best. Same Watch it / Practice it as the what-ifs. ----
+		{
+			WhatIfStatus st;
+			std::string cue, detail, file, note;
+			int wGrade = 0, wDepth = 1;
+			bool wIn = false;
+			WhatIfPoint wPoint;
+			{
+				std::lock_guard<std::mutex> lock(whatIfMutex);
+				st = whatIf.status; cue = whatIf.cue; detail = whatIf.detail; file = whatIfFile; note = whatIf.note;
+				wGrade = whatIf.grade; wIn = whatIf.wentIn; wDepth = whatIf.depth; wPoint = whatIf.point;
+			}
+			const bool mine = file == watching && wPoint == WhatIfPoint::Engine;
+			const bool busyHere = whatIfBusy && file == watching && whatIfRunningPoint == static_cast<int>(WhatIfPoint::Engine);
+			const ImVec4 pink(1.0f, 0.55f, 0.85f, 1.0f);
+			auto engineButton = [](const char* label) {
+				ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.22f, 0.55f, 1.0f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.42f, 0.30f, 0.72f, 1.0f));
+				bool clicked = ImGui::SmallButton(label);
+				ImGui::PopStyleColor(2);
+				return clicked;
+			};
+			const int here = static_cast<int>(uiViewerPlayhead.load());
+			ImGui::PushID(7100);
+			if (busyHere)
+			{
+				ImGui::TextDisabled(whatIfDepth >= 2 ? "Engine thinking harder...  (up to about 20 seconds)" : "Engine thinking...  (a few seconds)");
+			}
+			else if (!predictor.Ready())
+			{
+				ImGui::TextDisabled("Engine line  (the simulator is still loading)");
+			}
+			else
+			{
+				if (engineButton("Engine line")) onGame([this]() { StartWhatIf(1, WhatIfPoint::Engine, -1); });
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("A bot plays this shot as well as it can, with perfect inputs: from when the ball starts moving\n"
+						"(or right after your setup touch). It tries meeting the ball at every moment it could, and your own line\n"
+						"reshaped, and keeps whatever scores best. It shows the ceiling for the shot, not what's comfortable.");
+				ImGui::SameLine();
+				if (engineButton(std::format("Engine from here ({:.2f}s)", here / 120.0f).c_str()))
+					onGame([this, here]() { StartWhatIf(1, WhatIfPoint::Engine, here); });
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Same, but the engine takes over your car at the moment you've scrubbed to.");
+				if (mine && st == WhatIfStatus::Found)
+				{
+					ImGui::TextColored(pink, "%s", cue.c_str());
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", detail.c_str());
+					ImGui::SameLine();
+					ImGui::PushStyleColor(ImGuiCol_Text, GradeColor(wGrade));
+					ImGui::Text("-> %d%s", wGrade, wIn ? ", goal" : "");
+					ImGui::PopStyleColor();
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", detail.c_str());
+					bool showing = uiShowingWhatIf;
+					if (ImGui::SmallButton(showing ? "Back to your rep" : "Watch it"))
+						onGame([this, showing]() { ViewerShowWhatIf(!showing); });
+					if (ImGui::IsItemHovered() && !showing)
+						ImGui::SetTooltip("Plays the engine's line with your car. Its path is the pink line; your real one shows in grey while it plays.");
+					ImGui::SameLine();
+					if (ImGui::SmallButton("Practice it")) onGame([this]() { PracticeWhatIf(); });
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Practice from where the engine takes over, with its path drawn faintly to follow.");
+					if (wDepth < 2) { ImGui::SameLine(); if (engineButton("Think harder")) { int es = whatIfEngineStart; onGame([this, es]() { StartWhatIf(2, WhatIfPoint::Engine, es); }); } }
+				}
+				else if (mine && st != WhatIfStatus::None)
+				{
+					ImGui::TextDisabled("%s", st == WhatIfStatus::NoShot ? "Engine: nothing to play from here." : st == WhatIfStatus::Cancelled ? "Engine: stopped."
+						: "Engine: it couldn't find a goal from here either.");
+					if (ImGui::IsItemHovered() && !note.empty()) ImGui::SetTooltip("%s", note.c_str());
+					if (wDepth < 2 && st == WhatIfStatus::NothingBetter)
+					{
+						ImGui::SameLine();
+						if (engineButton("Think harder")) { int es = whatIfEngineStart; onGame([this, es]() { StartWhatIf(2, WhatIfPoint::Engine, es); }); }
+						if (ImGui::IsItemHovered()) ImGui::SetTooltip("About 5x more tries. Takes up to about 20 seconds in the background.");
+					}
+				}
+			}
+			ImGui::PopID();
 		}
 
 		{
