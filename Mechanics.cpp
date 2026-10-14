@@ -136,3 +136,19 @@ int Mechanics::StepsPassed(const MechanicSpec& spec, const ShotAnalysis& a, bool
 	}
 	return n;
 }
+
+int Mechanics::MechanicStart(const ShotAnalysis& a, int frameCount)
+{
+	if (!a.valid) return 1;
+	int t = a.startTick;
+	switch (a.type)
+	{
+	case ShotType::DoubleTap:  if (a.setupTouchTick >= 0) t = a.setupTouchTick - 60; break;
+	case ShotType::AirDribble: if (a.airStart >= 0) t = a.airStart - 30; break;
+	case ShotType::FlipReset:  if (a.resetTakeoff >= 0) t = a.resetTakeoff - 30; break;
+	case ShotType::Dribble:    if (a.dribbleStart >= 0) t = a.dribbleStart - 30; break;
+	default: break;
+	}
+	t = std::max(t, a.startTick);
+	return std::clamp(t, 1, std::max(1, frameCount - 2));
+}
