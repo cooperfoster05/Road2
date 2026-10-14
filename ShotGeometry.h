@@ -86,6 +86,7 @@ struct ShotAnalysis
 	float backboardX = 0;         // how far from the middle (+/- sideways)
 	int   setupTouchTick = -1;    // your touch that sent it there
 	int   tapSurface = 0;         // 1 backboard, 2 ceiling, 3 top of a side wall / corner
+	float reboundDist = 0;        // how far the ball had come off the wall when you hit it again (a pinch against the wall is ~0)
 
 	// Dribbles: the ball rode on your roof into the final touch (the flick). Shot numbers above are measured
 	// once the ball has left your car.

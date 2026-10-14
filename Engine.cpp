@@ -56,17 +56,43 @@ namespace
 				cs.hasJumped = false;
 				cs.airTimeSinceJump = 0;
 				cs.airTime = 0.5f;
-				cs.hasFlipped = !f.hasFlip;
-				cs.hasDoubleJumped = false;
 			}
 			else
 			{
 				cs.hasJumped = jumpTick >= 0;
 				cs.airTimeSinceJump = jumpTick >= 0 ? (s - jumpTick) / 120.0f : 0.0f;
 				cs.airTime = cs.airTimeSinceJump;
-				cs.hasFlipped = !f.hasFlip;
-				cs.hasDoubleJumped = !f.hasFlip;
 				if (jumpTick >= 0 && s - jumpTick < 24 && f.jump) { cs.isJumping = true; cs.jumpTime = (s - jumpTick) / 120.0f; }
+			}
+			// The flip: a flip used (and how long ago, which matters: the game locks your pitch for a while after
+			// one) is not the same as a double jump used. Counting every used flip as "just flipped" locked the sim's
+			// pitch for the first second of every line started in the air after a double jump.
+			cs.hasFlipped = false;
+			cs.hasDoubleJumped = false;
+			if (!f.hasFlip)
+			{
+				int second = -1;
+				for (int i = s; i > 0; i--)
+				{
+					if (fr[i].onGround && ShotGeometry::OnSurface(fr[i])) break;
+					if (i == jumpTick) break;
+					if (fr[i].jump && !fr[i - 1].jump && !fr[i - 1].onGround) { second = i; break; }
+				}
+				const Frame* j2 = second >= 0 ? &fr[second] : nullptr;
+				const bool dodge = j2 && std::fabs(j2->pitch) + std::fabs(j2->yaw) + std::fabs(j2->roll) >= 0.5f;
+				if (dodge)
+				{
+					cs.hasFlipped = true;
+					cs.flipTime = (s - second) / 120.0f;
+					cs.isFlipping = cs.flipTime < 0.65f;
+					float dx = -j2->pitch, dy = j2->yaw + j2->roll;
+					float dl = std::sqrt(dx * dx + dy * dy);
+					if (dl > 1e-3f && (std::fabs(dy) >= 0.1f || std::fabs(dx) >= 0.1f)) { dx /= dl; dy /= dl; }
+					else { dx = 0; dy = 0; }
+					cs.flipRelTorque = Vec(-dy, dx, 0);
+				}
+				else
+					cs.hasDoubleJumped = true;   // a double jump, or the flip ran out: either way no flip left, no pitch lock
 			}
 		}
 		car->SetState(cs);
@@ -75,6 +101,28 @@ namespace
 		bs.vel = Vec(f.ballVX, f.ballVY, f.ballVZ);
 		bs.angVel = Vec(f.ballAVX, f.ballAVY, f.ballAVZ);
 		ball->SetState(bs);
+	}
+
+	// Every run starts with every boost pad up: pads a previous run picked up must not change the next one
+	void ResetPads(Arena* arena)
+	{
+		for (BoostPad* p : arena->GetBoostPads()) p->SetState(BoostPadState());
+	}
+
+	// The physics keeps a little wheel/suspension state that setting the car's state doesn't reset, so a run that
+	// starts on the ground or a wall could depend on the run before it. One tick parked high in the air clears it, so
+	// the same inputs from the same start always play out exactly the same.
+	void ClearCarInternals(Arena* arena, Car* car)
+	{
+		CarState cs;
+		cs.pos = Vec(0, 0, 1400);
+		cs.isOnGround = false;
+		car->SetState(cs);
+		car->controls = CarControls();
+		BallState bs;                       // the ball too (its contacts with walls and the car are remembered)
+		bs.pos = Vec(2500, 0, 1400);
+		arena->ball->SetState(bs);
+		arena->Step(1);
 	}
 
 	// ---- The bot: get the car's center to a point at a time, nose along the hit direction ----
@@ -255,13 +303,17 @@ namespace
 
 	// Plays the plan out from tick s: the bot drives until it touches the ball, then lets go
 	// fixedCtl: play these inputs (indexed by tick) instead of the bot
+	// resets: ticks where a step-search line's save points were (the car's leftover wheel state is cleared there,
+	// exactly as the search did), so replaying its inputs reproduces it exactly
 	SimRun Run(Arena* arena, Car* car, const std::vector<Frame>& fr, int s, const Bot::Plan& plan, int maxTick,
-		const ShotReference& ref, int nudge, const std::vector<CarControls>* fixedCtl = nullptr)
+		const ShotReference& ref, int nudge, const std::vector<CarControls>* fixedCtl = nullptr, const std::vector<int>* resets = nullptr)
 	{
 		SimRun r;
 		r.frames.assign(fr.begin(), fr.begin() + s + 1);
 		r.frames.reserve(maxTick + 2);
+		ClearCarInternals(arena, car);
 		LoadState(car, arena->ball, fr, s);
+		ResetPads(arena);
 		if (nudge > 0)
 		{
 			std::mt19937 rng(static_cast<unsigned>(nudge) * 7919u);
@@ -285,6 +337,17 @@ namespace
 		bool bounced = false;
 		for (int i = s; i < maxTick; i++)
 		{
+			if (resets && i > s && std::find(resets->begin(), resets->end(), i) != resets->end())
+			{
+				CarState cs = car->GetState();
+				BallState bs = arena->ball->GetState();
+				std::vector<BoostPadState> pads;
+				for (BoostPad* p : arena->GetBoostPads()) pads.push_back(p->GetState());
+				ClearCarInternals(arena, car);
+				car->SetState(cs);
+				arena->ball->SetState(bs);
+				for (size_t k = 0; k < pads.size(); k++) arena->GetBoostPads()[k]->SetState(pads[k]);
+			}
 			CarState before = car->GetState();
 			CarControls c = fixedCtl ? (i < static_cast<int>(fixedCtl->size()) ? (*fixedCtl)[i] : CarControls()) : Bot::Drive(before, plan, i, st);
 			Frame& cur = r.frames.back();
@@ -415,11 +478,43 @@ namespace
 	// Survivors of the last step are replayed whole from the real start (exactly, from their recorded inputs) and
 	// graded, so the lines it shows never depend on the save points being perfect.
 
+	// A bot plan plus the choices that made it (so the search can re-aim it)
+	struct PlanSpec
+	{
+		Bot::Plan plan;
+		Vec aimPt;
+		int ti = 0, jl = 0;
+		float reach = 150.0f;
+		bool dodge = false, dj = true, power = false;
+		bool lift = false;   // aimed by the push the ball needs to reach liftT (a spot on the goal line), not at a point
+		Vec liftT;
+	};
+
+	// The push a ball needs to drop into T (a spot on the goal line) from where it'll be at ti, flying flat at least
+	// 1300: returned as a point a little way along that push from the ball, the form plans take their aim in
+	Vec LiftAim(const std::vector<Vec>& path, int ti, const Vec& T)
+	{
+		const int n = static_cast<int>(path.size());
+		ti = std::clamp(ti, 1, n - 2);
+		Vec B = path[ti], vB = (path[ti + 1] - path[ti - 1]) * 60.0f;
+		Vec d = T - B;
+		float flat = std::sqrt(d.x * d.x + d.y * d.y);
+		float vflat = std::max(1300.0f, std::sqrt(vB.x * vB.x + vB.y * vB.y));
+		float t = std::clamp(flat / vflat, 0.2f, 2.0f);
+		Vec want(d.x / t, d.y / t, d.z / t + 325.0f * t);
+		Vec push = want - vB;
+		float pl = push.Length();
+		Vec nrm = pl > 80.0f ? push / pl : want / std::max(1.0f, want.Length());
+		return B + nrm * 300.0f;
+	}
+
 	// The exact game state at the end of a step
 	struct SavePoint
 	{
 		CarState car;
 		BallState ball;
+		std::vector<BoostPadState> pads; // the boost pads (which are up)
+		std::vector<int> bounds;         // ticks where later steps started (save points), for exact replays
 		int tick = 0;                    // the tick this state is at
 		std::vector<CarControls> ctl;    // the line's inputs by tick, from the search start up to here
 		std::vector<Frame> frames;       // the line's frames from the search start (frames[0] = the start)
@@ -427,6 +522,12 @@ namespace
 		int touches = 0, firstTouch = -1, lastTouch = -1;
 		float score = 0;                 // the step's own score (higher is better), for keeping the best few
 		std::string note;                // what this branch did, for the cue later
+		PlanSpec spec;                   // the plan that played the last step (if a plan did)
+		bool viaPlan = false;
+		int parent = -1;                 // which save point of the previous step it started from
+		// How every step so far was played, so the whole line can be re-played closed-loop from a nudged start
+		struct ChainStep { bool viaPlan = false; PlanSpec spec; int follow = -1; std::shared_ptr<std::vector<CarControls>> inputs; int ctrl = -1; };
+		std::vector<ChainStep> chain;
 	};
 
 	inline Frame SimFrame(int tick, const CarState& cs, const BallState& bs, bool hit, const Vec& hitPt)
@@ -455,7 +556,10 @@ namespace
 	SavePoint StartPoint(Arena* arena, Car* car, const std::vector<Frame>& fr, int s)
 	{
 		SavePoint sp;
+		ClearCarInternals(arena, car);
 		LoadState(car, arena->ball, fr, s);
+		ResetPads(arena);
+		for (BoostPad* p : arena->GetBoostPads()) sp.pads.push_back(p->GetState());
 		sp.car = car->GetState();
 		sp.ball = arena->ball->GetState();
 		sp.tick = s;
@@ -472,12 +576,75 @@ namespace
 	// to the backboard for the second touch of a double tap). Returns false = let go.
 	using AfterTouch = std::function<bool(int tick, const CarState& car, const BallState& ball, Bot::Plan& follow)>;
 
+	// A closed-loop skill that drives the car every tick from the car and ball state (e.g. carrying the ball in the air)
+	using Controller = std::function<CarControls(int tick, const CarState& car, const BallState& ball)>;
+
+	// Air dribble carry: keep the car under and behind the ball (relative to the goal), matching its speed, so the
+	// nose meets it softly and keeps pushing it toward the goal. back/down: where the car's center sits from the
+	// ball's; k: how hard it closes the gap.
+	Controller CarrySkill(float gs, float back, float down, float k, Vec goalAim = Vec(0, 0, 450.0f))
+	{
+		return [gs, back, down, k, goalAim](int, const CarState& car, const BallState& ball) {
+			CarControls c;
+			Vec goal(goalAim.x, gs * 5120.0f, goalAim.z);
+			Vec gd = goal - ball.pos; gd.z *= 0.3f;
+			gd = gd / std::max(1.0f, gd.Length());
+			Vec aimPt = ball.pos - gd * back + Vec(0, 0, -down);
+			Vec vDes = ball.vel + (aimPt - car.pos) * k;
+			Vec dv = vDes - car.vel + Vec(0, 0, 650.0f * 0.15f);   // plus a little to hold against gravity
+			float need = dv.Length();
+			Vec toBall = ball.pos - car.pos; toBall = toBall / std::max(1.0f, toBall.Length());
+			Vec fwd = need > 250.0f ? dv / need : toBall;
+			Bot::Orient(car, fwd, Vec(0, 0, 1), false, c, 3.5f, 0.4f);
+			c.boost = need > 180.0f && car.rotMat.forward.Dot(fwd) > 0.75f;
+			c.throttle = 1;
+			return c;
+		};
+	}
+
+	// Air dribble carry aimed at a spot in the net: every tick, work out the velocity the ball needs to drop into
+	// (target.x, the goal line, target.z) from where it is (flying flat at least minFlat), and sit the car on the
+	// side of the ball that pushes it that way. Soft touches keep nudging the ball onto that arc, so the carry ends
+	// with the ball heading high into the net instead of sinking into the bottom of it.
+	Controller CarryAim(float gs, float tx, float tz, float back, float k, float minFlat = 1300.0f)
+	{
+		return [gs, tx, tz, back, k, minFlat](int, const CarState& car, const BallState& ball) {
+			CarControls c;
+			Vec T(tx, gs * 5120.0f, tz);
+			Vec d = T - ball.pos;
+			float flat = std::sqrt(d.x * d.x + d.y * d.y);
+			float vflat = std::max(minFlat, std::sqrt(ball.vel.x * ball.vel.x + ball.vel.y * ball.vel.y));
+			float t = std::clamp(flat / vflat, 0.25f, 2.0f);
+			Vec want(d.x / t, d.y / t, d.z / t + 325.0f * t);
+			Vec push = want - ball.vel;
+			float pl = push.Length();
+			Vec dir = pl > 60.0f ? push / pl : want / std::max(1.0f, want.Length());
+			if (dir.z < -0.3f) { dir.z = -0.3f; dir = dir / std::max(1e-3f, dir.Length()); }   // never come down on top of it
+			Vec aimPt = ball.pos - dir * back;
+			Vec vDes = ball.vel + (aimPt - car.pos) * k;
+			Vec dv = vDes - car.vel + Vec(0, 0, 650.0f * 0.15f);
+			float need = dv.Length();
+			Vec toBall = ball.pos - car.pos; toBall = toBall / std::max(1.0f, toBall.Length());
+			Vec fwd = need > 250.0f ? dv / need : toBall;
+			Bot::Orient(car, fwd, Vec(0, 0, 1), false, c, 3.5f, 0.4f);
+			c.boost = need > 180.0f && car.rotMat.forward.Dot(fwd) > 0.75f;
+			c.throttle = 1;
+			return c;
+		};
+	}
+
 	SavePoint RunFrom(Arena* arena, Car* car, const SavePoint& sp, const Bot::Plan& plan, int maxTicks, const StepEnd& ended, int& result,
-		const AfterTouch* afterTouch = nullptr)
+		const AfterTouch* afterTouch = nullptr, const std::vector<CarControls>* fixed = nullptr, const Controller* ctrl = nullptr)
 	{
 		SavePoint r = sp;
+		if (sp.tick != sp.start) r.bounds.push_back(sp.tick);
+		ClearCarInternals(arena, car);
 		car->SetState(sp.car);
 		arena->ball->SetState(sp.ball);
+		{
+			const auto& pads = arena->GetBoostPads();
+			for (size_t i = 0; i < pads.size(); i++) pads[i]->SetState(i < sp.pads.size() ? sp.pads[i] : BoostPadState());
+		}
 		Bot::State st;
 		if (!sp.car.isOnGround) { st.jumpStarted = sp.tick; st.noJump = true; st.doubleJumped = true; }
 		Bot::Plan follow;
@@ -497,6 +664,8 @@ namespace
 				}
 				if (following) c = Bot::Drive(before, follow, r.tick, fst);
 			}
+			else if (ctrl) c = (*ctrl)(r.tick, before, arena->ball->GetState());
+			else if (fixed) c = r.tick < static_cast<int>(fixed->size()) ? (*fixed)[r.tick] : CarControls();
 			else c = Bot::Drive(before, plan, r.tick, st);
 			if (static_cast<int>(r.ctl.size()) <= r.tick) r.ctl.resize(r.tick + 1);
 			r.ctl[r.tick] = c;
@@ -523,6 +692,71 @@ namespace
 		}
 		r.car = car->GetState();
 		r.ball = arena->ball->GetState();
+		r.pads.clear();
+		for (BoostPad* p : arena->GetBoostPads()) r.pads.push_back(p->GetState());
+		return r;
+	}
+
+	// Plays a found line out from its last save point (hands off: no inputs) until the shot is over, by the same end
+	// rules as Run, and grades the whole rep: your frames up to the search start, the line, then the play-out. The
+	// frames graded are exactly the ones the search produced, so what's shown is what was found.
+	SimRun PlayOut(Arena* arena, Car* car, const std::vector<Frame>& fr, const SavePoint& f, int maxTick, const ShotReference& ref)
+	{
+		SimRun r;
+		r.frames.assign(fr.begin(), fr.begin() + f.start);
+		r.frames.insert(r.frames.end(), f.frames.begin(), f.frames.end());
+		r.ctl = f.ctl;
+		r.touchTick = f.firstTouch;
+		ClearCarInternals(arena, car);
+		car->SetState(f.car);
+		arena->ball->SetState(f.ball);
+		{
+			const auto& pads = arena->GetBoostPads();
+			for (size_t i = 0; i < pads.size(); i++) pads[i]->SetState(i < f.pads.size() ? f.pads[i] : BoostPadState());
+		}
+		const float boost0 = f.frames.empty() ? 0.0f : f.frames.front().boostAmount;
+		int lastTouch = f.lastTouch, stopAt = -1;
+		bool bounced = false;
+		for (int i = f.tick; i < maxTick; i++)
+		{
+			Frame& cur = r.frames.back();
+			CarControls c;
+			cur.throttle = 0; cur.steer = 0; cur.pitch = 0; cur.yaw = 0; cur.roll = 0; cur.jump = false; cur.boost = false; cur.handbrake = false;
+			car->controls = c;
+			uint64_t t0 = arena->tickCount;
+			arena->Step(1);
+			CarState cs = car->GetState();
+			BallState bs = arena->ball->GetState();
+			bool hit = cs.ballHitInfo.isValid && cs.ballHitInfo.tickCountWhenHit >= t0;
+			Frame g = SimFrame(i + 1, cs, bs, hit, cs.ballHitInfo.ballPos + cs.ballHitInfo.relativePosOnBall);
+			if (hit) lastTouch = i + 1;
+			r.frames.push_back(g);
+			float dirY = bs.vel.y >= 0.0f ? 1.0f : -1.0f;
+			float toLine = 5120.0f - bs.pos.y * dirY;
+			float tLine = std::fabs(bs.vel.y) > 1.0f ? toLine / std::fabs(bs.vel.y) : 1e9f;
+			bool rollingIn = std::fabs(bs.vel.y) > 300.0f && toLine > 0.0f && tLine < 6.0f && std::fabs(bs.pos.x + bs.vel.x * tLine) < 950.0f;
+			if (!r.wentIn && std::fabs(bs.pos.y) > 5215.0f && std::fabs(bs.pos.x) < 893.0f && bs.pos.z < 643.0f)
+			{
+				r.wentIn = true; r.floorFirst = bounced; r.eventTick = i + 1; stopAt = i + 1 + 60;
+				continue;
+			}
+			if (stopAt >= 0)
+			{
+				if (i + 1 >= stopAt && (r.wentIn || !rollingIn || i + 1 >= r.eventTick + 900)) break;
+				continue;
+			}
+			if (lastTouch >= 0 && bs.pos.z < 100.0f && bs.vel.z > 0.0f && i + 1 - lastTouch > 10 && !ShotGeometry::BallWithCar(g))
+			{
+				bounced = true; r.eventTick = i + 1; stopAt = i + 1 + 60;
+				continue;
+			}
+			if (lastTouch >= 0 && i + 1 - lastTouch > 480) { r.eventTick = i + 1; stopAt = i + 1 + 60; }
+		}
+		if (r.eventTick < 0) r.eventTick = static_cast<int>(r.frames.size()) - 1;
+		r.boostUsed = boost0 - r.frames.back().boostAmount;
+		r.shot = ShotGeometry::Analyze(r.frames);
+		RepSegments segs = Segmenter::Split(r.frames, r.eventTick);
+		r.grade = Grader::GradeRep(r.frames, segs, r.shot, r.wentIn, r.floorFirst, ref);
 		return r;
 	}
 
@@ -553,7 +787,8 @@ namespace
 		if (dl < 1) return false;
 		d = d / dl;
 		Vec C = B - d * reach;
-		const bool startAir = !sp.car.isOnGround;
+		const bool onWall = sp.car.isOnGround && sp.car.rotMat.up.z < 0.7f;   // on a wall (or the ceiling): jump off it
+		const bool startAir = !sp.car.isOnGround || onWall;
 		bool ground = C.z < 60.0f && !startAir;
 		if (ground)
 		{
@@ -564,7 +799,8 @@ namespace
 			C.z = 17.0f;
 		}
 		float tau = ti / 120.0f;
-		const Vec p0 = sp.car.pos, v0 = sp.car.vel;
+		const Vec p0 = sp.car.pos;
+		const Vec v0 = onWall ? sp.car.vel + sp.car.rotMat.up * 300.0f : sp.car.vel;   // the jump pushes you off the wall
 		if (ground)
 		{
 			Vec h = C - p0; h.z = 0;
@@ -572,18 +808,40 @@ namespace
 		}
 		else
 		{
-			Vec need = C - p0 - v0 * tau - Vec(0, 0, -0.5f * 650.0f * tau * tau);
-			if (2.0f * need.Length() / (tau * tau) > 1250.0f) return false;
+			Vec drift = p0 + v0 * tau + Vec(0, 0, -0.5f * 650.0f * tau * tau);
+			Vec need = C - drift;
+			// Close in (the ball is coming right at you, e.g. off the backboard): no time to move, just turn and hit it
+			bool closeIn = (B - drift).Length() < 260.0f && ti <= 40;
+			if (!closeIn && 2.0f * need.Length() / (tau * tau) > 1250.0f) return false;
 		}
 		plan.target = C;
 		plan.hitDir = d;
 		plan.arriveTick = sp.tick + ti;
-		plan.jumpTick = (ground || startAir) ? -1 : std::max(sp.tick, sp.tick + ti - jumpLead);
+		plan.jumpTick = onWall ? sp.tick : (ground || startAir) ? -1 : std::max(sp.tick, sp.tick + ti - jumpLead);
 		if (!ground && !startAir && plan.jumpTick < 0) plan.jumpTick = sp.tick;
 		plan.dodge = dodge;
 		plan.doubleJump = doubleJump && !dodge;
 		plan.dodgeLead = ground ? 14 : 8;
 		plan.power = power;
+		return true;
+	}
+
+	bool AddPlan(std::vector<PlanSpec>& out, const SavePoint& sp, const std::vector<Vec>& path, int ti, Vec aim, float reach, int jl,
+		bool dodge, bool dj, bool power)
+	{
+		PlanSpec ps;
+		if (!PlanFrom(sp, path, ti, aim, reach, jl, dodge, dj, power, ps.plan)) return false;
+		ps.aimPt = aim; ps.ti = ti; ps.jl = jl; ps.reach = reach; ps.dodge = dodge; ps.dj = dj; ps.power = power;
+		out.push_back(ps);
+		return true;
+	}
+
+	bool AddLiftPlan(std::vector<PlanSpec>& out, const SavePoint& sp, const std::vector<Vec>& path, int ti, const Vec& T, float reach, int jl,
+		bool dodge, bool power)
+	{
+		if (!AddPlan(out, sp, path, ti, LiftAim(path, ti, T), reach, jl, dodge, false, power)) return false;
+		out.back().lift = true;
+		out.back().liftT = T;
 		return true;
 	}
 
@@ -593,19 +851,33 @@ namespace
 #else
 	constexpr bool kStepDebug = false;
 #endif
-	int gStepDbg[16] = {};
+	int gStepDbg[32] = {};
+#ifndef ENGINE_SCALE_CAP
+#define ENGINE_SCALE_CAP 0.0f
+#endif
+	// How far the search may grow past its normal size when the machine has time to spare: a little on a normal
+	// look (it stays quick), a lot more when you ask it to think harder (that wait is what the button is for)
+	float ScaleCap(int depth) { return ENGINE_SCALE_CAP > 0.0f ? ENGINE_SCALE_CAP : depth >= 2 ? 3.0f : 1.5f; }
 
 	// One step of a mechanic for the search: its candidate plans from a save point, when it's over, and how good
 	// the save point at its end is (for keeping the best few)
 	struct StepDef
 	{
 		const char* name;
-		std::function<void(const SavePoint&, const std::vector<Vec>& ballPath, std::vector<Bot::Plan>& out)> plans;
+		std::function<void(const SavePoint&, const std::vector<Vec>& ballPath, std::vector<PlanSpec>& out)> plans;
+		// Last step only: where the ball will cross the goal line from a save point (to re-aim the best few lines)
+		std::function<bool(const SavePoint&, Vec& crossed)> crossing;
+		int aimFix = 0;
 		StepEnd ended;
 		std::function<float(const SavePoint&)> score;
 		int maxTicks = 300;
 		int beam = 8;
 		AfterTouch afterTouch;          // empty = let go after the touch
+		std::vector<AfterTouch> follows;   // or several ways to follow up (each candidate gets one; your inputs try all)
+		// Candidates from recorded inputs (yours, reshaped a little), indexed by tick. Each is tried as it is and,
+		// if the step has an afterTouch, also with the bot taking over after the touch.
+		std::function<void(const SavePoint&, std::vector<std::vector<CarControls>>& out)> inputs;
+		std::vector<Controller> controllers;   // closed-loop skills to try (each from every save point)
 	};
 
 	// The search itself. budget = sim runs it may spend across all steps. Returns the survivors of the last step.
@@ -619,26 +891,143 @@ namespace
 			const StepDef& st = steps[k];
 			const int share = std::max(20, budget / static_cast<int>(steps.size()) / static_cast<int>(frontier.size()));
 			std::vector<SavePoint> next;
-			for (const SavePoint& sp : frontier)
+			for (int fi = 0; fi < static_cast<int>(frontier.size()); fi++)
 			{
+				const SavePoint& sp = frontier[fi];
 				std::vector<Vec> path = BallPathFrom(ballArena, sp.ball, 360);
-				std::vector<Bot::Plan> cands;
+				std::vector<PlanSpec> cands;
 				st.plans(sp, path, cands);
 				if (kStepDebug) fprintf(stderr, "step %zu: %zu candidate plans from tick %d (car on ground %d at %.0f %.0f %.0f vel %.0f %.0f %.0f, ball %.0f %.0f %.0f vel %.0f %.0f %.0f)\n", k, cands.size(), sp.tick, (int)sp.car.isOnGround, sp.car.pos.x, sp.car.pos.y, sp.car.pos.z, sp.car.vel.x, sp.car.vel.y, sp.car.vel.z, sp.ball.pos.x, sp.ball.pos.y, sp.ball.pos.z, sp.ball.vel.x, sp.ball.vel.y, sp.ball.vel.z);
 				std::shuffle(cands.begin(), cands.end(), rng);
 				if (static_cast<int>(cands.size()) > share) cands.resize(share);
-				for (const Bot::Plan& pl : cands)
+				int ci = 0;
+				for (const PlanSpec& ps : cands)
 				{
 					if (stop()) break;
 					int res = -1;
-					SavePoint r = RunFrom(arena, car, sp, pl, st.maxTicks, st.ended, res, st.afterTouch ? &st.afterTouch : nullptr);
+					const AfterTouch* at = !st.follows.empty() ? &st.follows[ci++ % st.follows.size()] : st.afterTouch ? &st.afterTouch : nullptr;
+					SavePoint r = RunFrom(arena, car, sp, ps.plan, st.maxTicks, st.ended, res, at);
 					runs++;
 					if (kStepDebug) { gStepDbg[k * 8 + (r.firstTouch < 0 ? 0 : res == 1 ? 1 : res < 0 ? 1 - res : 7)]++; }
 					if (res != 1) continue;
 					r.score = st.score(r);
+					r.spec = ps; r.viaPlan = true; r.parent = fi;
+					{
+						SavePoint::ChainStep cs; cs.viaPlan = true; cs.spec = ps;
+						cs.follow = !st.follows.empty() ? (ci - 1) % static_cast<int>(st.follows.size()) : (st.afterTouch ? 99 : -1);
+						r.chain.push_back(cs);
+					}
 					next.push_back(std::move(r));
 				}
 				if (stop()) break;
+				if (st.inputs)
+				{
+					std::vector<std::vector<CarControls>> ins;
+					st.inputs(sp, ins);
+					Bot::Plan none;
+					none.arriveTick = sp.tick + st.maxTicks + 1000;
+					const int nf = static_cast<int>(st.follows.size()) + (st.afterTouch ? 1 : 0);
+					for (const auto& in0 : ins)
+					{
+						auto inPtr = std::make_shared<std::vector<CarControls>>(in0);
+						const std::vector<CarControls>& in = *inPtr;
+						for (int follow = 0; follow <= nf && !stop(); follow++)
+						{
+							int res = -1;
+							const AfterTouch* at = follow == 0 ? nullptr : follow <= static_cast<int>(st.follows.size()) ? &st.follows[follow - 1] : &st.afterTouch;
+							SavePoint r = RunFrom(arena, car, sp, none, st.maxTicks, st.ended, res, at, &in);
+							runs++;
+							if (kStepDebug) { gStepDbg[k * 8 + (r.firstTouch < 0 ? 0 : res == 1 ? 1 : res < 0 ? 1 - res : 7)]++; }
+							if (res != 1) continue;
+							r.score = st.score(r) + 0.05f;   // a nudge toward your own way in when it's as good
+							r.note = "your setup, a better second touch";
+							r.parent = fi;
+							{
+								SavePoint::ChainStep cs; cs.viaPlan = false; cs.inputs = inPtr;
+								cs.follow = follow == 0 ? -1 : follow <= static_cast<int>(st.follows.size()) ? follow - 1 : 99;
+								r.chain.push_back(cs);
+							}
+							next.push_back(std::move(r));
+						}
+					}
+				}
+				for (int ci2 = 0; ci2 < static_cast<int>(st.controllers.size()) && !stop(); ci2++)
+				{
+					int res = -1;
+					Bot::Plan none;
+					none.arriveTick = sp.tick + st.maxTicks + 1000;
+					SavePoint r = RunFrom(arena, car, sp, none, st.maxTicks, st.ended, res, nullptr, nullptr, &st.controllers[ci2]);
+					runs++;
+					if (kStepDebug) { gStepDbg[k * 8 + (r.firstTouch < 0 ? 0 : res == 1 ? 1 : res < 0 ? 1 - res : 7)]++; }
+					if (kStepDebug && st.crossing)
+					{
+						Vec cr; bool ok = st.crossing(r, cr);
+						const Frame& lf = r.frames.back();
+						fprintf(stderr, "  ctrl %d of %s: res %d touches %d ticks %d cross %d at %.0f %.0f | ball %.0f %.0f %.0f v %.0f %.0f %.0f car %.0f %.0f %.0f\n", ci2, st.name, res, r.touches, r.tick - sp.tick, (int)ok, cr.x, cr.z,
+							lf.ballX, lf.ballY, lf.ballZ, lf.ballVX, lf.ballVY, lf.ballVZ, lf.carX, lf.carY, lf.carZ);
+#ifdef ENGINE_STEP_DEBUG
+						static int traced = 0;
+						if (std::getenv("ENG_TRACE") && ci2 == atoi(std::getenv("ENG_TRACE")) && traced++ < 2)
+							for (size_t q = std::max(0, sp.tick - r.start); q < r.frames.size(); q += 4)
+							{
+								const Frame& g = r.frames[q];
+								fprintf(stderr, "     t%4d ball %5.0f %5.0f %4.0f v %5.0f %5.0f %5.0f | car %5.0f %5.0f %4.0f v %5.0f %5.0f %5.0f pitch %6d boost %d%s\n", g.tick, g.ballX, g.ballY, g.ballZ, g.ballVX, g.ballVY, g.ballVZ,
+									g.carX, g.carY, g.carZ, g.carVX, g.carVY, g.carVZ, g.carPitch, (int)g.boost, g.touch ? " T" : "");
+							}
+#endif
+					}
+					if (res != 1) continue;
+					r.score = st.score(r);
+					r.parent = fi;
+					SavePoint::ChainStep cs; cs.ctrl = ci2;
+					r.chain.push_back(cs);
+					next.push_back(std::move(r));
+				}
+				if (stop()) break;
+			}
+			// Re-aim the best few (the shooting method): where did the ball really cross the goal line vs where the plan
+			// aimed it? Aim off by that much the other way and play the step again from the same save point.
+			if (st.crossing && st.aimFix > 0 && !next.empty())
+			{
+				std::sort(next.begin(), next.end(), [](const SavePoint& a, const SavePoint& b) { return a.score > b.score; });
+				const int top = std::min<int>(st.aimFix, static_cast<int>(next.size()));
+				std::vector<SavePoint> fixed;
+				for (int i = 0; i < top && !stop(); i++)
+				{
+					if (!next[i].viaPlan || next[i].parent < 0) continue;
+					SavePoint cur = next[i];
+					const SavePoint& par = frontier[cur.parent];
+					std::vector<Vec> path = BallPathFrom(ballArena, par.ball, 360);
+					for (int iter = 0; iter < 3 && !stop(); iter++)
+					{
+						Vec cr;
+						if (!st.crossing(cur, cr)) break;
+						const Vec want = cur.spec.lift ? cur.spec.liftT : cur.spec.aimPt;
+						Vec err(cr.x - want.x, 0, cr.z - want.z);
+						if (err.Length() < 30.0f) break;
+						PlanSpec ps = cur.spec;
+						std::vector<PlanSpec> one;
+						if (ps.lift)
+						{
+							// Aim the push at a spot moved by the miss (the shooting method, on the target)
+							if (!AddLiftPlan(one, par, path, ps.ti, ps.liftT - err, ps.reach, ps.jl, ps.dodge, ps.power)) break;
+						}
+						else if (!AddPlan(one, par, path, ps.ti, ps.aimPt - err, ps.reach, ps.jl, ps.dodge, ps.dj, ps.power)) break;
+						int res = -1;
+						SavePoint r = RunFrom(arena, car, par, one[0].plan, st.maxTicks, st.ended, res, st.afterTouch ? &st.afterTouch : nullptr);
+						runs++;
+						if (res != 1) break;
+						r.score = st.score(r);
+						r.spec = one[0]; r.viaPlan = true; r.parent = cur.parent;
+						{
+							SavePoint::ChainStep cs; cs.viaPlan = true; cs.spec = one[0]; cs.follow = st.afterTouch ? 99 : -1;
+							r.chain.push_back(cs);
+						}
+						cur = r;
+						fixed.push_back(r);
+					}
+				}
+				for (SavePoint& f : fixed) next.push_back(std::move(f));
 			}
 			if (passedPerStep) (*passedPerStep)[k] = static_cast<int>(next.size());
 			std::sort(next.begin(), next.end(), [](const SavePoint& a, const SavePoint& b) { return a.score > b.score; });
@@ -648,7 +1037,7 @@ namespace
 			{
 				bool dup = false;
 				for (const SavePoint& q : keep)
-					if (std::abs(q.tick - c.tick) <= 2 && (q.ball.pos - c.ball.pos).Length() < 60.0f) { dup = true; break; }
+					if (std::abs(q.tick - c.tick) <= 2 && (q.ball.pos - c.ball.pos).Length() < 60.0f && (q.ball.vel - c.ball.vel).Length() < 150.0f) { dup = true; break; }
 				if (!dup) keep.push_back(std::move(c));
 				if (static_cast<int>(keep.size()) >= (k + 1 == steps.size() ? st.beam * 5 : st.beam)) break;
 			}
@@ -657,37 +1046,217 @@ namespace
 		return frontier;
 	}
 
-	// ---- Each mechanic's steps for the search (the rulebook's steps, with how to try them) ----
-	// Empty = the mechanic isn't step-searched yet (or the search starts too late for it): the one-touch engine and
-	// "your line, sharpened" cover it.
-	std::vector<StepDef> MechanicSteps(const ShotAnalysis& real, int s, float gs)
+	// Plays a found line again, closed-loop, from a nudged start with the timing shifted: the bot re-aims each step's
+	// plan from wherever the car really is, and your own inputs are shifted. Returns the controls it ended up using
+	// (empty if a step broke), so the caller can replay and grade them exactly.
+	bool RerunChain(Arena* arena, Car* car, const std::vector<Frame>& fr, int s, const SavePoint& line,
+		const std::vector<StepDef>& steps, int nudge, int shift, SavePoint& endAt)
 	{
-		std::vector<StepDef> steps;
-		if (!real.valid) return steps;
-		const float wx = 892.755f - kBallR - 60.0f, zHi = 642.775f - kBallR - 50.0f;
-		auto aimBall = [](const BallState& b, float gs, float& onTarget, float& height, float& speed) {
-			// Where the ball is headed (straight line with gravity, no bounces): is it on target, how high, how hard
-			Vec p = b.pos, v = b.vel;
-			if (gs < 0) { p = Vec(-p.x, -p.y, p.z); v = Vec(-v.x, -v.y, v.z); }
-			onTarget = 0; height = 0; speed = v.Length();
-			if (v.y < 100.0f) return;
-			float t = (5120.0f - p.y) / v.y;
-			if (t > 3.0f) return;
-			float x = p.x + v.x * t, z = std::max(93.0f, p.z + v.z * t - 325.0f * t * t);
-			float miss = std::hypot(std::max(0.0f, std::fabs(x) - 800.0f), std::max(0.0f, z - 550.0f));
-			onTarget = 1.0f - std::min(1.0f, miss / 1000.0f);
-			height = z;
+		SavePoint sp = StartPoint(arena, car, fr, s);
+		if (nudge > 0)
+		{
+			// The same nudge Run() applies, so the replay that grades it starts from the exact same spot
+			std::mt19937 rng(static_cast<unsigned>(nudge) * 7919u);
+			std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+			sp.car.pos += Vec(u(rng), u(rng), u(rng)) * 2.0f;
+			sp.car.vel += Vec(u(rng), u(rng), u(rng)) * 8.0f;
+			sp.ball.pos += Vec(u(rng), u(rng), u(rng)) * 2.0f;
+			sp.ball.vel += Vec(u(rng), u(rng), u(rng)) * 8.0f;
+		}
+		static thread_local std::unique_ptr<Arena> ballArena;
+		if (!ballArena) ballArena.reset(Arena::Create(GameMode::SOCCAR));
+		for (size_t k = 0; k < line.chain.size() && k < steps.size(); k++)
+		{
+			const SavePoint::ChainStep& cs = line.chain[k];
+			const StepDef& st = steps[k];
+			const bool last = k + 1 == line.chain.size();
+			const AfterTouch* at = cs.follow < 0 ? nullptr : cs.follow == 99 ? (st.afterTouch ? &st.afterTouch : nullptr)
+				: cs.follow < static_cast<int>(st.follows.size()) ? &st.follows[cs.follow] : nullptr;
+			Bot::Plan none;
+			none.arriveTick = sp.tick + st.maxTicks + 1000;
+			// The ways to play this step again: as found (re-planned from where things are now), and on the last step
+			// a few small adjustments (a touch earlier or later, the other carry styles), like a player adjusting the shot
+			std::vector<std::function<SavePoint(int&)>> tries;
+			if (cs.ctrl >= 0 && cs.ctrl < static_cast<int>(st.controllers.size()))
+			{
+				tries.push_back([&, ci = cs.ctrl](int& res) { return RunFrom(arena, car, sp, none, st.maxTicks, st.ended, res, nullptr, nullptr, &st.controllers[ci]); });
+				// A player adjusts the carry to how the touches are really going: the other carry styles are fair game
+				for (int ci = 0; ci < static_cast<int>(st.controllers.size()); ci++)
+						if (ci != cs.ctrl) tries.push_back([&, ci](int& res) { return RunFrom(arena, car, sp, none, st.maxTicks, st.ended, res, nullptr, nullptr, &st.controllers[ci]); });
+			}
+			else if (cs.viaPlan)
+			{
+				std::vector<Vec> path = BallPathFrom(ballArena.get(), sp.ball, 360);
+				for (int dt : { 0, -3, 3, -6, 6 })
+				{
+					PlanSpec again;
+					Bot::Plan p = cs.spec.plan;
+					const int ti2 = std::max(4, cs.spec.ti + dt);
+					const Vec aim2 = cs.spec.lift ? LiftAim(path, ti2, cs.spec.liftT) : cs.spec.aimPt;
+					if (PlanFrom(sp, path, ti2, aim2, cs.spec.reach, cs.spec.jl, cs.spec.dodge, cs.spec.dj, cs.spec.power, again.plan)) p = again.plan;
+					else if (dt != 0) continue;
+					if (p.jumpTick >= 0) p.jumpTick = std::max(sp.tick, p.jumpTick + shift);
+					if (p.dodge) p.dodgeLead = std::max(2, p.dodgeLead - shift);
+					tries.push_back([&, p](int& res) { return RunFrom(arena, car, sp, p, st.maxTicks, st.ended, res, at); });
+				}
+			}
+			else
+			{
+				// Your own part is replayed as you did it (from the nudged start); the timing shift tests the engine's part
+				const std::vector<CarControls>* c = cs.inputs.get();
+				tries.push_back([&, c](int& res) { return RunFrom(arena, car, sp, none, st.maxTicks, st.ended, res, at, c); });
+			}
+			bool ok = false;
+			SavePoint best;
+			float bestScore = -1e9f;
+			for (auto& t : tries)
+			{
+				int res = -1;
+				SavePoint r = t(res);
+				if (res != 1) continue;
+				float sc = st.score(r);
+				if (!ok || sc > bestScore) { best = std::move(r); bestScore = sc; ok = true; }
+				if (!last) break;   // earlier steps: the first that works
+			}
+			if (!ok) { if (kStepDebug) fprintf(stderr, "rerun nudge %d shift %d: step %zu (%s) failed\n", nudge, shift, k, st.name); return false; }
+			sp = std::move(best);
+		}
+		endAt = std::move(sp);
+		return true;
+	}
+
+	// Shared pieces for the mechanics' steps
+	float kWx = 892.755f - kBallR - 60.0f, kZHi = 642.775f - kBallR - 50.0f;
+
+	// Where the ball is headed (straight line with gravity, no bounces): is it on target, how high, how hard
+	void AimBall(const BallState& b, float gs, float& onTarget, float& height, float& speed)
+	{
+		Vec p = b.pos, v = b.vel;
+		if (gs < 0) { p = Vec(-p.x, -p.y, p.z); v = Vec(-v.x, -v.y, v.z); }
+		onTarget = 0; height = 0; speed = v.Length();
+		if (v.y < 100.0f) return;
+		float t = (5120.0f - p.y) / v.y;
+		if (t > 3.0f) return;
+		float x = p.x + v.x * t, z = std::max(93.0f, p.z + v.z * t - 325.0f * t * t);
+		float miss = std::hypot(std::max(0.0f, std::fabs(x) - 780.0f), std::max(0.0f, z - 530.0f));
+		onTarget = 1.0f - std::min(1.0f, miss / 200.0f);   // a near miss is still a miss
+		height = z;
+	}
+
+	// Your recorded inputs, by tick
+	std::vector<CarControls> YourInputs(const std::vector<Frame>& fr)
+	{
+		std::vector<CarControls> yours(fr.size());
+		for (size_t i = 0; i < fr.size(); i++)
+		{
+			const Frame& f = fr[i];
+			CarControls& c = yours[i];
+			c.throttle = f.throttle; c.steer = f.steer; c.pitch = f.pitch; c.yaw = f.yaw; c.roll = f.roll;
+			c.jump = f.jump; c.boost = f.boost; c.handbrake = f.handbrake;
+		}
+		return yours;
+	}
+
+	// Your way into a touch, as you did it and reshaped a little: jumps a couple of ticks earlier or later, the nose a
+	// touch up/down/left/right into the touch, or less boost right before it. Only from the start of the search.
+	std::function<void(const SavePoint&, std::vector<std::vector<CarControls>>&)> YourWayIn(const std::vector<Frame>& fr, int s, int touch)
+	{
+		std::vector<CarControls> yours = YourInputs(fr);
+		return [yours, touch, s](const SavePoint& sp, std::vector<std::vector<CarControls>>& out) {
+			if (sp.tick != s) return;
+			const int n = static_cast<int>(yours.size());
+			for (int shift : { 0, -2, 2, -4, 4 })
+				for (int v = 0; v < 6; v++)
+				{
+					std::vector<CarControls> c = yours;
+					if (shift != 0)
+						for (int i = s + 1; i < std::min(n, touch + 2); i++)
+						{
+							int j = std::clamp(i - shift, s, n - 1);
+							c[i].jump = yours[j].jump;
+						}
+					const int w0 = std::max(s, touch - 30), w1 = std::min(n, touch + 4);
+					for (int i = w0; i < w1; i++)
+					{
+						if (v == 1) c[i].pitch = Bot::Clamp1(c[i].pitch + 0.15f);
+						if (v == 2) c[i].pitch = Bot::Clamp1(c[i].pitch - 0.15f);
+						if (v == 3) c[i].yaw = Bot::Clamp1(c[i].yaw + 0.15f);
+						if (v == 4) c[i].yaw = Bot::Clamp1(c[i].yaw - 0.15f);
+						if (v == 5 && i >= touch - 12) c[i].boost = false;
+					}
+					out.push_back(std::move(c));
+				}
 		};
+	}
+
+	// The shot: a touch into the goal from wherever the last step left off (top and low, middle and corners),
+	// re-aimed from where the best tries really crossed the goal line
+	StepDef ShotStep(float gs, int horizonTicks, bool highOnly = false)
+	{
+		StepDef shot;
+		shot.name = "Shot";
+		shot.maxTicks = horizonTicks + 50;
+		shot.beam = 8;
+		const float wx = kWx, zHi = kZHi;
+		shot.plans = [gs, wx, zHi, horizonTicks, highOnly](const SavePoint& sp, const std::vector<Vec>& path, std::vector<PlanSpec>& out) {
+			const int horizon = std::min(horizonTicks, static_cast<int>(path.size()) - 1);
+			const Vec aims[6] = { Vec(0, gs * 5200.0f, zHi), Vec(wx, gs * 5200.0f, zHi), Vec(-wx, gs * 5200.0f, zHi),
+				Vec(0, gs * 5200.0f, 300.0f), Vec(wx * 0.7f, gs * 5200.0f, 250.0f), Vec(-wx * 0.7f, gs * 5200.0f, 250.0f) };
+			const int nAims = highOnly ? 3 : 6;   // where only high in the net counts (an air dribble's 4 and 5), aim high
+			for (int ti = 4; ti <= horizon; ti += 3)
+				for (int ai = 0; ai < nAims; ai++)
+					for (const Vec& a : { aims[ai] })
+					for (int v = 0; v < 4; v++)
+						for (int jl : { 24, 60 })
+							AddPlan(out, sp, path, ti, a, 150.0f, jl, (v & 1) == 1, true, (v & 2) != 0);
+			// Off a carry the ball keeps most of its own speed, so a touch aimed at a point sends it low: aim the push
+			// the ball actually needs to drop high into the net (the middle, or a top corner for the 5)
+			if (highOnly)
+				for (int ti = 4; ti <= horizon; ti += 3)
+					for (float x : { 0.0f, 620.0f, -620.0f })
+						for (float reach : { 140.0f, 165.0f })
+							for (int pw = 0; pw < 2; pw++)
+								AddLiftPlan(out, sp, path, ti, Vec(x, gs * 5120.0f, 515.0f), reach, 24, false, pw == 1);
+		};
+		shot.ended = [](const SavePoint& at, int stepStart) {
+			if (at.lastTouch > stepStart && at.tick - at.lastTouch >= 6) return 1;
+			return 0;
+		};
+		shot.aimFix = 16;
+		shot.crossing = [gs](const SavePoint& at, Vec& cr) {
+			Vec p = at.ball.pos, v = at.ball.vel;
+			if (v.y * gs < 100.0f) return false;
+			float t = (gs * 5120.0f - p.y) / v.y;
+			if (t < 0.0f || t > 2.5f) return false;
+			cr = Vec(p.x + v.x * t, gs * 5200.0f, std::max(93.0f, p.z + v.z * t - 325.0f * t * t));
+			return true;
+		};
+		shot.score = [gs](const SavePoint& at) {
+			float on, h, sp;
+			AimBall(at.ball, gs, on, h, sp);
+			return on * (1.0f + std::clamp((h - 150.0f) / 300.0f, 0.0f, 1.0f) + std::clamp((sp - 1400.0f) / 1400.0f, 0.0f, 1.0f));
+		};
+		return shot;
+	}
+
+	// ---- Each mechanic's step lists for the search (the rulebook's steps, with how to try them). Several lists =
+	// several ways to play the mechanic (e.g. an air dribble with or without an extra carry touch). Empty = the
+	// mechanic isn't step-searched yet, or the search starts too late for it. ----
+	std::vector<std::vector<StepDef>> MechanicPlans(const ShotAnalysis& real, const std::vector<Frame>& fr, int s, float gs)
+	{
+		std::vector<std::vector<StepDef>> plans;
+		if (!real.valid) return plans;
 
 		if (real.type == ShotType::DoubleTap && real.setupTouchTick > s + 6)
 		{
+			std::vector<StepDef> steps;
 			const int surface = real.tapSurface != 0 ? real.tapSurface : 1;
 			// 1. Setup: send it into the backboard (the surface you used), somewhere a second touch can reach
 			StepDef setup;
 			setup.name = "Setup";
 			setup.maxTicks = 760;
 			setup.beam = 8;
-			setup.plans = [gs](const SavePoint& sp, const std::vector<Vec>& path, std::vector<Bot::Plan>& out) {
+			setup.plans = [gs](const SavePoint& sp, const std::vector<Vec>& path, std::vector<PlanSpec>& out) {
 				const int horizon = std::min(300, static_cast<int>(path.size()) - 1);
 				for (int ti = 12; ti <= horizon; ti += 6)
 					for (float x : { -450.0f, 0.0f, 450.0f })
@@ -695,8 +1264,7 @@ namespace
 							for (int jl : { 12, 24, 48, 84, 120 })
 								for (int pw = 0; pw < 2; pw++)
 								{
-									Bot::Plan pl;
-									if (PlanFrom(sp, path, ti, Vec(x, gs * 5150.0f, z), 150.0f, jl, false, true, pw == 1, pl)) out.push_back(pl);
+									AddPlan(out, sp, path, ti, Vec(x, gs * 5150.0f, z), 150.0f, jl, false, true, pw == 1);
 								}
 			};
 			setup.ended = [surface](const SavePoint& at, int stepStart) {
@@ -714,67 +1282,162 @@ namespace
 				if (at.tick - at.firstTouch > 420) return -3;   // long setups from midfield take a while to get there
 				return 0;
 			};
+			// Your own setup first (you already know how to get it to the wall)
+			setup.inputs = YourWayIn(fr, s, real.setupTouchTick);
 			// After the setup touch: fly to where the ball will be a moment after it comes off the wall, lined up to hit
 			// it at the goal (the "read")
-			setup.afterTouch = [gs](int tick, const CarState& car, const BallState& b, Bot::Plan& f) {
-				const float wallY = gs * (5120.0f - kBallR);
-				if (b.vel.y * gs < 200.0f) return false;
-				float t = (wallY - b.pos.y) / b.vel.y;
-				if (t < 0.0f || t > 4.0f) return false;
-				Vec P = b.pos + b.vel * t + Vec(0, 0, -325.0f * t * t);
-				Vec vw = b.vel + Vec(0, 0, -650.0f * t);
-				Vec vr(vw.x * 0.9f, -vw.y * 0.6f, vw.z * 0.9f);              // off the wall (rough bounce)
-				const float after = 0.3f;
-				Vec Q = P + vr * after + Vec(0, 0, -325.0f * after * after);
-				if (Q.z < 140.0f) Q.z = 140.0f;
-				Vec aim(0, gs * 5120.0f, 360.0f);
-				Vec d = aim - Q; d = d / std::max(1.0f, d.Length());
-				f.target = Q - d * 150.0f; f.hitDir = d;
-				f.arriveTick = tick + static_cast<int>((t + after) * 120.0f);
-				f.jumpTick = car.isOnGround ? tick : -1;
-				f.dodge = false; f.doubleJump = false; f.power = false;
-				return true;
-			};
+			for (float after : { 0.25f, 0.45f, 0.65f })
+				setup.follows.push_back([gs, after](int tick, const CarState& car, const BallState& b, Bot::Plan& f) {
+					const float wallY = gs * (5120.0f - kBallR);
+					if (b.vel.y * gs < 200.0f) return false;
+					float t = (wallY - b.pos.y) / b.vel.y;
+					if (t < 0.0f || t > 4.0f) return false;
+					Vec P = b.pos + b.vel * t + Vec(0, 0, -325.0f * t * t);
+					Vec vw = b.vel + Vec(0, 0, -650.0f * t);
+					Vec vr(vw.x * 0.9f, -vw.y * 0.6f, vw.z * 0.9f);              // off the wall (rough bounce)
+					Vec Q = P + vr * after + Vec(0, 0, -325.0f * after * after);
+					if (Q.z < 140.0f) Q.z = 140.0f;
+					Vec aim(0, gs * 5120.0f, 300.0f);
+					Vec d = aim - Q; d = d / std::max(1.0f, d.Length());
+					f.target = Q - d * 150.0f; f.hitDir = d;
+					f.arriveTick = tick + static_cast<int>((t + after) * 120.0f);
+					f.jumpTick = car.isOnGround ? tick : -1;
+					f.dodge = false; f.doubleJump = false; f.power = false;
+					return true;
+				});
 			setup.score = [](const SavePoint& at) {
 				// A rebound you can get to: ball near the middle, not too high, car close, flip and boost left
 				// High off the wall (time to read it before it drops), near the middle, car close and coming in slower than
 				// the ball is coming out
 				float dist = (at.ball.pos - at.car.pos).Length();
-				float hi = std::clamp((at.ball.pos.z - 400.0f) / 500.0f, -1.0f, 1.0f);
+				float hi = 1.0f - std::min(2.0f, std::fabs(at.ball.pos.z - 800.0f) / 400.0f);   // high enough to read, low enough to come down
 				return 1.5f * hi - dist / 1500.0f - std::fabs(at.ball.pos.x) / 1200.0f
 					+ (at.car.HasFlipOrJump() ? 0.2f : 0.0f) + at.car.boost / 400.0f;
 			};
 			steps.push_back(setup);
 
-			// 2. The second touch, off the rebound, into the goal
-			StepDef shot;
-			shot.name = "Shot";
-			shot.maxTicks = 220;
-			shot.beam = 8;
-			shot.plans = [gs, wx, zHi](const SavePoint& sp, const std::vector<Vec>& path, std::vector<Bot::Plan>& out) {
-				const int horizon = std::min(170, static_cast<int>(path.size()) - 1);
-				const Vec aims[3] = { Vec(0, gs * 5200.0f, zHi), Vec(wx, gs * 5200.0f, zHi), Vec(-wx, gs * 5200.0f, zHi) };
-				for (int ti = 4; ti <= horizon; ti += 3)
-					for (const Vec& a : aims)
-						for (int v = 0; v < 4; v++)
-							for (int jl : { 24, 60 })
-							{
-								Bot::Plan pl;
-								if (PlanFrom(sp, path, ti, a, 150.0f, jl, (v & 1) == 1, true, (v & 2) != 0, pl)) out.push_back(pl);
-							}
+			steps.push_back(ShotStep(gs, 170));
+			plans.push_back(std::move(steps));
+		}
+
+		if (real.type == ShotType::AirDribble && real.airFirstTouch > s + 4)
+		{
+			// 1. Setup: off the ground or wall with the ball, into the first touch in the air (your way in first)
+			StepDef setup;
+			setup.name = "Setup";
+			setup.maxTicks = 420;
+			setup.beam = 8;
+			setup.inputs = YourWayIn(fr, s, real.airFirstTouch);
+			setup.plans = [gs](const SavePoint& sp, const std::vector<Vec>& path, std::vector<PlanSpec>& out) {
+				// The bot's own pop: a soft touch up and toward the goal
+				const int horizon = std::min(240, static_cast<int>(path.size()) - 1);
+				for (int ti = 12; ti <= horizon; ti += 6)
+					for (float up : { 1200.0f, 1800.0f })
+						for (int jl : { 12, 24, 48, 84 })
+						{
+							Vec B = path[ti];
+							Vec aim(B.x * 0.5f, gs * 5120.0f, B.z + up);
+							AddPlan(out, sp, path, ti, aim, 160.0f, jl, false, true, false);
+						}
 			};
-			shot.ended = [](const SavePoint& at, int stepStart) {
-				if (at.touches >= 2 && at.tick - at.lastTouch >= 6) return 1;
+			setup.ended = [](const SavePoint& at, int stepStart) {
+				if (at.firstTouch < 0 || at.tick - at.firstTouch < 6) return 0;
+				const Frame& f = at.frames.back();
+				if (ShotGeometry::OnSurface(f) && f.carZ < 300.0f) return -1;   // still on the floor: that's a pop, not the air touch yet
+				return (Vec(f.ballX, f.ballY, f.ballZ) - Vec(f.carX, f.carY, f.carZ)).Length() < 450.0f ? 1 : -1;
+			};
+			setup.score = [gs](const SavePoint& at) {
+				float dist = (at.ball.pos - at.car.pos).Length();
+				float toward = at.ball.vel.y * gs / 1000.0f;
+				// A first touch already in the air starts the chain (one touching it off the wall or ground doesn't count)
+				const int ti = at.firstTouch - at.start;
+				bool air = ti >= 1 && ti < static_cast<int>(at.frames.size()) && !ShotGeometry::OnSurface(at.frames[ti - 1]);
+				return -dist / 600.0f + std::clamp(toward, -1.0f, 1.0f) + at.car.boost / 200.0f + (air ? 0.5f : 0.0f);
+			};
+
+			// 2. Carry: another soft touch, keeping the ball close and moving toward the goal
+			StepDef carry;
+			carry.name = "Carry";
+			carry.maxTicks = 140;
+			carry.beam = 8;
+			carry.plans = [gs](const SavePoint& sp, const std::vector<Vec>& path, std::vector<PlanSpec>& out) {
+				const int horizon = std::min(100, static_cast<int>(path.size()) - 1);
+				for (int ti = 6; ti <= horizon; ti += 2)
+					for (float up : { 200.0f, 500.0f, 900.0f, 1400.0f })
+						for (float reach : { 130.0f, 150.0f, 170.0f })
+						{
+							Vec B = path[ti];
+							Vec aim(B.x * 0.6f, gs * 5120.0f, B.z + up);
+							AddPlan(out, sp, path, ti, aim, reach, 24, false, false, false);
+						}
+			};
+			for (float back : { 110.0f, 140.0f })
+				for (float down : { 30.0f, 60.0f })
+					for (float k : { 2.0f, 3.5f })
+						carry.controllers.push_back(CarrySkill(gs, back, down, k));
+			// ...or carried on an arc that would drop it high into the net (keeps the ball up instead of letting it sink)
+			for (float back : { 110.0f, 140.0f })
+				for (float k : { 2.0f, 3.5f })
+					carry.controllers.push_back(CarryAim(gs, 0.0f, 515.0f, back, k));
+			carry.maxTicks = 360;
+			carry.ended = [gs](const SavePoint& at, int stepStart) {
+				const Frame& f = at.frames.back();
+				if (ShotGeometry::OnSurface(f) && f.carZ < 300.0f) return -1;   // landed on the floor: the air dribble's over
+				if (f.ballZ < 150.0f) return -1;
+				float dist = (Vec(f.ballX, f.ballY, f.ballZ) - Vec(f.carX, f.carY, f.carZ)).Length();
+				if (dist > 650.0f) return -1;                         // lost it
+				if (at.lastTouch <= stepStart || at.tick - at.lastTouch < 8) return 0;
+				// Touches in this step
+				int touches = 0, last = -100;
+				for (int i = std::max(0, stepStart - at.start); i < static_cast<int>(at.frames.size()); i++)
+					if (at.frames[i].touch) { if (i - last > 8) touches++; last = i; }
+				float toLine = 5120.0f - f.ballY * gs;
+				// Carried close enough to shoot (or a long carry): the step's done
+				if ((toLine < 1600.0f && dist < 400.0f) || touches >= 5) return 1;
 				return 0;
 			};
-			shot.score = [gs, aimBall](const SavePoint& at) {
-				float on, h, sp;
-				aimBall(at.ball, gs, on, h, sp);
-				return on * (1.0f + std::clamp((h - 150.0f) / 300.0f, 0.0f, 1.0f) + std::clamp((sp - 1400.0f) / 1400.0f, 0.0f, 1.0f));
+			carry.score = [gs](const SavePoint& at) {
+				float dist = (at.ball.pos - at.car.pos).Length();
+				float toward = at.ball.vel.y * gs / 1000.0f;
+				return -dist / 600.0f + std::clamp(toward, -1.0f, 1.0f) + at.car.boost / 200.0f;
 			};
-			steps.push_back(shot);
+
+			StepDef shot = ShotStep(gs, 120, true);
+			// ...or carry it on into the shot: the same carry, pushed at the top of the net or a top corner
+			for (float x : { 0.0f, 520.0f, -520.0f })
+				for (float back : { 110.0f, 140.0f })
+					for (float k : { 2.5f, 4.0f })
+						shot.controllers.push_back(CarrySkill(gs, back, 70.0f, k, Vec(x, 0, 640.0f)));
+			// Carried into a spot high in the net: the middle up high, or a top corner (the 5)
+			for (float x : { 0.0f, 620.0f, -620.0f })
+				for (float z : { 500.0f, 530.0f })
+					for (float back : { 110.0f, 140.0f })
+						for (float k : { 2.5f, 4.0f })
+							shot.controllers.push_back(CarryAim(gs, x, z, back, k));
+			// The shot has to come out of the carry: still in the air, no landing in between. A carry into the net keeps
+			// touching it, so the step isn't over at the first gap between touches: it's over once the ball's let go
+			// heading into the net (or in), or after a longer gap (the carry's done either way).
+			auto cross = shot.crossing;
+			shot.maxTicks = 260;
+			shot.ended = [cross, gs](const SavePoint& at, int stepStart) {
+				const Frame& f = at.frames.back();
+				if (at.lastTouch <= stepStart && ShotGeometry::OnSurface(f) && f.carZ < 300.0f) return -1;
+				if (f.ballY * gs > 5120.0f + kBallR) return 1;
+				if (at.lastTouch <= stepStart) return 0;
+				const int since = at.tick - at.lastTouch;
+				if (since < 6) return 0;
+				Vec cr;
+				if (cross(at, cr) && std::fabs(cr.x) < 800.0f && cr.z > 200.0f) return 1;
+				return since >= 24 ? 1 : 0;
+			};
+
+			// A 4 needs a real chain (3+ touches in the air): the pop, one or two carries, then the shot
+			plans.push_back({ setup, carry, shot });
+			StepDef carry2 = carry;
+			carry2.name = "Carry 2";
+			plans.push_back({ setup, carry, carry2, shot });
 		}
-		return steps;
+		return plans;
 	}
 }
 
@@ -953,12 +1616,27 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 		for (size_t i = 0; i < coarse.size() && timed < 12 && !stop(); i += step, timed++) tryOption(coarse[i]);
 		float perRun = std::chrono::duration<float>(std::chrono::steady_clock::now() - c0).count() / std::max(1, timed);
 		float planned = static_cast<float>(budget + (depth >= 2 ? 2500 + 4000 : 500 + 700) + 250);
+		const int baseBudget = budget;
 		scale = std::clamp(maxSeconds * 0.6f / std::max(1e-4f, perRun * planned), 0.12f, 1.0f);
 		budget = std::max(120, static_cast<int>(budget * scale));
 		coarseBudget = budget * 40 / 100;
 		size_t start = static_cast<size_t>(timed) * step;
 		step = std::max(1, static_cast<int>(coarse.size()) / std::max(1, coarseBudget));
 		for (size_t i = start; i < coarse.size() && !stop(); i += step) tryOption(coarse[i]);
+		// The first few runs are the slow ones (warming up), so measure again over the whole coarse pass. With time to
+		// spare, the rest of the search (aiming, nudging, refining, the mechanic steps) grows to use it: the wait you
+		// already sit through buys a deeper look, up to a few times the normal size.
+		if (ScaleCap(depth) > 1.0f && out.tries > 40 && !stop())
+		{
+			float perRun2 = std::chrono::duration<float>(std::chrono::steady_clock::now() - c0).count() / std::max(1, out.tries);
+			float use = maxSeconds * (depth >= 2 ? 0.55f : 0.4f) - elapsed();
+			float grown = std::clamp(use / std::max(1e-4f, perRun2 * planned), 0.12f, ScaleCap(depth));
+			if (grown > scale)
+			{
+				scale = grown;
+				budget = std::max(budget, static_cast<int>(baseBudget * scale));
+			}
+		}
 	}
 
 	// ---- Aim correction on the best few ("shooting"): play it, see where the ball really crosses the goal line,
@@ -1036,24 +1714,27 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 	// throttle and boost over time and moves the jumps, keeping whatever plays out best. Run on your own line
 	// (the best version of the shot you went for) and on the from-scratch bot's best lines (polishing them
 	// toward a 4 or 5: more lift, more power, a cleaner line-up). ----
-	struct CemTry { std::vector<CarControls> ctl; SimRun run; float q; int source; };   // source 0 your line, 1 the bot's
+	struct CemTry { std::vector<CarControls> ctl; SimRun run; float q; int source; std::function<SimRun(int, int)> rerun; std::string note; std::vector<int> bounds; };   // source 0 your line, 1 the bot's, 2 the step search
 	std::vector<CemTry> cemBest;   // the best few goals, inputs kept
 
 	// ---- Multi-step mechanics: the step search (its lines join the refined ones and go through the same checks) ----
 	std::string stepNote;
+	std::vector<std::vector<StepDef>> mechPlans = MechanicPlans(real, fr, s, gs);   // kept alive: found lines are re-played from it
+	if (!mechPlans.empty() && !stop())
 	{
-		std::vector<StepDef> mechSteps = MechanicSteps(real, s, gs);
-		if (!mechSteps.empty() && !stop())
+		std::unique_ptr<Arena> ballArena(Arena::Create(GameMode::SOCCAR));
+		std::mt19937 srng(777u + static_cast<unsigned>(n));
+		int runs = 0, replayed = 0, scored = 0;
+		std::string per;
+		for (size_t pi = 0; pi < mechPlans.size(); pi++)
 		{
-			std::unique_ptr<Arena> ballArena(Arena::Create(GameMode::SOCCAR));
+			const std::vector<StepDef>& mechSteps = mechPlans[pi];
 			SavePoint sp0 = StartPoint(arena.get(), car, fr, s);
-			std::mt19937 srng(777u + static_cast<unsigned>(n));
-			int runs = 0, replayed = 0, scored = 0;
 			std::vector<int> passed;
-			auto stepStop = [&]() { return cancelled() || elapsed() > maxSeconds * 0.45f; };
+			const float until = maxSeconds * (0.45f * (pi + 1) / mechPlans.size());
+			auto stepStop = [&]() { return cancelled() || elapsed() > until; };
 			std::vector<SavePoint> finals = StepSearch(arena.get(), car, ballArena.get(), sp0, mechSteps,
-				std::max(200, static_cast<int>((depth >= 2 ? 12000 : 3000) * scale)), srng, stepStop, runs, &passed);
-			out.tries += runs;
+				std::max(200, static_cast<int>((depth >= 2 ? 12000 : 3000) * scale / mechPlans.size())), srng, stepStop, runs, &passed);
 			Bot::Plan none;
 			none.arriveTick = maxTick;
 			for (SavePoint& f : finals)
@@ -1061,22 +1742,62 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 				if (hardStop()) break;
 				std::vector<CarControls> c = f.ctl;
 				c.resize(maxTick + 1);   // after the last step: hands off
-				SimRun r = Run(arena.get(), car, fr, s, none, maxTick, ref, 0, &c);
-				out.tries++;
+				SimRun r = PlayOut(arena.get(), car, fr, f, maxTick, ref);
 				replayed++;
+				if (kStepDebug && f.tick < static_cast<int>(r.frames.size()))
+				{
+					for (int t = s; t <= f.tick && t - s < static_cast<int>(f.frames.size()); t++)
+					{
+						const Frame& a = f.frames[t - s];
+						const Frame& b2 = r.frames[t];
+						float d = (Vec(a.ballX, a.ballY, a.ballZ) - Vec(b2.ballX, b2.ballY, b2.ballZ)).Length() + (Vec(a.carX, a.carY, a.carZ) - Vec(b2.carX, b2.carY, b2.carZ)).Length();
+						if (d > 0.5f)
+						{
+							std::string bs;
+							for (int b : f.bounds) bs += std::to_string(b) + " ";
+							fprintf(stderr, "  first divergence at tick %d (start %d), bounds %s; touch a %d b %d onGround a %d b %d\n", t, s, bs.c_str(), (int)a.touch, (int)b2.touch, (int)a.onGround, (int)b2.onGround);
+							break;
+						}
+					}
+					const Frame& g = r.frames[f.tick];
+					fprintf(stderr, "replay check: ball off by %.0f, car off by %.0f at tick %d; replay in %d grade %d\n",
+						(Vec(g.ballX, g.ballY, g.ballZ) - f.ball.pos).Length(), (Vec(g.carX, g.carY, g.carZ) - f.car.pos).Length(), f.tick, (int)r.wentIn, r.grade.overall);
+				}
+				if (kStepDebug && !r.wentIn)
+					fprintf(stderr, "final miss: reaches %d cross %.0f %.0f miss %.0f %s | air touches %d impulse %.0f close %.2f type %d\n", (int)r.shot.reachesGoalLine, r.shot.crossX, r.shot.crossZ,
+						r.shot.missDist, r.shot.missDir.c_str(), r.shot.airTouches, r.shot.airImpulse, r.shot.airCloseFrac, (int)r.shot.type);
+				if (kStepDebug && r.wentIn)
+					fprintf(stderr, "final goal at %.0f %.0f speed %.0f impulse %.0f\n", r.shot.crossX, r.shot.crossZ, r.shot.shotSpeed, r.shot.airImpulse);
+				if (kStepDebug && r.wentIn)
+				{
+					std::string why;
+					bool same = Mechanics::SameMechanic(real, fr, r.shot, r.frames, s, &why);
+					fprintf(stderr, "final goal: grade %d (you %d) type %d same %d %s | air touches %d close %.2f (you %.2f) | %s\n", r.grade.overall, out.realGrade,
+						(int)r.shot.type, (int)same, why.c_str(), r.shot.airTouches, r.shot.airCloseFrac, real.airCloseFrac, r.grade.overallWhy.c_str());
+				}
 				float q = styledQuality(r);
 				if (!r.wentIn) continue;
 				scored++;
 				r.frames.clear();
 				r.frames.shrink_to_fit();
-				cemBest.push_back({ std::move(c), std::move(r), q, 2 });
+				// Robustness for these lines = the plan still works from a nudged start with the timing off (re-aimed
+				// closed-loop like a player would), not that the exact same button presses still work
+				auto line = std::make_shared<SavePoint>(f);
+				auto rerun = [&, line, pi](int nudge, int shift) {
+					if (nudge == 0 && shift == 0) return PlayOut(arena.get(), car, fr, *line, maxTick, ref);   // the line itself
+					SavePoint endAt;
+					if (!RerunChain(arena.get(), car, fr, s, *line, mechPlans[pi], nudge, shift, endAt)) { SimRun miss; miss.touchTick = -1; return miss; }
+					return PlayOut(arena.get(), car, fr, endAt, maxTick, ref);
+				};
+				cemBest.push_back({ std::move(c), std::move(r), q, 2, rerun, f.note, f.bounds });
 			}
-			std::sort(cemBest.begin(), cemBest.end(), [](const CemTry& a, const CemTry& b) { return a.q > b.q; });
-			if (kStepDebug) { for (int k = 0; k < 2; k++) fprintf(stderr, "step%d: no touch %d, passed %d, twice %d, floor %d, timeout %d, other surface %d, ran out %d\n", k, gStepDbg[k*8], gStepDbg[k*8+1], gStepDbg[k*8+2], gStepDbg[k*8+3], gStepDbg[k*8+4], gStepDbg[k*8+5], gStepDbg[k*8+7]); for (int& x : gStepDbg) x = 0; }
-			std::string per;
+			if (kStepDebug) { for (int k = 0; k < 4; k++) fprintf(stderr, "list %zu step%d: no touch %d, passed %d, fail1 %d, fail2 %d, fail3 %d, fail4 %d, ran out %d\n", pi, k, gStepDbg[k*8], gStepDbg[k*8+1], gStepDbg[k*8+2], gStepDbg[k*8+3], gStepDbg[k*8+4], gStepDbg[k*8+5], gStepDbg[k*8+7]); for (int& x : gStepDbg) x = 0; }
+			per += pi ? " | " : "";
 			for (size_t k = 0; k < passed.size(); k++) per += std::format("{}{} {}", k ? ", " : "", mechSteps[k].name, passed[k]);
-			stepNote = std::format("Step search: {} tries; passed {}; {} of {} finished lines scored.", runs, per, scored, replayed);
 		}
+		out.tries += runs + replayed;
+		std::sort(cemBest.begin(), cemBest.end(), [](const CemTry& a, const CemTry& b) { return a.q > b.q; });
+		stepNote = std::format("Step search: {} tries; passed {}; {} of {} finished lines scored.", runs, per, scored, replayed);
 	}
 	std::mt19937 crng(4242u + static_cast<unsigned>(n));
 	std::normal_distribution<float> N01(0.0f, 1.0f);
@@ -1210,9 +1931,10 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 			if (p.jumpTick >= 0) p.jumpTick = std::max(s, p.jumpTick + shift);
 			return Run(arena.get(), car, fr, s, p, maxTick, ref, nudge);
 		}
+		if (cemBest[pk.cemIdx].rerun) return cemBest[pk.cemIdx].rerun(nudge, shift);
 		Bot::Plan none;
 		none.arriveTick = (real.valid ? real.touchTick : s) + 120;
-		if (shift == 0) return Run(arena.get(), car, fr, s, none, maxTick, ref, nudge, &cemBest[pk.cemIdx].ctl);
+		if (shift == 0) return Run(arena.get(), car, fr, s, none, maxTick, ref, nudge, &cemBest[pk.cemIdx].ctl, cemBest[pk.cemIdx].bounds.empty() ? nullptr : &cemBest[pk.cemIdx].bounds);
 		const std::vector<CarControls>& c0 = cemBest[pk.cemIdx].ctl;
 		std::vector<CarControls> c = c0;
 		for (int i = s; i < static_cast<int>(c.size()); i++) { int j = std::clamp(i - shift, s, static_cast<int>(c0.size()) - 1); c[i] = c0[j]; }
@@ -1246,8 +1968,10 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 			held += r.wentIn && r.grade.overall >= expect - 1;
 			if (j - held > 2) break;
 		}
+		if (kStepDebug && pk.cemIdx >= 0 && cemBest[pk.cemIdx].source == 2) fprintf(stderr, "verify step-search line: expect %d (you %d), held %d\n", expect, out.realGrade, held);
 		if (held < 4) continue;
 		SimRun win = replay(pk, 0);
+		if (kStepDebug && pk.cemIdx >= 0 && cemBest[pk.cemIdx].source == 2) fprintf(stderr, "  win: in %d grade %d style %d touch %d\n", (int)win.wentIn, win.grade.overall, (int)styleOk(win), win.touchTick);
 		if (!win.wentIn || win.grade.overall <= out.realGrade || !styleOk(win)) continue;
 		out.status = EngineStatus::Found;
 		out.grade = win.grade.overall;
@@ -1317,6 +2041,7 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 		for (const Diff& d : diffs) if (parts.size() < 2 && d.size >= 0.75f) parts.push_back(d.say);
 		bool yourLine = pk.botIdx < 0 && cemBest[pk.cemIdx].source == 0;
 		std::string kind = yourLine ? "Engine (your line, sharpened)" : "Engine";
+		if (pk.cemIdx >= 0 && cemBest[pk.cemIdx].source == 2 && !cemBest[pk.cemIdx].note.empty()) kind = "Engine (" + cemBest[pk.cemIdx].note + ")";
 		std::string joined;
 		for (size_t i = 0; i < parts.size(); i++) joined += (i == 0 ? "" : " and ") + parts[i];
 		if (joined.empty()) joined = "same idea, cleaner contact";
@@ -1353,7 +2078,8 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 	for (const Tried& t : tried) { touched += t.run.touchTick >= 0; goals += t.run.wentIn; high += t.run.wentIn && t.run.grade.overall >= 4; }
 	for (const CemTry& c : cemBest) high += c.run.grade.overall >= 4;
 	out.note = std::format("{} lines tried: {} touched the ball, {} scored, {} as a 4 or 5. {:.1f} s.{}", tried.size(), touched, goals, high, elapsed(),
-		scale < 0.99f ? std::format(" This computer is slower, so the search was sized down to {:.0f}% to fit the time.", scale * 100.0f) : std::string());
+		scale < 0.99f ? std::format(" This computer is slower, so the search was sized down to {:.0f}% to fit the time.", scale * 100.0f)
+		: scale > 1.01f ? std::format(" It had time to spare, so it searched {:.1f}x deeper.", scale) : std::string());
 	if (!stepNote.empty()) out.note += " " + stepNote;
 	out.ms = elapsed() * 1000.0f;
 	return out;

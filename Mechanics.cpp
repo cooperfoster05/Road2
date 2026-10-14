@@ -20,7 +20,7 @@ namespace
 				  { SegKind::Flight, "Flight", "you reach the ball in the air" },
 				  { SegKind::Contact, "Shot", "a hit toward the goal" } } },
 			{ ShotType::DoubleTap, "Double tap",
-				"A double tap off the same surface you used (backboard, ceiling or wall top), scored on the second touch.",
+				"A double tap off the same surface you used (backboard, ceiling or wall top), the ball read off the wall (no pinching it on the wall), scored on the second touch.",
 				{ { SegKind::Setup, "Setup", "the first touch sends the ball into the backboard" },
 				  { SegKind::Read, "Read", "you get to the rebound" },
 				  { SegKind::Contact, "Shot", "the second touch goes toward the goal" } } },
@@ -90,6 +90,10 @@ bool Mechanics::SameMechanic(const ShotAnalysis& yours, const std::vector<Frame>
 	case ShotType::DoubleTap:
 		if (!line.doubleTap) return no("no double tap");
 		if (yours.tapSurface != 0 && line.tapSurface != yours.tapSurface) return no("off a different surface");
+		// A read of the rebound, not a pinch: the ball has to come off the wall before the second touch (at least
+		// about half a ball, more if you let yours come further off). Hitting it while it's still on the wall
+		// smothers it into the goal frame and drops it in on the line.
+		if (line.reboundDist < std::min(150.0f, std::max(100.0f, 0.75f * yours.reboundDist))) return no("pinched it on the wall, not a rebound");
 		return true;
 	case ShotType::Dribble:
 	{

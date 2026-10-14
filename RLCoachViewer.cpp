@@ -573,6 +573,14 @@ void RLCoach::ViewerShowWhatIf(bool on)
 			alt = whatIf.frames;
 			start = whatIf.startTick;
 		}
+		// A line that scores ends as the ball crosses, like a real rep does. Past that the replayed ball would only
+		// be held on the goal line (free play would explode it), which looks like it died there.
+		for (int i = std::max(1, start); i < static_cast<int>(alt.size()); i++)
+			if (std::fabs(alt[i].ballX) < kGoalHalfWidth && alt[i].ballZ < kGoalHeight && std::fabs(alt[i].ballY) > kGoalLineY)
+			{
+				alt.resize(i + 1);
+				break;
+			}
 		PracticeExit();
 		viewerRealFrames = std::move(viewerFrames);
 		viewerRealShot = viewerShot;

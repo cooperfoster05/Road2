@@ -307,6 +307,10 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 			s.backboardX = fr[bb].ballX;
 			s.tapSurface = WallTapSurface(fr[bb - 1], fr[bb + 1]);
 			s.setupTouchTick = setup;
+			const Frame& at = fr[std::max(bb, k - 1)];
+			const Frame& b0 = fr[bb];
+			s.reboundDist = std::sqrt((at.ballX - b0.ballX) * (at.ballX - b0.ballX) + (at.ballY - b0.ballY) * (at.ballY - b0.ballY)
+				+ (at.ballZ - b0.ballZ) * (at.ballZ - b0.ballZ));
 		}
 	}
 	if (s.dribble && !s.doubleTap) s.type = ShotType::Dribble;

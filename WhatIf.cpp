@@ -53,17 +53,43 @@ namespace
 				cs.hasJumped = false;
 				cs.airTimeSinceJump = 0;
 				cs.airTime = 0.5f;
-				cs.hasFlipped = !f.hasFlip;
-				cs.hasDoubleJumped = false;
 			}
 			else
 			{
 				cs.hasJumped = jumpTick >= 0;
 				cs.airTimeSinceJump = jumpTick >= 0 ? (s - jumpTick) / 120.0f : 0.0f;
 				cs.airTime = cs.airTimeSinceJump;
-				cs.hasFlipped = !f.hasFlip;
-				cs.hasDoubleJumped = !f.hasFlip;
 				if (jumpTick >= 0 && s - jumpTick < 24 && f.jump) { cs.isJumping = true; cs.jumpTime = (s - jumpTick) / 120.0f; }
+			}
+			// The flip: a flip used (and how long ago, which matters: the game locks your pitch for a while after
+			// one) is not the same as a double jump used. Counting every used flip as "just flipped" locked the sim's
+			// pitch for the first second of every line started in the air after a double jump.
+			cs.hasFlipped = false;
+			cs.hasDoubleJumped = false;
+			if (!f.hasFlip)
+			{
+				int second = -1;
+				for (int i = s; i > 0; i--)
+				{
+					if (fr[i].onGround && ShotGeometry::OnSurface(fr[i])) break;
+					if (i == jumpTick) break;
+					if (fr[i].jump && !fr[i - 1].jump && !fr[i - 1].onGround) { second = i; break; }
+				}
+				const Frame* j2 = second >= 0 ? &fr[second] : nullptr;
+				const bool dodge = j2 && std::fabs(j2->pitch) + std::fabs(j2->yaw) + std::fabs(j2->roll) >= 0.5f;
+				if (dodge)
+				{
+					cs.hasFlipped = true;
+					cs.flipTime = (s - second) / 120.0f;
+					cs.isFlipping = cs.flipTime < 0.65f;
+					float dx = -j2->pitch, dy = j2->yaw + j2->roll;
+					float dl = std::sqrt(dx * dx + dy * dy);
+					if (dl > 1e-3f && (std::fabs(dy) >= 0.1f || std::fabs(dx) >= 0.1f)) { dx /= dl; dy /= dl; }
+					else { dx = 0; dy = 0; }
+					cs.flipRelTorque = Vec(-dy, dx, 0);
+				}
+				else
+					cs.hasDoubleJumped = true;   // a double jump, or the flip ran out: either way no flip left, no pitch lock
 			}
 		}
 		car->SetState(cs);
@@ -72,6 +98,26 @@ namespace
 		bs.vel = Vec(f.ballVX, f.ballVY, f.ballVZ);
 		bs.angVel = Vec(f.ballAVX, f.ballAVY, f.ballAVZ);
 		ball->SetState(bs);
+	}
+
+	// Every run starts with every boost pad up, and with the physics' leftover wheel/contact state cleared (one tick
+	// parked high in the air), so the same inputs from the same start always play out exactly the same
+	void ResetPads(Arena* arena)
+	{
+		for (BoostPad* p : arena->GetBoostPads()) p->SetState(BoostPadState());
+	}
+
+	void ClearCarInternals(Arena* arena, Car* car)
+	{
+		CarState cs;
+		cs.pos = Vec(0, 0, 1400);
+		cs.isOnGround = false;
+		car->SetState(cs);
+		car->controls = CarControls();
+		BallState bs;
+		bs.pos = Vec(2500, 0, 1400);
+		arena->ball->SetState(bs);
+		arena->Step(1);
 	}
 
 	CarControls ControlsOf(const Frame& f)
@@ -128,6 +174,8 @@ namespace
 		SimRun r;
 		r.frames.assign(fr.begin(), fr.begin() + s + 1);
 		r.frames.reserve(maxTick + 2);
+		ClearCarInternals(arena, car);
+		ResetPads(arena);
 		LoadState(car, arena->ball, fr, s);
 		if (nudge > 0)
 		{
