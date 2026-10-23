@@ -17,6 +17,11 @@ namespace
 {
 	constexpr int   kLeadInTicks = 30;       // start 0.25 s before the segment so you can make the decision
 	constexpr float kTeleportDist = 400.0f;
+	// After a reset, stay frozen this long before an input can start the attempt. Free play's own reset (car to a
+	// kickoff spot, ball to the middle) can land a tick or two after the button; held here, the start is re-applied
+	// over it instead of the attempt starting from wherever the game put you (Oct 22: reset pressed quickly put the
+	// car on a kickoff spot with the ball flying off at the shot's speed).
+	constexpr int kFrozenGraceTicks = 18;
 	constexpr int   kPostTicks = 120;        // keep going 1 s after a goal / floor hit (catches late goals)
 	constexpr int   kRecoveryMaxTicks = 480; // when practicing recovery, wait up to 4 s to land
 
@@ -117,6 +122,7 @@ void RLCoach::PracticeBegin(int targetTick, SegKind kind, int segStart, const st
 	practiceResultLines.clear();
 	practiceLive.clear();
 	practiceState = PracticeState::Frozen;
+	practiceFrozenTicks = 0;
 	uiPracticeActive = true;
 	uiPracticeTarget = targetTick;
 
@@ -249,7 +255,8 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 
 	if (practiceState == PracticeState::Frozen)
 	{
-		if (!AnyInput(in))
+		practiceFrozenTicks++;
+		if (!AnyInput(in) || practiceFrozenTicks < kFrozenGraceTicks)
 		{
 			PracticeReleaseFlip(car);
 			PracticeApplyStart(car, ball, true);
@@ -272,7 +279,14 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 			int ignored = 0;
 			practiceEndTracker.Update(practiceRep[i], i > 0, i > 0 ? practiceRep[i - 1].ballZ : practiceRep[i].ballZ, i + 1, ignored);
 		}
-		practiceHavePrev = false;
+		// Watch for a reset from the very first live tick: compare against where the attempt starts (before, the
+		// first live tick was taken as the reference, so a reset landing on it went unnoticed)
+		{
+			const Frame& s0 = practiceRep[std::min(practiceStartTick, static_cast<int>(practiceRep.size()) - 1)];
+			practicePrevCar = Vector(s0.carX, s0.carY, s0.carZ);
+			practicePrevBall = Vector(s0.ballX, s0.ballY, s0.ballZ);
+			practiceHavePrev = true;
+		}
 		practiceState = PracticeState::Live;
 		repStartTime = std::chrono::steady_clock::now();
 		return;
@@ -419,6 +433,7 @@ void RLCoach::PracticeFinishAttempt(const std::string& reason)
 
 	practiceLive.clear();
 	practiceState = PracticeState::Frozen;
+	practiceFrozenTicks = 0;
 	CarWrapper car = gameWrapper->GetLocalCar();
 	if (!car.IsNull()) PracticeReleaseFlip(car);
 }
@@ -429,6 +444,7 @@ void RLCoach::PracticeRetry()
 	practiceLive.clear();
 	practiceResultLines.clear();
 	practiceState = PracticeState::Frozen;
+	practiceFrozenTicks = 0;
 	CarWrapper car = gameWrapper->GetLocalCar();
 	if (!car.IsNull()) PracticeReleaseFlip(car);
 }

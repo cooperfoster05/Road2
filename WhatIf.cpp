@@ -493,6 +493,16 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 	if (realGrade.overall >= 5) { out.status = WhatIfStatus::NotNeeded; return out; }
 
 	std::unique_ptr<Arena> arena(Arena::Create(GameMode::SOCCAR));
+	{
+		// Unlimited boost in your rep (it never drops while you hold it, as in most training and freeplay) = unlimited
+		// in the sim too, or your own inputs run the tank dry where you never did
+		int held = 0;
+		float low = 1000.0f;
+		for (const Frame& f : fr) { held += f.boost ? 1 : 0; low = std::min(low, f.boostAmount); }
+		MutatorConfig mc = arena->GetMutatorConfig();
+		mc.boostUsedPerSecond = held > 30 && low >= 99.0f ? 0.0f : RLConst::BOOST_USED_PER_SECOND;
+		arena->SetMutatorConfig(mc);
+	}
 	Car* car = arena->AddCar(Team::BLUE, Body(carBody));
 
 	std::vector<CarControls> realCtl(n);

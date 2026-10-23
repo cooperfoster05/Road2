@@ -297,6 +297,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	ShotEndTracker practiceEndTracker;
 	bool  practiceHavePrev = false;
 	Vector practicePrevCar, practicePrevBall;
+	int   practiceFrozenTicks = 0;   // ticks since this attempt was (re)frozen: input is ignored for the first few
 	float practiceSavedGameSpeed = 1.0f;
 	std::vector<PanelGradeLine> practiceResultLines;
 	std::vector<Frame> practiceRefFrames;    // your best rep on this shot, drawn faintly

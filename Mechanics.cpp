@@ -73,7 +73,36 @@ bool Mechanics::SameMechanic(const ShotAnalysis& yours, const std::vector<Frame>
 	switch (yours.type)
 	{
 	case ShotType::Ground:
+	{
+		if (lineFrames.empty()) return true;
+		// Played like a ground shot (Oct 22, from Coop's 507 ground shots). (1) No hovering: the engine could jump,
+		// boost and glide a foot off the floor for a long time to meet the ball exactly where it wanted. Coop is never
+		// airborne under 120 high for more than about 0.3 s before the touch (99% of his reps), so a line gets 0.35 s
+		// (or a tenth of a second more than he did). (2) Straight in: only 2 of his 507 ground shots touched the
+		// ceiling on the way and none a side wall, so a line that banks it in off the ceiling or a wall isn't the shot
+		// he went for (unless his did too).
+		auto lowAir = [](const std::vector<Frame>& f, int touch) {
+			const int n = static_cast<int>(f.size());
+			if (n == 0) return 0;
+			touch = std::clamp(touch, 0, n - 1);
+			int lg = touch;
+			while (lg > 0 && !f[lg].onGround) lg--;
+			int low = 0;
+			for (int i = lg + 1; i <= touch; i++) low += f[i].carZ < 120.0f ? 1 : 0;
+			return low;
+		};
+		auto banked = [](const std::vector<Frame>& f, int touch) {
+			for (int i = std::max(0, touch); i < static_cast<int>(f.size()); i++)
+			{
+				if (std::fabs(f[i].ballY) > 5120.0f) break;
+				if (f[i].ballZ > 1930.0f || std::fabs(f[i].ballX) > 3980.0f) return true;
+			}
+			return false;
+		};
+		if (lowAir(lineFrames, line.touchTick) > std::max(42, lowAir(yourFrames, yours.touchTick) + 12)) return no("hovered low over the ground to reach it");
+		if (banked(lineFrames, line.touchTick) && !banked(yourFrames, yours.touchTick)) return no("banked it off the ceiling or a wall");
 		return true;
+	}
 	case ShotType::Aerial:
 	{
 		if (lineFrames.empty()) return true;
