@@ -60,6 +60,9 @@ struct PerfTimer
 	~PerfTimer() { stat.Add(std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count()); }
 };
 
+// One number on the review screen: "SHOT SPEED / 1,980 / uu/s"
+struct ReviewStat { std::string label, value, sub; };
+
 class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	, public SettingsWindowBase  // adds an RLCoach tab in the F2 menu
 	, public PluginWindowBase    // the rep viewer window
@@ -239,29 +242,54 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 		const std::vector<Frame>& fr, int tick, const Vector& ballNow, bool showActual);
 	void StartPredictor();
 
-	// ---- v3 "What if" on the shot (WhatIf.h): a background search, started from the viewer ----
+	// ---- The review (Oct 24): three tabs for the rep being watched. Your shot; the smallest fix (the what-if: the
+	// least you could have changed); the best line (the engine). Both searches run on their own when a rep opens,
+	// one after the other on one background thread, and each fills its own slot as it finishes. ----
+	static constexpr int kFixLine = 0, kBestLine = 1;
 	std::thread whatIfThread;
 	std::atomic<bool> whatIfBusy{ false };
 	std::atomic<bool> whatIfCancel{ false };
 	std::mutex whatIfMutex;
-	WhatIfResult whatIf;                  // latest result (whatIfMutex)
-	std::string whatIfFile;               // the rep it's for (whatIfMutex)
-	std::atomic<int> uiWhatIfStart{ -1 }; // where the search would start in the rep being watched (-1 = no shot)
-	bool viewerShowingWhatIf = false;     // game thread: the viewer is playing the what-if instead of your rep
-	std::vector<Frame> viewerRealFrames;  // your rep, kept while the what-if plays
+	WhatIfResult lineResult[2];           // latest result per slot (whatIfMutex)
+	std::string lineFile[2];              // the rep each slot is for (whatIfMutex)
+	std::atomic<int> uiWhatIfStart{ -1 }; // where the what-if would start in the rep being watched (-1 = no shot)
+	int viewerShowing = -1;               // game thread: -1 your rep, or the slot whose line is playing instead
+	std::vector<Frame> viewerRealFrames;  // your rep, kept while a line plays
 	ShotAnalysis viewerRealShot;
-	std::atomic<bool> uiShowingWhatIf{ false };
+	std::atomic<int> uiShowing{ -1 };
+	std::atomic<int> uiLastLine{ kBestLine };   // the line drawn faintly over your rep
 	std::atomic<int> whatIfDepth{ 1 };    // the search running (or last run): 1 normal, 2 deeper
-	std::atomic<int> whatIfRunningPoint{ 0 };   // which what-if is running: WhatIfPoint as an int
+	std::atomic<int> whatIfRunningSlot{ -1 };   // which slot the running search fills (-1 = none)
+	std::atomic<int> whatIfRunningPoint{ 0 };   // which search: WhatIfPoint as an int
 	std::atomic<int> whatIfEngineStart{ -1 };   // where the last engine line took over (-1 = its default start)
 	std::atomic<int> uiWhatIfKeyKind{ -1 };     // stage 2: the breakdown line (SegKind) of the key moment, -1 = none
 	std::string uiWhatIfKeyWhat;                // "the reset", "the setup touch"... (uiSegMutex)
-	// game thread: searches the rep being watched (engineStart: where the engine takes over, -1 = its default)
+	std::atomic<bool> uiReviewPending{ false }; // the rep just opened and its searches haven't started yet
+	struct ReviewCacheEntry { std::string file; WhatIfResult line[2]; };
+	std::vector<ReviewCacheEntry> reviewCache;  // the last few reps' results, so reopening one is instant (whatIfMutex)
+	// game thread: both searches for the rep being watched (or its cached results)
+	void StartReview();
+	// game thread: one search into its slot (engineStart: where the engine takes over, -1 = its default)
 	void StartWhatIf(int depth = 1, WhatIfPoint point = WhatIfPoint::Shot, int engineStart = -1);
-	void CancelWhatIf();                  // any thread: stops a search and forgets the last result
-	void ViewerShowWhatIf(bool on);       // game thread: play the what-if (or go back to your rep)
-	void PracticeWhatIf();                // game thread: practice from where the what-if starts, its path drawn faintly
+	void CancelWhatIf();                  // any thread: stops the searches and forgets their results
+	// game thread: play a line instead of your rep (slot), or your rep again (-1). keepPlayhead: stay at the same
+	// moment (switching tabs); otherwise start just before the line takes over and play.
+	void ViewerShowLine(int slot, bool keepPlayhead);
+	void PracticeLine(int slot);          // game thread: practice from where a line starts, its path drawn faintly
 	void DrawWhatIfPath(CanvasWrapper& canvas);
+
+	// UI copies for the review header (uiSegMutex)
+	int uiOverallGrade = 0;
+	std::string uiOverallName, uiOverallWhy, uiMechanic;
+	std::vector<ReviewStat> uiStats;
+	int uiTab = 0;                        // render thread: 0 your shot, 1 smallest fix, 2 best line
+	std::string uiTabFile;                // render thread: the rep uiTab belongs to (a new rep opens on Your shot)
+	bool uiDetailsOpen = false;           // render thread: the breakdown under the tabs
+
+	// Fonts (UiFonts.h), loaded by BakkesMod; null until loaded (the default font is used meanwhile)
+	ImFont* uiFonts[6] = {};
+	void LoadUiFonts();                   // onLoad: install and queue them
+	void FetchUiFonts();                  // render thread: pick up the ones that have loaded
 
 	// ---- Practice mode (game thread) ----
 	enum class PracticeState { Off, Frozen, Live };

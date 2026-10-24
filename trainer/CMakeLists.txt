@@ -1,0 +1,37 @@
+# Cloud / Linux build of the trainer and its benchmarks (Coop's PC uses RLCoachTrainer.vcxproj instead).
+# The plugin's shared code includes "pch.h" (the BakkesMod one), so it is copied next to a plain stand-in here.
+cmake_minimum_required(VERSION 3.20)
+project(RLCoachTrainer CXX C)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+set(CMAKE_CXX_FLAGS_RELEASE "-O2 -march=x86-64-v3 -DNDEBUG")
+set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
+
+get_filename_component(REPO "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+set(STUB "${CMAKE_BINARY_DIR}/stub")
+file(WRITE "${STUB}/pch.h" "#pragma once\n#include <string>\n#include <vector>\n#include <functional>\n#include <memory>\n")
+set(SHARED Engine.cpp Grader.cpp Mechanics.cpp ShotGeometry.cpp Segmenter.cpp ShotBook.cpp RepLibrary.cpp RepStore.cpp)
+set(SHARED_COPIES "")
+foreach(f ${SHARED})
+  configure_file("${REPO}/${f}" "${STUB}/${f}" COPYONLY)
+  list(APPEND SHARED_COPIES "${STUB}/${f}")
+endforeach()
+
+file(GLOB_RECURSE RS_SRC "${REPO}/third_party/RocketSim/src/*.cpp" "${REPO}/third_party/RocketSim/libsrc/*.cpp")
+add_library(rocketsim STATIC ${RS_SRC})
+target_compile_definitions(rocketsim PUBLIC RS_DONT_LOG)
+target_compile_options(rocketsim PRIVATE -w)
+
+add_library(rlcore STATIC ${SHARED_COPIES} "${REPO}/third_party/miniz/miniz.c")
+target_include_directories(rlcore PUBLIC "${STUB}" "${REPO}")
+target_link_libraries(rlcore PUBLIC rocketsim pthread)
+set_source_files_properties("${REPO}/third_party/miniz/miniz.c" PROPERTIES COMPILE_OPTIONS "-w")
+
+file(GLOB TRAINER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
+if(TRAINER_SRC)
+  add_executable(rlctrain ${TRAINER_SRC})
+  target_link_libraries(rlctrain rlcore)
+endif()

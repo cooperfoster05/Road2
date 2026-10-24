@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <BuildType Name="Release" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="RLCoachTrainer.vcxproj" Id="6b1f2c4e-8d3a-4e7b-9a52-2f0c7d1e5a93" />
+</Solution>

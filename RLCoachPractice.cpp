@@ -82,7 +82,7 @@ void RLCoach::PracticeStartAt(int tick)
 
 void RLCoach::PracticeBegin(int targetTick, SegKind kind, int segStart, const std::string& label)
 {
-	if (viewerShowingWhatIf) ViewerShowWhatIf(false);   // practice always runs from your real rep
+	if (viewerShowing >= 0) ViewerShowLine(-1, true);   // practice always runs from your real rep
 	if (!gameWrapper->IsInFreeplay())
 	{
 		viewerStatus = "Practice runs in free play";

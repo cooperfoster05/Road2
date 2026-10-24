@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <ctime>
 #include <format>
+#include <fstream>
 #include <sstream>
 #include <thread>
 #include <unordered_set>
@@ -22,7 +23,9 @@
 //   2. update the shot book and auto grades (saved to disk)
 //   3. delete full recordings past their keep time, then trim
 //      the oldest un-starred ones if over the size cap.
-// Summaries, ratings and grades are never deleted.
+// Summaries, ratings and grades are never deleted. Neither are
+// recordings listed in protected_reps.txt (the engine and bot
+// benchmark reps, one file name per line; Oct 24).
 // ============================================================
 
 namespace
@@ -153,6 +156,16 @@ int RLCoach::TrimStorage(const std::filesystem::path& root, const std::filesyste
 	std::unordered_map<std::string, RepStore::RecInfo> recs;
 	for (RepStore::RecInfo& r : RepStore::List(root)) recs[r.name] = r;
 	std::unordered_set<std::string> best = shotBook.BestFiles();
+	std::unordered_set<std::string> protectedReps;
+	{
+		std::ifstream in(root / "protected_reps.txt");
+		std::string line;
+		while (std::getline(in, line))
+		{
+			while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+			if (!line.empty()) protectedReps.insert(line);
+		}
+	}
 	std::vector<RepListItem> items = RepLibrary::ListReps(root);   // newest first
 	std::time_t now = std::time(nullptr);
 
@@ -164,7 +177,7 @@ int RLCoach::TrimStorage(const std::filesystem::path& root, const std::filesyste
 		auto rec = recs.find(it.file);
 		if (rec == recs.end()) continue;
 		uint64_t bytes = rec->second.bytes;
-		bool safe = it.kept || best.count(it.file) || rec->second.file == session;
+		bool safe = it.kept || best.count(it.file) || protectedReps.count(it.file) || rec->second.file == session;
 		if (safe) { total += bytes; continue; }
 		double age = AgeDays(it.savedAt, now);
 		double limit = (it.rating > 0 || it.recoveryRating > 0) ? keepRatedD : keepD;

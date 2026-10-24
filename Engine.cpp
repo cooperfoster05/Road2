@@ -38,6 +38,7 @@ namespace
 	constexpr float kR2U = 32768.0f / 3.14159265f;
 	constexpr int   kNudges = 6;
 	constexpr float kBallR = 91.25f;
+	constexpr float kCleanerMargin = 800.0f;   // Quality points: about 0.4 of the credit toward a 5 (e.g. 20% closer on two counts)
 
 	// Multi-core (Oct 20). The search used one core. Independent sim runs now spread over worker threads, each with
 	// its own arena (RocketSim arenas are independent, and every run resets pads and wheel state, so a run gives the
@@ -629,12 +630,18 @@ namespace
 			credit += 2.0f * ramp(a.crossZ, 200.0f, 520.0f);        // a 4 at 360, a 5 at 500
 			credit += ramp(a.shotSpeed, 1500.0f, 2100.0f);
 		}
+		else if (a.type == ShotType::Dribble)
+		{
+			// Each mechanic's credit points at its own 5 (Oct 23): a dribble's is a hard flick (2,800) toward a corner (550 out)
+			credit += 1.5f * ramp(a.shotSpeed, 2300.0f, 2950.0f);
+			credit += 1.5f * ramp(std::fabs(a.crossX), 150.0f, 640.0f);
+		}
 		else
 		{
 			float touchSec = (a.touchTick - a.startTick) / 120.0f;
 			float vsBest = ref.valid ? touchSec - ref.touchSec : 0.0f;
 			credit += ramp(a.crossZ, 150.0f, 420.0f);                  // upper half of the net at 350
-			credit += ramp(a.shotSpeed, 1800.0f, 2900.0f);             // fast at 2,800
+			credit += ramp(a.shotSpeed, 1800.0f, 2950.0f);             // fast at 2,800 (past it, so a 5 survives a replay)
 			credit += ref.valid ? ramp(-vsBest, -0.6f, 0.0f) : 1.0f;   // early: within 0.2 s of your best (0.05 s for a 5)
 			credit += ramp(-a.aimErrDeg, -8.0f, -1.6f);               // on line: 3.5 deg for a 4, 1.6 for a 5
 			credit += ramp(-a.cornerDist, -900.0f, -200.0f);           // toward a top corner (or a rocket) for a 5
@@ -3001,7 +3008,8 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 	}
 	std::mt19937 crng(4242u + static_cast<unsigned>(n));
 	std::normal_distribution<float> N01(0.0f, 1.0f);
-	auto refine = [&](const std::vector<CarControls>& seed, int touch, int cemBudget, int source) {
+	std::vector<CemTry> polished;   // the 5 polish's goals (below)
+	auto refine = [&](const std::vector<CarControls>& seed, int touch, int cemBudget, int source, bool robust = false) {
 		const int m = static_cast<int>(seed.size());
 		const int w0 = std::max(s, touch - 180), w1 = std::min(m - 1, touch + 24);
 		if (w1 - w0 < 20) return;
@@ -3066,8 +3074,18 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 				const int base = out.tries;
 				std::vector<std::vector<CarControls>> cs(cnt);
 				std::vector<SimRun> rs(cnt);
+				std::vector<float> rq(cnt, 0.0f);
 				wk.Run(cnt, [&](int k, int w) {
 					cs[k] = build(xs[k]);
+					if (robust)
+					{
+						// The 5 polish (Oct 23): score each try by its worse of two plays, the exact start (what you'd be
+						// shown) and a nudged one, so it only climbs toward lines that are a 5 for real, not by luck
+						rs[k] = Run(wk.A(w), wk.C(w), fr, s, none, maxTick, ref, 0, &cs[k]);
+						SimRun r2 = Run(wk.A(w), wk.C(w), fr, s, none, maxTick, ref, 1000 + base + k, &cs[k]);
+						rq[k] = std::min(styledQuality(rs[k]), styledQuality(r2));
+						return;
+					}
 					// Each try from a slightly different start (the nudge), so the search favors lines that hold up.
 					// (Timing jitter here is off, Oct 18: it cost flip resets from late 23 (17) -> 19 (12).)
 #ifdef ENGINE_JITTER
@@ -3083,16 +3101,18 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 				{
 					SimRun& r = rs[k];
 					cemTries++;
-					out.tries++;
-					float q = styledQuality(r);
+					out.tries += robust ? 2 : 1;
+					float q = robust ? rq[k] : styledQuality(r);
 					if (q > bestQ) { bestQ = q; bestX = xs[k]; }
 					if (r.wentIn)
 					{
 						r.frames.clear();
 						r.frames.shrink_to_fit();
-						cemBest.push_back({ std::move(cs[k]), std::move(r), q, source });
-						std::sort(cemBest.begin(), cemBest.end(), [](const CemTry& a, const CemTry& b) { return a.q > b.q; });
-						if (cemBest.size() > 40) cemBest.pop_back();
+						// The polish keeps its own list, so it never pushes out a line the search already had
+						std::vector<CemTry>& into = robust ? polished : cemBest;
+						into.push_back({ std::move(cs[k]), std::move(r), q, source });
+						std::sort(into.begin(), into.end(), [](const CemTry& a, const CemTry& b) { return a.q > b.q; });
+						if (into.size() > (robust ? 12u : 40u)) into.pop_back();
 					}
 					gen.push_back({ q, std::move(xs[k]) });
 				}
@@ -3137,6 +3157,28 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 			seed.resize(std::max<size_t>(seed.size(), static_cast<size_t>(maxTick) + 1));
 			refine(seed, seedRun.touchTick, std::max(40, static_cast<int>((depth >= 2 ? 2000 : 350) * scale)), 1);
 		}
+	}
+
+	// ---- The 5 polish (Oct 23): the search's 5s were lucky plays (each try runs from a slightly nudged start, and
+	// the best of a thousand nudged plays is the luckiest), so the exact line came back a 4. Re-polish the best few
+	// 5s (and the best 4, when there's no 5) on plays that have to be a 5 both from the exact start and a nudged one.
+	if (real.valid && !stop())
+	{
+		std::vector<int> seeds;
+		for (int i = 0; i < static_cast<int>(cemBest.size()) && seeds.size() < 2; i++) if (cemBest[i].run.grade.overall >= 5 && !cemBest[i].rerun) seeds.push_back(i);
+		if (seeds.empty()) for (int i = 0; i < static_cast<int>(cemBest.size()); i++) if (cemBest[i].run.grade.overall == 4 && !cemBest[i].rerun) { seeds.push_back(i); break; }
+		struct Seed { std::vector<CarControls> ctl; int touch, source; };
+		std::vector<Seed> sv;
+		for (int i : seeds) sv.push_back({ cemBest[i].ctl, cemBest[i].run.touchTick, cemBest[i].source });
+		for (auto& [ctl, touch, src] : sv)
+		{
+			if (stop()) break;
+			std::vector<CarControls> seed = ctl;
+			seed.resize(std::max<size_t>(seed.size(), static_cast<size_t>(maxTick) + 1));
+			refine(seed, touch, std::max(40, static_cast<int>((depth >= 2 ? 240 : 120) * scale)), src, true);
+		}
+		for (CemTry& c : polished) cemBest.push_back(std::move(c));
+		std::sort(cemBest.begin(), cemBest.end(), [](const CemTry& a, const CemTry& b) { return a.q > b.q; });
 	}
 
 	// ---- Pick the best goal (from either engine) that also works from slightly nudged starts ----
@@ -3184,7 +3226,20 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 	// loop below still takes the first one in order that holds up, so the pick is the same as checking one by one.
 	struct CheckRes { bool done = false; int held = 0; int tries = 0; SimRun win; };
 	std::vector<CheckRes> cres(picks.size());
-	auto eligible = [&](const Pick& pk) { return pk.q >= -50000.0f && pickGrade(pk) > out.realGrade; };
+	// A cleaner 4 (Oct 23, Coop's call): when you already scored a 4, the engine almost never finds a 5 (0 of 15 on the
+	// benchmark), so a line that's still a 4 but clearly further toward a 5 also counts: higher in the net, harder,
+	// earlier, more on line, closer to a top corner (the partial credit toward the next grade, Quality's credit, plus
+	// speed). It has to stay a 4 from the nudged starts, not just stay in.
+	float realQ = -1e9f;
+	if (real.valid && realIn && out.realGrade == 4)
+	{
+		SimRun rr;
+		rr.touchTick = real.touchTick; rr.shot = real; rr.wentIn = true; rr.grade.overall = out.realGrade;
+		realQ = Quality(rr, ref);
+	}
+	auto cleaner = [&](int grade, float q) { return out.realGrade == 4 && grade == 4 && q - realQ >= kCleanerMargin; };
+	auto beats = [&](int grade, float q) { return grade > out.realGrade || cleaner(grade, q); };
+	auto eligible = [&](const Pick& pk) { return pk.q >= -50000.0f && beats(pickGrade(pk), pk.q); };
 	auto checkOne = [&](size_t i, int w) {
 		const Pick& pk = picks[i];
 		const int expect = pickGrade(pk);
@@ -3193,7 +3248,7 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 		{
 			SimRun r = replayOn(wk.A(w), wk.C(w), pk, 300 + j, kShift[j - 1]);
 			c.tries++;
-			c.held += r.wentIn && r.grade.overall >= expect - 1;
+			c.held += r.wentIn && r.grade.overall >= (expect > out.realGrade ? expect - 1 : expect);
 			if (j - c.held > 2) break;
 		}
 		if (c.held >= 4) c.win = replayOn(wk.A(w), wk.C(w), pk, 0, 0);
@@ -3232,7 +3287,7 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 		const int g4 = pk.botIdx >= 0 ? tried[pk.botIdx].run.grade.overall : cemBest[pk.cemIdx].run.grade.overall;
 		if (pk.q < -50000.0f) { dbgKind += g4 >= 4; continue; }   // not the kind of shot you went for
 		int expect = pk.botIdx >= 0 ? tried[pk.botIdx].run.grade.overall : cemBest[pk.cemIdx].run.grade.overall;
-		if (expect <= out.realGrade) continue;   // only lines that beat your shot
+		if (!beats(expect, pk.q)) continue;   // only lines that beat your shot (or a cleaner 4 than yours)
 		checked++;
 		ensureChecked(static_cast<size_t>(pi2));
 		CheckRes& cr = cres[pi2];
@@ -3242,7 +3297,8 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 		if (held < 4) { dbgFragile += expect >= 4; continue; }
 		SimRun win = std::move(cr.win);
 		if (kStepDebug && pk.cemIdx >= 0 && cemBest[pk.cemIdx].source == 2) fprintf(stderr, "  win: in %d grade %d style %d touch %d\n", (int)win.wentIn, win.grade.overall, (int)styleOk(win), win.touchTick);
-		if (!win.wentIn || win.grade.overall <= out.realGrade || !styleOk(win)) { dbgWin += expect >= 4; continue; }
+		if (!win.wentIn || !beats(win.grade.overall, styledQuality(win)) || !styleOk(win)) { dbgWin += expect >= 4; continue; }
+		const bool sameGrade = win.grade.overall == out.realGrade;
 		if (kStepDebug) { for (size_t q = pi2 + 1; q < picks.size(); q++) { const Pick& p2 = picks[q]; int g = p2.botIdx >= 0 ? tried[p2.botIdx].run.grade.overall : cemBest[p2.cemIdx].run.grade.overall; dbgUnreached += g >= 4; } }
 		if (kStepDebug) fprintf(stderr, "PICKSTAT shipped grade %d expect %d | 4-5 candidates %d: wrong kind %d, fragile %d, replay/style %d, after the pick or unchecked %d | checked %d\n", win.grade.overall, expect, dbgCand, dbgKind, dbgFragile, dbgWin, dbgUnreached, checked);
 		out.status = EngineStatus::Found;
@@ -3346,6 +3402,20 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 		if (pk.cemIdx >= 0 && cemBest[pk.cemIdx].source == 2 && real.valid && real.type == ShotType::Dribble) kind = "Engine (carried it, then flicked)";
 		if (pk.cemIdx >= 0 && cemBest[pk.cemIdx].source == 2 && real.valid && real.type == ShotType::AirDribble)
 			kind = cemBest[pk.cemIdx].note == "your setup" ? "Engine (your setup, then carried in)" : "Engine (carried in)";
+		if (sameGrade)
+		{
+			// What's cleaner about it, in words: the one or two biggest steps toward a 5
+			std::vector<std::pair<float, std::string>> better;
+			if (win.shot.shotSpeed - real.shotSpeed >= 150.0f) better.push_back({ (win.shot.shotSpeed - real.shotSpeed) / 300.0f, "harder" });
+			if (win.shot.crossZ - real.crossZ >= 60.0f) better.push_back({ (win.shot.crossZ - real.crossZ) / 120.0f, "higher" });
+			if (real.cornerDist - win.shot.cornerDist >= 100.0f) better.push_back({ (real.cornerDist - win.shot.cornerDist) / 200.0f, "closer to the corner" });
+			if ((real.touchTick - real.startTick) - (win.shot.touchTick - win.shot.startTick) >= 12) better.push_back({ ((real.touchTick - real.startTick) - (win.shot.touchTick - win.shot.startTick)) / 24.0f, "earlier" });
+			if (real.aimErrDeg - win.shot.aimErrDeg >= 1.0f) better.push_back({ (real.aimErrDeg - win.shot.aimErrDeg) / 2.0f, "more on line" });
+			std::sort(better.begin(), better.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+			std::string what = "a cleaner 4";
+			for (size_t i = 0; i < better.size() && i < 2; i++) what += (i == 0 ? ": " : " and ") + better[i].second;
+			kind = kind == "Engine" ? "Engine (" + what + ")" : kind.substr(0, kind.size() - 1) + ", " + what + ")";
+		}
 		std::string joined;
 		for (size_t i = 0; i < parts.size(); i++) joined += (i == 0 ? "" : " and ") + parts[i];
 		if (joined.empty()) joined = "same idea, cleaner contact";
@@ -3481,3 +3551,65 @@ static EngineResult LineOnce(const std::vector<Frame>& fr, bool realIn, bool flo
 	return std::move(best);
 #endif
 }
+
+// ---- For tools outside the engine (the bot trainer and its benchmark): the same start and tick as Run ----
+#include "EngineSim.h"
+
+void EngineSim::Start(Arena* arena, Car* car, const std::vector<Frame>& fr, int s, int nudge)
+{
+	ClearCarInternals(arena, car);
+	SetClock(arena, s);
+	LoadState(car, arena->ball, fr, s);
+	SetGrip(car, RecordedGrip(fr[s]));
+	ResetPads(arena);
+	if (nudge > 0)
+	{
+		std::mt19937 rng(static_cast<unsigned>(nudge) * 7919u);
+		std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+		CarState cs = car->GetState();
+		cs.pos += Vec(u(rng), u(rng), u(rng)) * 2.0f;
+		cs.vel += Vec(u(rng), u(rng), u(rng)) * 8.0f;
+		car->SetState(cs);
+		BallState bs = arena->ball->GetState();
+		bs.pos += Vec(u(rng), u(rng), u(rng)) * 2.0f;
+		bs.vel += Vec(u(rng), u(rng), u(rng)) * 8.0f;
+		arena->ball->SetState(bs);
+	}
+}
+
+Frame EngineSim::Step(Arena* arena, Car* car, const CarControls& c, Frame& cur)
+{
+	cur.throttle = c.throttle; cur.steer = c.steer; cur.pitch = c.pitch; cur.yaw = c.yaw; cur.roll = c.roll;
+	cur.jump = c.jump; cur.boost = c.boost; cur.handbrake = c.handbrake;
+	car->controls = c;
+	uint64_t t0 = arena->tickCount;
+	arena->Step(1);
+	CarState cs = car->GetState();
+	BallState bs = arena->ball->GetState();
+	Frame g;
+	g.tick = cur.tick + 1;
+	g.t = g.tick / 120.0f;
+	g.carX = cs.pos.x; g.carY = cs.pos.y; g.carZ = cs.pos.z;
+	Angle a = Angle::FromRotMat(cs.rotMat);
+	g.carYaw = static_cast<int>(std::lround(a.yaw * kR2U));
+	g.carPitch = static_cast<int>(std::lround(a.pitch * kR2U));
+	g.carRoll = static_cast<int>(std::lround(a.roll * kR2U));
+	g.carVX = cs.vel.x; g.carVY = cs.vel.y; g.carVZ = cs.vel.z;
+	g.carAVX = cs.angVel.x; g.carAVY = cs.angVel.y; g.carAVZ = cs.angVel.z;
+	g.boostAmount = cs.boost;
+	g.onGround = cs.isOnGround;
+	g.onWall = cs.isOnGround && cs.rotMat.up.z < 0.7f;
+	g.hasFlip = cs.HasFlipOrJump();
+	g.ballX = bs.pos.x; g.ballY = bs.pos.y; g.ballZ = bs.pos.z;
+	g.ballVX = bs.vel.x; g.ballVY = bs.vel.y; g.ballVZ = bs.vel.z;
+	g.ballAVX = bs.angVel.x; g.ballAVY = bs.angVel.y; g.ballAVZ = bs.angVel.z;
+	if (cs.ballHitInfo.isValid && cs.ballHitInfo.tickCountWhenHit >= t0)
+	{
+		g.touch = true;
+		Vec p = cs.ballHitInfo.ballPos + cs.ballHitInfo.relativePosOnBall;
+		g.touchX = p.x; g.touchY = p.y; g.touchZ = p.z;
+	}
+	return g;
+}
+
+const CarConfig& EngineSim::Body(int carBody) { return ::Body(carBody); }

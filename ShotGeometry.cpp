@@ -311,6 +311,12 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 			const Frame& b0 = fr[bb];
 			s.reboundDist = std::sqrt((at.ballX - b0.ballX) * (at.ballX - b0.ballX) + (at.ballY - b0.ballY) * (at.ballY - b0.ballY)
 				+ (at.ballZ - b0.ballZ) * (at.ballZ - b0.ballZ));
+			// For the 5 (Coop, Oct 24): the angle you hit it from, and how fast the whole play was
+			const float outY = std::max(1.0f, kGoalY - s.goalSign * at.ballY);
+			s.tapAngle = std::atan2(std::fabs(at.ballX), outY) * 57.2958f;
+			int left = -1;
+			for (int i = setup; i > 0; i--) if (OnSurface(fr[i])) { left = i; break; }
+			s.tapPlaySec = (k - (left >= 0 ? left : s.startTick)) / 120.0f;
 		}
 	}
 	if (s.dribble && !s.doubleTap) s.type = ShotType::Dribble;

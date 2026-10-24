@@ -51,7 +51,8 @@ void PluginWindowBase::Render()
 {
 	{
 		UiStyle::Scope style;   // RL Coach's look, only for this window
-		ImGui::SetNextWindowSize(ImVec2(640, 680), ImGuiCond_FirstUseEver);
+		ImGui::SetNextWindowSize(ImVec2(660, 980), ImGuiCond_FirstUseEver);
+		ImGui::SetNextWindowSizeConstraints(ImVec2(600, 500), ImVec2(100000.0f, 100000.0f));   // the review needs about 600 wide
 		if (ImGui::Begin(menuTitle_.c_str(), &isWindowOpen_, ImGuiWindowFlags_None))
 			RenderWindow();
 		ImGui::End();

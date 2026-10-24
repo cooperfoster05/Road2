@@ -2,7 +2,9 @@
 #include "RLCoach.h"
 #include "Ratings.h"
 #include "UiStyle.h"
+#include "UiFonts.h"
 #include "bakkesmod/wrappers/includes.h"
+#include "bakkesmod/wrappers/GuiManagerWrapper.h"
 
 #include <algorithm>
 #include <cmath>
@@ -149,12 +151,27 @@ void RLCoach::onLoad()
 	gameWrapper->RegisterDrawable([this](CanvasWrapper canvas) { PerfTimer t(perfDraw); RenderHud(canvas); });
 
 	LoadRatingKeys();
+	LoadUiFonts();
 	predictor.mirrorX = cvarManager->getCvar("rlcoach_pred_mirror").getBoolValue();
 	StartPredictor();
 
 	// In the background: tidy up storage, build the shot book and auto grades
 	StartHousekeeping();
 	LOG("RL Coach loaded. Reps save to {}", writer->Folder().string());
+}
+
+// The viewer's fonts (UiFonts.h): copied into BakkesMod's font folder the first time, then queued for loading.
+// They show up a frame or two later (FetchUiFonts); until then, and if this fails, the default font is used.
+void RLCoach::LoadUiFonts()
+{
+	const std::filesystem::path data(gameWrapper->GetDataFolderW());
+	if (!UiFonts::Install(data)) LOG("RL Coach: the viewer's fonts aren't in {} (using the default font)", (data / "RLCoach" / "fonts").string());
+	auto gui = gameWrapper->GetGUIManager();
+	for (int i = 0; i < UiFonts::kCount; i++)
+	{
+		auto [status, font] = gui.LoadFont(UiFonts::kSpecs[i].name, UiFonts::kSpecs[i].file, UiFonts::kSpecs[i].size, nullptr, UiFonts::Ranges());
+		if (status == 2 && font) uiFonts[i] = font;
+	}
 }
 
 void RLCoach::StartPredictor()

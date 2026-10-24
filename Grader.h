@@ -30,10 +30,14 @@ struct RepGrade
 namespace Grader
 {
 	// Bump whenever the rules or cutoffs change, so saved auto grades get redone
-	inline constexpr int kVersion = 13;
+	inline constexpr int kVersion = 14;
 
 	RepGrade GradeRep(const std::vector<Frame>& frames, const RepSegments& segs, const ShotAnalysis& shot,
 		bool wentIn, bool bouncedIn, const ShotReference& ref);
+
+	// Double taps (Coop, Oct 24): how quick the play was, 0 to about 1.15. Mostly the whole play (leaving the ground
+	// to the shot), then how hard the shot was, then how quick the read off the wall; a tighter angle is a bonus.
+	float DoubleTapPace(const ShotAnalysis& shot);
 
 	const char* Name(Grade g);
 	const char* OverallName(int overall);

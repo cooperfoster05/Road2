@@ -95,8 +95,10 @@ namespace
 
 	constexpr float kDtGoodZ = 360.0f;      // double tap goal at/above this height at the line = a 4
 	constexpr float kDtReadFast = 2600.0f;  // "hard" in the description
-	// A 5 (none in the data yet): high, hard and accurate
-	constexpr float kDtGreatZ = 550.0f, kDtGreatSpeed = 2800.0f, kDtGreatAim = 2.0f;
+	// A 5 (Coop, Oct 24): a 4 that's a quick play (DoubleTapPace), hit at least ~2.5 car lengths off the wall (a
+	// tap on the crossbar can be a 4, not a 5). A floor bounce in from the side still caps it at a 3; one coming
+	// down from above the goal doesn't count against it.
+	constexpr float kDtFivePace = 0.65f, kDtFiveOffWall = 300.0f, kDtSideAngle = 35.0f;
 
 	// First-pass setup and read grades for double taps (refine once there are more rated double taps)
 	Grade FromBackboardSpot(float z, float absX)
@@ -365,10 +367,14 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 	else if (shot.type == ShotType::DoubleTap)
 	{
 		bool high = shot.reachesGoalLine && shot.crossZ >= kDtGoodZ;
-		bool great = shot.reachesGoalLine && shot.crossZ >= kDtGreatZ && shot.shotSpeed >= kDtGreatSpeed && shot.aimErrDeg <= kDtGreatAim;
+		const float pace = DoubleTapPace(shot);
+		bool great = high && pace >= kDtFivePace && shot.reboundDist >= kDtFiveOffWall;
 		g.overall = high ? (great ? 5 : 4) : 3;
 		std::string why = std::format("{} goal, {}, {} ({})", "Double tap",
 			high ? "high in the net" : "low in the net", shot.shotSpeed >= kDtReadFast ? "hard" : "soft", Units::Speed(shot.shotSpeed));
+		if (great) why += ", a quick play off the wall";
+		else if (high && pace >= kDtFivePace) why += ", but hit right off the wall";
+		else if (high && shot.reboundDist >= kDtFiveOffWall) why += std::format(", but a slow play ({:.1f}s from leaving the ground)", shot.tapPlaySec);
 		gradeSeg(resultIdx, g.overall >= 5 ? Grade::Clean : g.overall == 4 ? Grade::Solid : Grade::Sloppy, why);
 		g.overallWhy = why;
 	}
@@ -450,7 +456,8 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 
 	// Bounced in off the floor on the way: where it ended up doesn't count for much (Oct 12: every bounced goal
 	// you've rated is a 3, all shot types). Crossbar-downs and post-ins aren't bounces.
-	bool bouncedGoal = wentIn && (shot.bouncedIn || bounced);
+	// (Double taps coming down from above the goal can't help a bounce, Coop Oct 24: only a side-angle bounce counts)
+	bool bouncedGoal = wentIn && (shot.bouncedIn || bounced) && !(shot.type == ShotType::DoubleTap && shot.tapAngle < kDtSideAngle);
 	if (bouncedGoal && g.overall > 3)
 	{
 		g.overall = 3;
@@ -530,4 +537,15 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		}
 	}
 	return g;
+}
+
+float Grader::DoubleTapPace(const ShotAnalysis& shot)
+{
+	auto ramp = [](float v, float lo, float hi) { return std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f); };
+	const float readSec = shot.backboardTick >= 0 ? (shot.touchTick - shot.backboardTick) / 120.0f : 1.0f;
+	const float play = ramp(-shot.tapPlaySec, -4.0f, -2.8f);     // the whole play: full marks at 2.8 s, none at 4 s
+	const float power = ramp(shot.shotSpeed, 2000.0f, 2900.0f);  // how hard
+	const float read = ramp(-readSec, -0.8f, -0.15f);           // how quick off the wall
+	const float tight = ramp(shot.tapAngle, 35.0f, 75.0f);       // bonus: a tighter angle
+	return 0.5f * play + 0.3f * power + 0.2f * read + 0.15f * tight;
 }

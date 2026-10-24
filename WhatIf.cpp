@@ -15,6 +15,8 @@
 #include <format>
 #include <memory>
 #include <random>
+#include <mutex>
+#include <array>
 
 using namespace RocketSim;
 
@@ -107,7 +109,12 @@ namespace
 		for (BoostPad* p : arena->GetBoostPads()) p->SetState(BoostPadState());
 	}
 
-	void ClearCarInternals(Arena* arena, Car* car)
+	// Oct 22 (the same fix as the engine's, Oct 20): the parked tick didn't clear the wheels' grip, which is used before
+	// it's updated, so a run starting on the ground or a wall depended on the run before it (up to 25 uu off 200 ticks
+	// later). After the parked tick the wheels are set back to a never-driven car's, then the start gets the grip that
+	// replays Coop's reps best: none on the ground (median 4.7 uu off 0.5 s later, vs 13.6 for the leftover full grip),
+	// forward grip only on a wall (15.9 vs 20.9).
+	void ParkTick(Arena* arena, Car* car)
 	{
 		CarState cs;
 		cs.pos = Vec(0, 0, 1400);
@@ -118,6 +125,49 @@ namespace
 		bs.pos = Vec(2500, 0, 1400);
 		arena->ball->SetState(bs);
 		arena->Step(1);
+	}
+	struct WheelSnap
+	{
+		btAlignedObjectArray<btWheelInfoRL> wheels;
+		btAlignedObjectArray<btVector3> forwardWS, axle;
+		btAlignedObjectArray<float> forwardImpulse, sideImpulse;
+		float steering = 0, pitch = 0;
+	};
+	const WheelSnap& FreshWheels(const CarConfig& cfg)
+	{
+		static std::mutex mx;
+		static std::vector<std::pair<CarConfig, std::unique_ptr<WheelSnap>>> snaps;
+		std::lock_guard<std::mutex> lock(mx);
+		for (auto& p : snaps)
+			if ((p.first.hitboxSize - cfg.hitboxSize).Length() < 1e-3f && (p.first.hitboxPosOffset - cfg.hitboxPosOffset).Length() < 1e-3f
+				&& p.first.frontWheels.wheelRadius == cfg.frontWheels.wheelRadius && p.first.backWheels.wheelRadius == cfg.backWheels.wheelRadius)
+				return *p.second;
+		std::unique_ptr<Arena> z(Arena::Create(GameMode::SOCCAR));
+		Car* c = z->AddCar(Team::BLUE, cfg);
+		ParkTick(z.get(), c);
+		auto snap = std::make_unique<WheelSnap>();
+		const btVehicleRL& v = c->_bulletVehicle;
+		snap->wheels = v.m_wheelInfo; snap->forwardWS = v.m_forwardWS; snap->axle = v.m_axle;
+		snap->forwardImpulse = v.m_forwardImpulse; snap->sideImpulse = v.m_sideImpulse;
+		snap->steering = v.m_steeringValue; snap->pitch = v.m_pitchControl;
+		snaps.push_back({ cfg, std::move(snap) });
+		return *snaps.back().second;
+	}
+	void ClearCarInternals(Arena* arena, Car* car)
+	{
+		ParkTick(arena, car);
+		const WheelSnap& w = FreshWheels(car->config);
+		btVehicleRL& v = car->_bulletVehicle;
+		v.m_wheelInfo = w.wheels; v.m_forwardWS = w.forwardWS; v.m_axle = w.axle;
+		v.m_forwardImpulse = w.forwardImpulse; v.m_sideImpulse = w.sideImpulse;
+		v.m_steeringValue = w.steering; v.m_pitchControl = w.pitch;
+	}
+	// The starting grip from the recording (see above)
+	void SetRecordedGrip(Car* car, const Frame& f)
+	{
+		const bool wall = f.onGround && (f.onWall || f.carZ > 60.0f);
+		btVehicleRL& v = car->_bulletVehicle;
+		for (int i = 0; i < v.m_wheelInfo.size(); i++) { v.m_wheelInfo[i].m_latFriction = 0.0f; v.m_wheelInfo[i].m_longFriction = wall ? 1.0f : 0.0f; }
 	}
 
 	CarControls ControlsOf(const Frame& f)
@@ -177,6 +227,7 @@ namespace
 		ClearCarInternals(arena, car);
 		ResetPads(arena);
 		LoadState(car, arena->ball, fr, s);
+		SetRecordedGrip(car, fr[s]);
 		if (nudge > 0)
 		{
 			std::mt19937 rng(static_cast<unsigned>(nudge) * 7919u);

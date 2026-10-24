@@ -2,11 +2,15 @@
 #include "RLCoach.h"
 #include "Ratings.h"
 #include "bakkesmod/wrappers/includes.h"
+#include "bakkesmod/wrappers/GuiManagerWrapper.h"
 #include "Overlay3D.h"
 #include "UiStyle.h"
 #include "Engine.h"
+#include "UiFonts.h"
+#include "Units.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <ctime>
 #include <format>
@@ -60,6 +64,45 @@ namespace
 	}
 }
 
+// The review header: the mechanic's name, and three numbers about your shot
+static std::string ReviewMechanic(int shotType)
+{
+	switch (shotType)
+	{
+	case 1: return "GROUND SHOT";
+	case 2: return "DOUBLE TAP";
+	case 3: return "DRIBBLE";
+	case 4: return "AIR DRIBBLE";
+	case 5: return "FLIP RESET";
+	default: return "AERIAL";
+	}
+}
+
+static std::vector<ReviewStat> ReviewStats(const ShotAnalysis& s, bool wentIn, const ShotReference& ref)
+{
+	std::vector<ReviewStat> out;
+	if (!s.valid) return out;
+	auto num = [](float v) {
+		std::string t = std::format("{:.0f}", std::fabs(v));
+		for (int i = static_cast<int>(t.size()) - 3; i > 0; i -= 3) t.insert(static_cast<size_t>(i), ",");
+		return (v < 0 ? "-" : "") + t;
+	};
+	if (wentIn) out.push_back({ "Height", num(s.crossZ), "at the goal line" });
+	else if (s.reachesGoalLine) out.push_back({ "Missed by", num(s.missDist), "outside the net" });
+	else out.push_back({ "Missed", "short", "never reached the line" });
+	out.push_back({ "Shot speed", num(Units::ConvertSpeed(s.shotSpeed)), Units::SpeedLabel() });
+	if (s.type == ShotType::DoubleTap)
+		out.push_back({ "Off the wall", num(s.reboundDist), "300+ for a 5" });
+	else if (s.type != ShotType::Ground && ref.valid)
+	{
+		const float vs = (s.touchTick - s.startTick) / 120.0f - ref.touchSec;
+		out.push_back({ "Touch", std::format("{}{:.2f} s", vs >= 0 ? "+" : "-", std::fabs(vs)), "vs your fastest goal" });
+	}
+	else
+		out.push_back({ "Aim", std::format("{:.1f} deg", s.aimErrDeg), "off line" });
+	return out;
+}
+
 // Older reps (before the index stored it) have no event tick; the segmenter then uses the last frame
 static int ViewerEventTick(const RepListItem& item) { return item.eventTick; }
 
@@ -67,9 +110,9 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 {
 	if (!writer) return;
 	PracticeExit();   // opening a rep ends any practice set
-	CancelWhatIf();   // and forgets the last rep's what-if
-	viewerShowingWhatIf = false;
-	uiShowingWhatIf = false;
+	CancelWhatIf();   // and forgets the last rep's searches
+	viewerShowing = -1;
+	uiShowing = -1;
 	viewerRealFrames.clear();
 	std::vector<Frame> loaded;
 	std::string err;
@@ -123,6 +166,11 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 		uiOverall = viewerGrade.overall > 0
 			? std::format("{}: {}  ({})", viewerGrade.overall, Grader::OverallName(viewerGrade.overall), viewerGrade.overallWhy)
 			: std::string();
+		uiOverallGrade = viewerGrade.overall;
+		uiOverallName = viewerGrade.overall > 0 ? Grader::OverallName(viewerGrade.overall) : "";
+		uiOverallWhy = viewerGrade.overallWhy;
+		uiMechanic = viewerShot.valid ? ReviewMechanic(static_cast<int>(viewerShot.type)) : "REP";
+		uiStats = ReviewStats(viewerShot, item.goal, viewerRef);
 	}
 	// v2: the coach's root cause (and one more note) for this rep
 	{
@@ -155,6 +203,11 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 	uiViewerPlaying = true;
 	uiViewerTotal = static_cast<int>(viewerFrames.size());
 	uiViewerPlayhead = 0.0f;
+
+	// The review's two searches start on their own (or come from the cache); if the simulator is still loading,
+	// the viewer window starts them once it's ready
+	uiReviewPending = true;
+	StartReview();
 }
 
 void RLCoach::ViewerExit()
@@ -162,8 +215,9 @@ void RLCoach::ViewerExit()
 	PracticeExit();
 	if (!viewerActive) return;
 	CancelWhatIf();
-	viewerShowingWhatIf = false;
-	uiShowingWhatIf = false;
+	viewerShowing = -1;
+	uiShowing = -1;
+	uiReviewPending = false;
 	viewerRealFrames.clear();
 	uiWhatIfStart = -1;
 	uiWhatIfKeyKind = -1;
@@ -470,29 +524,150 @@ void RLCoach::DrawPredictedPath(CanvasWrapper& canvas, const std::vector<BallSam
 }
 
 // ============================================================
-// v3 "What if" on the shot (the search itself is in WhatIf.cpp)
+// The review's searches: the smallest fix (the what-if, WhatIf.cpp)
+// and the best line (the engine, Engine.cpp). Each has its own slot.
 // ============================================================
 
 void RLCoach::CancelWhatIf()
 {
 	whatIfCancel = true;
 	std::lock_guard<std::mutex> lock(whatIfMutex);
-	whatIf = WhatIfResult{};
-	whatIfFile.clear();
+	for (int s = 0; s < 2; s++) { lineResult[s] = WhatIfResult{}; lineFile[s].clear(); }
 }
 
-void RLCoach::StartWhatIf(int depth, WhatIfPoint point, int engineStart)
+namespace
 {
-	if (!viewerActive || viewerFrames.empty() || whatIfBusy || !predictor.Ready()) return;
-	if (viewerShowingWhatIf) ViewerShowWhatIf(false);
-	if (whatIfThread.joinable()) whatIfThread.join();   // the last search already finished (not busy)
+	// The engine's result, in the what-if's shape (so both slots work the same way: Watch it, Practice it, the path)
+	WhatIfResult FromEngine(EngineResult&& e, int depth)
+	{
+		WhatIfResult r;
+		r.point = WhatIfPoint::Engine;
+		r.depth = depth;
+		r.status = e.status == EngineStatus::Found ? WhatIfStatus::Found
+			: e.status == EngineStatus::NoBall ? WhatIfStatus::NoShot
+			: e.status == EngineStatus::Cancelled ? WhatIfStatus::Cancelled : WhatIfStatus::NothingBetter;
+		r.startTick = e.startTick;
+		r.realGrade = e.realGrade;
+		r.cue = e.cue;
+		r.detail = e.detail;
+		r.grade = e.grade;
+		r.wentIn = e.wentIn;
+		r.gradeWhy = e.gradeWhy;
+		r.held = e.held;
+		r.heldOf = e.heldOf;
+		r.frames = std::move(e.frames);
+		r.eventTick = e.eventTick;
+		r.note = e.note;
+		r.tries = e.tries;
+		r.ms = e.ms;
+		return r;
+	}
+
+	bool Shows(const WhatIfResult& r) { return r.status == WhatIfStatus::Found || r.status == WhatIfStatus::CleanerWayIn; }
+}
+
+// Both searches for the rep being watched, one after the other: the what-if first (a few seconds), then the engine
+// (up to 15). If the what-if finds no goal at the shot and the rep has a key moment (the reset, the setup touch, the
+// first air dribble touch), it also tries different ways into that. A rep you scored a 5 on has nothing to beat.
+void RLCoach::StartReview()
+{
+	if (!viewerActive || viewerFrames.empty() || viewerShowing >= 0) return;
+	const std::string file = viewerRep.file;
+	{
+		// Already searched this session: show those results right away
+		std::lock_guard<std::mutex> lock(whatIfMutex);
+		for (const ReviewCacheEntry& c : reviewCache)
+			if (c.file == file)
+			{
+				for (int s = 0; s < 2; s++) { lineResult[s] = c.line[s]; lineFile[s] = file; }
+				uiReviewPending = false;
+				return;
+			}
+	}
+	if (viewerGrade.overall >= 5)
+	{
+		std::lock_guard<std::mutex> lock(whatIfMutex);
+		for (int s = 0; s < 2; s++) { lineResult[s] = WhatIfResult{}; lineResult[s].status = WhatIfStatus::NotNeeded; lineFile[s] = file; }
+		uiReviewPending = false;
+		return;
+	}
+	if (whatIfBusy || !predictor.Ready()) return;   // the viewer window asks again once it can
+	if (whatIfThread.joinable()) whatIfThread.join();
 
 	std::vector<Frame> fr = viewerFrames;
 	RepListItem item = viewerRep;
 	ShotReference ref;
+	shotBook.TryGet(item.shotKey, ref);
+	std::vector<int> keyFix;   // the coach's checks on the way to the key moment, for "a cleaner way in"
+	SegKind keySeg;
+	std::string keyName;
+	const bool hasKey = WhatIf::KeyMoment(viewerFrames, keySeg, keyName);
+	if (hasKey)
+		for (int c : coachBook.Firing(viewerShot, Coach::Measure(viewerFrames, viewerShot)))
+			if (Coach::SegOf(c) == keySeg) keyFix.push_back(c);
+	{
+		std::lock_guard<std::mutex> lock(whatIfMutex);
+		for (int s = 0; s < 2; s++) { lineResult[s] = WhatIfResult{}; lineFile[s] = file; }
+	}
+	uiReviewPending = false;
+	whatIfCancel = false;
+	whatIfBusy = true;
+	whatIfDepth = 1;
+	whatIfEngineStart = -1;
+	whatIfRunningSlot = kFixLine;
+	whatIfRunningPoint = static_cast<int>(WhatIfPoint::Shot);
+	whatIfThread = std::thread([this, fr = std::move(fr), item, ref, hasKey, keyFix]() {
+		// Below normal priority and capped, so the game never waits on it
+		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+		auto publish = [&](int slot, WhatIfResult&& r) {
+			std::lock_guard<std::mutex> lock(whatIfMutex);
+			if (lineFile[slot] == item.file && !whatIfCancel) lineResult[slot] = std::move(r);
+		};
+		WhatIfResult fix, best;
+		try
+		{
+			fix = WhatIf::Search(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, 4.0f, 1, WhatIfPoint::Shot, nullptr);
+			if (!Shows(fix) && hasKey && !whatIfCancel)
+			{
+				whatIfRunningPoint = static_cast<int>(WhatIfPoint::KeyMoment);
+				WhatIfResult key = WhatIf::Search(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, 4.0f, 1, WhatIfPoint::KeyMoment, &keyFix);
+				if (Shows(key)) fix = std::move(key);
+			}
+		}
+		catch (...) { fix = WhatIfResult{}; fix.status = WhatIfStatus::CantSimulate; }
+		publish(kFixLine, WhatIfResult(fix));
+		if (!whatIfCancel)
+		{
+			whatIfRunningSlot = kBestLine;
+			whatIfRunningPoint = static_cast<int>(WhatIfPoint::Engine);
+			try { best = FromEngine(Engine::Line(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, 15.0f, -1, 1), 1); }
+			catch (...) { best = WhatIfResult{}; best.status = WhatIfStatus::CantSimulate; }
+			publish(kBestLine, WhatIfResult(best));
+		}
+		if (!whatIfCancel && fix.status != WhatIfStatus::Cancelled && best.status != WhatIfStatus::Cancelled)
+		{
+			std::lock_guard<std::mutex> lock(whatIfMutex);
+			std::erase_if(reviewCache, [&](const ReviewCacheEntry& c) { return c.file == item.file; });
+			reviewCache.push_back(ReviewCacheEntry{ item.file, { std::move(fix), std::move(best) } });
+			if (reviewCache.size() > 12) reviewCache.erase(reviewCache.begin());
+		}
+		whatIfRunningSlot = -1;
+		whatIfBusy = false;
+	});
+}
+
+// One search into its slot: "Search deeper" on the fix, "Think harder" or "Take over from here" on the best line
+void RLCoach::StartWhatIf(int depth, WhatIfPoint point, int engineStart)
+{
+	if (!viewerActive || viewerFrames.empty() || whatIfBusy || !predictor.Ready()) return;
+	if (viewerShowing >= 0) ViewerShowLine(-1, true);
+	if (whatIfThread.joinable()) whatIfThread.join();   // the last search already finished (not busy)
+
+	const int slot = point == WhatIfPoint::Engine ? kBestLine : kFixLine;
+	std::vector<Frame> fr = viewerFrames;
+	RepListItem item = viewerRep;
+	ShotReference ref;
 	shotBook.TryGet(item.shotKey, ref);   // same benchmark the breakdown used
-	// Stage 2: the coach's checks that fire on the way to the key moment (backed by your reps); if no goal turns up,
-	// the search still looks for a way in that fixes them
 	std::vector<int> fix;
 	if (point == WhatIfPoint::KeyMoment)
 	{
@@ -504,45 +679,23 @@ void RLCoach::StartWhatIf(int depth, WhatIfPoint point, int engineStart)
 	}
 	{
 		std::lock_guard<std::mutex> lock(whatIfMutex);
-		whatIf = WhatIfResult{};
-		whatIfFile = item.file;
+		lineResult[slot] = WhatIfResult{};
+		lineFile[slot] = item.file;
 	}
 	whatIfCancel = false;
 	whatIfBusy = true;
 	whatIfDepth = depth;
+	whatIfRunningSlot = slot;
 	whatIfRunningPoint = static_cast<int>(point);
 	if (point == WhatIfPoint::Engine) whatIfEngineStart = engineStart;
-	whatIfThread = std::thread([this, fr = std::move(fr), item, ref, depth, point, fix, engineStart]() {
-		// Below normal priority and capped (3 s, or 20 s searching deeper), so the game never waits on it
+	whatIfThread = std::thread([this, fr = std::move(fr), item, ref, depth, point, fix, engineStart, slot]() {
 		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 		WhatIfResult r;
 		try
 		{
 			if (point == WhatIfPoint::Engine)
-			{
-				// Stage 3: the engine line, shown through the same what-if slot (Watch it, Practice it, the pink path)
-				EngineResult e = Engine::Line(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel,
-					depth >= 2 ? 60.0f : 15.0f, engineStart, depth);
-				r.point = WhatIfPoint::Engine;
-				r.depth = depth;
-				r.status = e.status == EngineStatus::Found ? WhatIfStatus::Found
-					: e.status == EngineStatus::NoBall ? WhatIfStatus::NoShot
-					: e.status == EngineStatus::Cancelled ? WhatIfStatus::Cancelled : WhatIfStatus::NothingBetter;
-				r.startTick = e.startTick;
-				r.realGrade = e.realGrade;
-				r.cue = e.cue;
-				r.detail = e.detail;
-				r.grade = e.grade;
-				r.wentIn = e.wentIn;
-				r.gradeWhy = e.gradeWhy;
-				r.held = e.held;
-				r.heldOf = e.heldOf;
-				r.frames = std::move(e.frames);
-				r.eventTick = e.eventTick;
-				r.note = e.note;
-				r.tries = e.tries;
-				r.ms = e.ms;
-			}
+				r = FromEngine(Engine::Line(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel,
+					depth >= 2 ? 60.0f : 15.0f, engineStart, depth), depth);
 			else
 				r = WhatIf::Search(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, depth >= 2 ? 20.0f : 4.0f, depth, point, &fix);
 		}
@@ -553,25 +706,58 @@ void RLCoach::StartWhatIf(int depth, WhatIfPoint point, int engineStart)
 		}
 		{
 			std::lock_guard<std::mutex> lock(whatIfMutex);
-			if (whatIfFile == item.file && !whatIfCancel) whatIf = std::move(r);
+			if (lineFile[slot] == item.file && !whatIfCancel)
+			{
+				lineResult[slot] = r;
+				for (ReviewCacheEntry& c : reviewCache) if (c.file == item.file) c.line[slot] = std::move(r);
+			}
 		}
+		whatIfRunningSlot = -1;
 		whatIfBusy = false;
 	});
 }
 
-// Plays the what-if in the viewer instead of your rep (or goes back). Same car, same overlays.
-void RLCoach::ViewerShowWhatIf(bool on)
+// Plays a line in the viewer instead of your rep (or goes back to your rep). Same car, same overlays.
+void RLCoach::ViewerShowLine(int slot, bool keepPlayhead)
 {
-	if (!viewerActive || on == viewerShowingWhatIf) return;
-	if (on)
+	if (!viewerActive) return;
+	if (slot == viewerShowing)
+	{
+		// Already showing it: "Watch it" again starts it over
+		if (!keepPlayhead)
+		{
+			int start = 0;
+			if (slot >= 0)
+			{
+				std::lock_guard<std::mutex> lock(whatIfMutex);
+				start = std::max(0, lineResult[slot].startTick - 60);
+			}
+			ViewerSeek(static_cast<float>(start));
+			viewerPlaying = true;
+			uiViewerPlaying = true;
+		}
+		return;
+	}
+	// Back to your rep first (also on the way from one line to the other)
+	if (viewerShowing >= 0)
+	{
+		viewerFrames = std::move(viewerRealFrames);
+		viewerRealFrames.clear();
+		viewerShot = viewerRealShot;
+		viewerShowing = -1;
+		uiViewerTotal = static_cast<int>(viewerFrames.size());
+		ViewerSeek(viewerPlayhead);   // clamps to your rep's length
+	}
+	if (slot >= 0)
 	{
 		std::vector<Frame> alt;
 		int start = 0;
 		{
 			std::lock_guard<std::mutex> lock(whatIfMutex);
-			if ((whatIf.status != WhatIfStatus::Found && whatIf.status != WhatIfStatus::CleanerWayIn) || whatIfFile != viewerRep.file || whatIf.frames.size() < 2) return;
-			alt = whatIf.frames;
-			start = whatIf.startTick;
+			const WhatIfResult& r = lineResult[slot];
+			if (!Shows(r) || lineFile[slot] != viewerRep.file || r.frames.size() < 2) { uiShowing = -1; return; }
+			alt = r.frames;
+			start = r.startTick;
 		}
 		// A line that scores ends as the ball crosses, like a real rep does. Past that the replayed ball would only
 		// be held on the goal line (free play would explode it), which looks like it died there.
@@ -586,46 +772,49 @@ void RLCoach::ViewerShowWhatIf(bool on)
 		viewerRealShot = viewerShot;
 		viewerFrames = std::move(alt);
 		viewerShot = ShotGeometry::Analyze(viewerFrames);
-		viewerShowingWhatIf = true;
+		viewerShowing = slot;
+		uiLastLine = slot;
 		uiViewerTotal = static_cast<int>(viewerFrames.size());
-		ViewerSeek(static_cast<float>(std::max(0, start - 60)));   // a half second of lead-in before it changes
+		if (keepPlayhead) ViewerSeek(viewerPlayhead);
+		else
+		{
+			ViewerSeek(static_cast<float>(std::max(0, start - 60)));   // a half second of lead-in before it changes
+			viewerPlaying = true;
+			uiViewerPlaying = true;
+		}
+	}
+	else if (!keepPlayhead)
+	{
+		ViewerSeek(0.0f);
 		viewerPlaying = true;
 		uiViewerPlaying = true;
 	}
-	else
-	{
-		viewerFrames = std::move(viewerRealFrames);
-		viewerRealFrames.clear();
-		viewerShot = viewerRealShot;
-		viewerShowingWhatIf = false;
-		uiViewerTotal = static_cast<int>(viewerFrames.size());
-		ViewerSeek(viewerPlayhead);   // clamps to your rep's length
-	}
-	uiShowingWhatIf = viewerShowingWhatIf;
+	uiShowing = viewerShowing;
 }
 
-// Practice from where the what-if starts, with its path drawn faintly as the line to follow
-void RLCoach::PracticeWhatIf()
+// Practice from where a line starts, with its path drawn faintly as the line to follow
+void RLCoach::PracticeLine(int slot)
 {
 	std::vector<Frame> alt;
 	int start = 0;
 	std::string cue;
 	{
 		std::lock_guard<std::mutex> lock(whatIfMutex);
-		if ((whatIf.status != WhatIfStatus::Found && whatIf.status != WhatIfStatus::CleanerWayIn) || whatIfFile != viewerRep.file) return;
-		alt = whatIf.frames;
-		start = whatIf.startTick;
-		cue = whatIf.cue;
+		const WhatIfResult& r = lineResult[slot];
+		if (!Shows(r) || lineFile[slot] != viewerRep.file) return;
+		alt = r.frames;
+		start = r.startTick;
+		cue = r.cue;
 	}
-	if (viewerShowingWhatIf) ViewerShowWhatIf(false);
+	if (viewerShowing >= 0) ViewerShowLine(-1, true);
 	PracticeStartAt(start);
 	if (practiceState == PracticeState::Off) return;
 	practiceRefFrames = std::move(alt);
-	practiceRefLabel = "Faint line: the what-if (" + cue + ")";
+	practiceRefLabel = std::string(slot == kBestLine ? "Faint line: the engine's line (" : "Faint line: the smallest fix (") + cue + ")";
 }
 
-// While watching your rep: the what-if's car path in pink from where it changes. While watching the what-if:
-// your real car path in grey, for comparison.
+// While watching your rep: the last line you looked at, faintly in cyan from where it changes. While watching a
+// line: your real path in grey, for comparison.
 void RLCoach::DrawWhatIfPath(CanvasWrapper& canvas)
 {
 	CameraWrapper cam = gameWrapper->GetCamera();
@@ -652,17 +841,19 @@ void RLCoach::DrawWhatIfPath(CanvasWrapper& canvas)
 	};
 
 	std::lock_guard<std::mutex> lock(whatIfMutex);
-	if ((whatIf.status != WhatIfStatus::Found && whatIf.status != WhatIfStatus::CleanerWayIn) || whatIfFile != viewerRep.file) return;
-	if (viewerShowingWhatIf)
+	if (viewerShowing >= 0)
 	{
-		draw(viewerRealFrames, whatIf.startTick, 200, 200, 200, 110, false);
-		draw(viewerRealFrames, whatIf.startTick, 200, 200, 200, 70, true);
+		const int start = lineResult[viewerShowing].startTick;
+		draw(viewerRealFrames, start, 200, 200, 200, 110, false);
+		draw(viewerRealFrames, start, 200, 200, 200, 70, true);
+		return;
 	}
-	else
-	{
-		draw(whatIf.frames, whatIf.startTick, 255, 110, 200, 200, false);
-		draw(whatIf.frames, whatIf.startTick, 255, 170, 220, 120, true);
-	}
+	int slot = uiLastLine;
+	if (!Shows(lineResult[slot]) || lineFile[slot] != viewerRep.file) slot = 1 - slot;
+	const WhatIfResult& r = lineResult[slot];
+	if (!Shows(r) || lineFile[slot] != viewerRep.file) return;
+	draw(r.frames, r.startTick, 56, 189, 248, 200, false);
+	draw(r.frames, r.startTick, 125, 211, 252, 120, true);
 }
 
 // ============================================================
@@ -694,26 +885,97 @@ void RLCoach::StartGradeRefresh()
 	});
 }
 
+void RLCoach::FetchUiFonts()
+{
+	bool missing = false;
+	for (ImFont* f : uiFonts) missing = missing || !f;
+	if (!missing) return;
+	auto gui = gameWrapper->GetGUIManager();
+	for (int i = 0; i < UiFonts::kCount; i++)
+		if (!uiFonts[i]) uiFonts[i] = gui.GetFont(UiFonts::kSpecs[i].name);
+}
+
+namespace
+{
+	// Pushes a font for one scope (null = ImGui's default font)
+	struct FontScope
+	{
+		explicit FontScope(ImFont* f) { ImGui::PushFont(f); }
+		~FontScope() { ImGui::PopFont(); }
+	};
+
+	// What the window needs from a search's result (copied under the lock, without the frames)
+	struct LineView
+	{
+		WhatIfStatus status = WhatIfStatus::None;
+		WhatIfPoint point = WhatIfPoint::Shot;
+		std::string what, cue, detail, gradeWhy, fixes, note;
+		int grade = 0, held = 0, heldOf = 0, startTick = -1, depth = 1;
+		bool wentIn = false, mine = false;
+		bool shows() const { return mine && (status == WhatIfStatus::Found || status == WhatIfStatus::CleanerWayIn); }
+	};
+
+	std::string Upper(std::string s)
+	{
+		for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+		return s;
+	}
+
+	// A 5-point star; filled when kept
+	void DrawStar(ImDrawList* dl, ImVec2 c, float r, bool filled, ImU32 col)
+	{
+		ImVec2 pts[10];
+		for (int k = 0; k < 10; k++)
+		{
+			float a = -1.5708f + k * 0.62832f;
+			float rr = (k % 2 == 0) ? r : r * 0.45f;
+			pts[k] = ImVec2(c.x + rr * std::cos(a), c.y + rr * std::sin(a));
+		}
+		if (filled)
+			for (int k = 0; k < 10; k++) dl->AddTriangleFilled(c, pts[k], pts[(k + 1) % 10], col);
+		else
+			dl->AddPolyline(pts, 10, col, true, 1.4f);
+	}
+
+}
+
 void RLCoach::RenderWindow()
 {
 	using namespace UiStyle;
 	if (!repListLoaded || repListStale.exchange(false)) RefreshRepList();
+	FetchUiFonts();
+	FontScope bodyFont(uiFonts[UiFonts::Body]);
+	ImFont* fLabel = uiFonts[UiFonts::Label];
+	ImFont* fBold = uiFonts[UiFonts::Bold];
+	ImFont* fHead = uiFonts[UiFonts::Head];
+	ImFont* fMono = uiFonts[UiFonts::Mono];
+	ImFont* fBig = uiFonts[UiFonts::Big];
 
 	auto onGame = [this](std::function<void()> fn) {
 		gameWrapper->Execute([fn](GameWrapper*) { fn(); });
 	};
+	// Small capitals in a color (section labels, tab names)
+	auto label = [&](const char* text, ImVec4 color) {
+		FontScope f(fLabel);
+		ImGui::PushStyleColor(ImGuiCol_Text, color);
+		ImGui::TextUnformatted(text);
+		ImGui::PopStyleColor();
+	};
 
 	// ---- Title row ----
-	ImGui::TextColored(kAccent, "RL COACH");
-	ImGui::SameLine();
-	ImGui::TextDisabled("rep viewer");
+	{
+		FontScope f(fLabel);
+		ImGui::TextColored(kAccent, "ROAD2");
+		ImGui::SameLine();
+		ImGui::TextColored(kMuted, "REP VIEWER");
+	}
 	{
 		std::string info = std::format("{} reps", repList.size());
 		float w = ImGui::CalcTextSize(info.c_str()).x + ImGui::CalcTextSize("Refresh").x + 40.0f;
 		ImGui::SameLine(std::max(200.0f, ImGui::GetWindowContentRegionMax().x - w));
 		ImGui::TextDisabled("%s", info.c_str());
 		ImGui::SameLine();
-		if (ImGui::SmallButton("Refresh")) RefreshRepList();
+		if (LinkButton("Refresh")) RefreshRepList();
 	}
 
 	gradeBook.TryCopy(uiAutoGrades);   // keeps the last copy if a refresh is busy
@@ -750,569 +1012,756 @@ void RLCoach::RenderWindow()
 			uiPracticeAutoRamp = ramp;
 			onGame([this, ramp]() { practiceAutoRamp = ramp; practiceStreak = 0; });
 		}
-		if (AccentButton("Retry")) onGame([this]() { PracticeRetry(); });
+		if (AccentButton("Retry", ImVec2(90, 0))) onGame([this]() { PracticeRetry(); });
 		ImGui::SameLine();
-		if (ImGui::Button("Stop practicing")) onGame([this]() { PracticeExit(); });
+		if (OutlineButton("Stop practicing")) onGame([this]() { PracticeExit(); });
 		ImGui::SameLine();
 		ImGui::TextDisabled("results show on the in-game panel");
 	}
 
-	// ---- The rep being watched ----
+	// ---- The review of the rep being watched ----
 	if (uiViewerActive)
 	{
 		int total = uiViewerTotal;
-		int scrub = static_cast<int>(uiViewerPlayhead.load());
+		const float headF = uiViewerPlayhead.load();
+		const int head = static_cast<int>(headF);
 		std::vector<Segment> segs;
 		std::vector<UiGrade> grades;
 		std::vector<CoachNote> notes;
-		std::string overall, watching;
-		int segTotal = 0;
+		std::vector<ReviewStat> stats;
+		std::string watching, overallName, overallWhy, mechanic, keyWhat;
+		int segTotal = 0, overallGrade = 0;
 		{
 			std::lock_guard<std::mutex> lock(uiSegMutex);
 			segs = uiSegs;
 			segTotal = uiSegTotal;
 			grades = uiGrades;
 			notes = uiNotes;
-			overall = uiOverall;
 			watching = uiViewerFile;
+			overallGrade = uiOverallGrade;
+			overallName = uiOverallName;
+			overallWhy = uiOverallWhy;
+			mechanic = uiMechanic;
+			stats = uiStats;
+			keyWhat = uiWhatIfKeyWhat;
 		}
 		const RepListItem* cur = nullptr;
 		for (const RepListItem& it : repList) if (it.file == watching) { cur = &it; break; }
 
-		Heading("WATCHING");
-		if (cur)
+		LineView line[2];
 		{
-			std::string when = cur->savedAt.size() >= 19 ? cur->savedAt.substr(5, 11) : cur->savedAt;
-			ImGui::Text("%s", when.c_str());
-			ImGui::SameLine();
-			ImGui::TextDisabled("%s   %.1fs   %d touch%s", cur->endReason.c_str(), cur->duration, cur->touches, cur->touches == 1 ? "" : "es");
-			ImGui::SameLine();
-			auto ag = uiAutoGrades.find(cur->file);
-			if (ag != uiAutoGrades.end() && ag->second.overall > 0) Pill(std::format("auto {}", ag->second.overall), GradeColor(ag->second.overall));
-			if (ag != uiAutoGrades.end() && ag->second.shotType == 1) { ImGui::SameLine(); Pill("ground shot", kOk); }
-			if (ag != uiAutoGrades.end() && ag->second.shotType == 2) { ImGui::SameLine(); Pill("double tap", kGold); }
-			if (ag != uiAutoGrades.end() && ag->second.shotType == 3) { ImGui::SameLine(); Pill("dribble", kOk); }
-			if (ag != uiAutoGrades.end() && ag->second.shotType == 4) { ImGui::SameLine(); Pill("air dribble", kGold); }
-			if (ag != uiAutoGrades.end() && ag->second.shotType == 5) { ImGui::SameLine(); Pill("flip reset", kGold); }
-			if (cur->rating > 0) { ImGui::SameLine(); Pill(std::format("you {}", cur->rating), GradeColor(cur->rating)); }
-			ImGui::SameLine();
-			bool kept = cur->kept;
-			if (kept) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.36f, 0.08f, 1.0f));
-			if (ImGui::SmallButton(kept ? "Kept" : "Keep")) ToggleKeep(watching);
-			if (kept) ImGui::PopStyleColor();
-			if (ImGui::IsItemHovered()) ImGui::SetTooltip(kept ? "Kept forever. Click to un-keep." : "Keep this rep forever (never cleaned up)");
-
-			// Mark the whole shot as a double-tap drill: a goal without a double tap (or triple, quad...) counts as a 1
-			bool drill = shotBook.IsDoubleTapDrill(cur->shotKey);
-			ImGui::SameLine();
-			if (ImGui::Checkbox("Double-tap drill", &drill) && writer)
+			std::lock_guard<std::mutex> lock(whatIfMutex);
+			for (int s = 0; s < 2; s++)
 			{
-				shotBook.SetDoubleTapDrill(writer->Folder(), cur->shotKey, drill);
-				gradeBook.Invalidate(cur->shotKey);
-				StartGradeRefresh();
-				RepListItem again = *cur;
-				onGame([this, again]() { ViewerLoad(again); });   // redo this rep's breakdown now
-			}
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("For this shot, a goal that isn't a double tap counts as a 1.\nBackboard, ceiling and wall-top taps all count, and so do triple and quad taps.");
-
-			// Your opinion of the recovery (same as keys 6-8 in the pack)
-			ImGui::TextDisabled("Your recovery rating:");
-			const int curRec = cur->recoveryRating;
-			const std::string recFile = watching;
-			for (int r = 1; r <= 3; r++)
-			{
-				ImGui::SameLine();
-				bool on = curRec == r;
-				if (on)
-				{
-					unsigned char cr, cg, cb;
-					RecoveryRgb(r, cr, cg, cb);
-					ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(cr / 255.0f * 0.55f, cg / 255.0f * 0.55f, cb / 255.0f * 0.55f, 1.0f));
-				}
-				if (ImGui::SmallButton(RecoveryName(r))) SetRecoveryRating(recFile, r);
-				if (on) ImGui::PopStyleColor();
+				const WhatIfResult& r = lineResult[s];
+				LineView& v = line[s];
+				v.mine = lineFile[s] == watching;
+				v.status = r.status; v.point = r.point; v.what = r.what; v.cue = r.cue; v.detail = r.detail; v.gradeWhy = r.gradeWhy;
+				v.fixes = r.fixes; v.note = r.note; v.grade = r.grade; v.held = r.held; v.heldOf = r.heldOf; v.startTick = r.startTick;
+				v.depth = r.depth; v.wentIn = r.wentIn;
 			}
 		}
-		if (!overall.empty())
-		{
-			// overall is "4: Good shot  (why...)"
-			size_t colon = overall.find(':');
-			int o = colon != std::string::npos ? std::atoi(overall.substr(0, colon).c_str()) : 0;
-			ImGui::PushStyleColor(ImGuiCol_Text, GradeColor(o));
-			ImGui::TextWrapped("Grade %s", overall.c_str());
-			ImGui::PopStyleColor();
-		}
-		if (uiShowingWhatIf)
-		{
-			ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.85f, 1.0f), "Playing the what-if (simulated), not your real rep.");
-			ImGui::SameLine();
-			if (ImGui::SmallButton("Back to your rep##top")) onGame([this]() { ViewerShowWhatIf(false); });
-		}
-		// v2 coaching: the root cause first, then one more; hover for the numbers behind it
-		for (const CoachNote& n : notes)
-		{
-			ImGui::PushStyleColor(ImGuiCol_Text, n.rootCause ? ImVec4(1.0f, 0.80f, 0.50f, 1.0f) : ImVec4(0.85f, 0.78f, 0.62f, 1.0f));
-			ImGui::TextWrapped("%s %s", n.label.c_str(), n.cue.c_str());
-			ImGui::PopStyleColor();
-			if (ImGui::IsItemHovered() && !n.detail.empty()) ImGui::SetTooltip("%s", n.detail.c_str());
-		}
+		const bool busy = whatIfBusy;
+		const int busySlot = busy ? whatIfRunningSlot.load() : -1;
+		const bool pending = uiReviewPending;
+		const bool simReady = predictor.Ready();
+		if (pending && simReady && !busy) onGame([this]() { StartReview(); });
 
-		// Transport
-		bool playing = uiViewerPlaying;
-		if (AccentButton(playing ? "Pause" : "Play", ImVec2(64, 0)))
-			onGame([this]() { viewerPlaying = !viewerPlaying; uiViewerPlaying = viewerPlaying; });
-		ImGui::SameLine();
-		if (ImGui::Button("|<")) onGame([this]() { ViewerSeek(0.0f); });
-		ImGui::SameLine();
-		if (ImGui::Button("<")) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) - 1.0f); });
-		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back 1 tick");
-		ImGui::SameLine();
-		if (ImGui::Button(">")) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) + 1.0f); });
-		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forward 1 tick");
-		ImGui::SameLine(0, 18);
-		const float speeds[4] = { 0.1f, 0.25f, 0.5f, 1.0f };
-		const char* names[4] = { "0.1x", "0.25x", "0.5x", "1x" };
-		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2, 6));
-		for (int i = 0; i < 4; i++)
-		{
-			if (i > 0) ImGui::SameLine();
-			bool current = std::fabs(uiViewerSpeed.load() - speeds[i]) < 0.001f;
-			if (current) ImGui::PushStyleColor(ImGuiCol_Button, kAccentDim);
-			if (ImGui::Button(names[i]))
-			{
-				float sp = speeds[i];
-				uiViewerSpeed = sp;
-				onGame([this, sp]() { viewerSpeed = sp; });
-			}
-			if (current) ImGui::PopStyleColor();
-		}
-		ImGui::PopStyleVar();
-		ImGui::SameLine(0, 18);
-		if (ImGui::Checkbox("Loop", &uiLoop))
-		{
-			bool loop = uiLoop;
-			onGame([this, loop]() { viewerLoop = loop; });
-		}
-		ImGui::SameLine();
-		if (ImGui::Button("Stop watching")) onGame([this]() { ViewerExit(); });
+		// A new rep opens on Your shot
+		if (uiTabFile != watching) { uiTabFile = watching; uiTab = 0; }
 
-		// Segment timeline: click a segment to jump to it
-		if (!segs.empty() && segTotal > 1)
-		{
-			ImGui::Spacing();
-			ImDrawList* dl = ImGui::GetWindowDrawList();
-			ImVec2 origin = ImGui::GetCursorScreenPos();
-			float width = ImGui::GetContentRegionAvail().x;
-			const float rowH = 24.0f, gap = 4.0f;
-			auto colorFor = [](SegKind k, int alpha) -> ImU32 {
-				switch (k)
-				{
-				case SegKind::Approach: return IM_COL32(70, 86, 112, alpha);
-				case SegKind::Takeoff:  return IM_COL32(52, 112, 170, alpha);
-				case SegKind::Flight:   return IM_COL32(44, 92, 156, alpha);
-				case SegKind::Contact:  return IM_COL32(46, 150, 92, alpha);
-				case SegKind::Result:   return IM_COL32(170, 116, 40, alpha);
-				case SegKind::Recovery: return IM_COL32(120, 82, 160, alpha);
-				case SegKind::Setup:    return IM_COL32(40, 130, 140, alpha);
-				case SegKind::Read:     return IM_COL32(150, 100, 60, alpha);
-				case SegKind::Dribble:  return IM_COL32(60, 140, 120, alpha);
-				case SegKind::Flick:    return IM_COL32(46, 150, 92, alpha);
-				case SegKind::AirDribble: return IM_COL32(60, 110, 170, alpha);
-				case SegKind::Reset:    return IM_COL32(140, 90, 150, alpha);
-				case SegKind::Flip:     return IM_COL32(52, 112, 170, alpha);
-				}
-				return IM_COL32(100, 100, 100, alpha);
-			};
-			auto xOf = [&](int tick) { return origin.x + width * static_cast<float>(tick) / static_cast<float>(segTotal - 1); };
-			dl->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + 2 * rowH + gap), IM_COL32(22, 25, 32, 255), 5.0f);
-
-			// Row 1: the play (approach to result). Row 2: recovery, which overlaps the result in time.
-			for (int si = 0; si < static_cast<int>(segs.size()); si++)
-			{
-				const Segment& sg = segs[si];
-				float y0 = origin.y + (sg.kind == SegKind::Recovery ? rowH + gap : 0.0f);
-				float x0 = xOf(sg.start) + 1.0f, x1 = std::max(xOf(sg.end + 1) - 1.0f, x0 + 3.0f);
-				std::string gradeName, why;
-				for (const UiGrade& ug : grades) if (ug.segIndex == si) { gradeName = ug.name; why = ug.why; }
-
-				ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-				ImGui::PushID(si);   // stable ID so a click's press and release land on the same button
-				bool clicked = ImGui::InvisibleButton("seg", ImVec2(x1 - x0, rowH));
-				bool hovered = ImGui::IsItemHovered();
-				ImGui::PopID();
-
-				dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + rowH), colorFor(sg.kind, hovered ? 255 : 215), 4.0f);
-				if (!gradeName.empty())   // grade stripe along the bottom
-					dl->AddRectFilled(ImVec2(x0 + 2, y0 + rowH - 4), ImVec2(x1 - 2, y0 + rowH - 1), ImGui::GetColorU32(SegGradeColor(gradeName)), 2.0f);
-				std::string label = Segmenter::Name(sg.kind);
-				ImVec2 ts = ImGui::CalcTextSize(label.c_str());
-				if (x1 - x0 > ts.x + 8.0f)
-					dl->AddText(ImVec2(x0 + 5.0f, y0 + (rowH - 3 - ts.y) * 0.5f), IM_COL32(240, 244, 250, 255), label.c_str());
-
-				if (clicked)
-				{
-					float target = static_cast<float>(sg.start);
-					onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
-				}
-				if (hovered)
-					ImGui::SetTooltip("%s%s%s: %.2fs to %.2fs (click to jump here)%s%s", label.c_str(), gradeName.empty() ? "" : " - ",
-						gradeName.c_str(), sg.start / 120.0f, (sg.end + 1) / 120.0f, why.empty() ? "" : "\n", why.c_str());
-			}
-			// Playhead
-			float px = xOf(std::min(static_cast<int>(uiViewerPlayhead.load()), segTotal - 1));   // the what-if can run longer than your rep
-			dl->AddLine(ImVec2(px, origin.y - 3.0f), ImVec2(px, origin.y + 2 * rowH + gap + 3.0f), IM_COL32(255, 255, 255, 235), 2.0f);
-			dl->AddTriangleFilled(ImVec2(px - 5, origin.y - 7), ImVec2(px + 5, origin.y - 7), ImVec2(px, origin.y - 1), IM_COL32(255, 255, 255, 235));
-			ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 2 * rowH + gap + 8.0f));
-		}
-
-		ImGui::PushItemWidth(-1);
-		if (ImGui::SliderInt("##scrub", &scrub, 0, total > 0 ? total - 1 : 0,
-			std::format("{:.2f}s / {:.2f}s", scrub / 120.0f, total / 120.0f).c_str()))
-		{
-			float target = static_cast<float>(scrub);
-			onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
-		}
-		ImGui::PopItemWidth();
-
-		// Breakdown: each segment's grade; the biggest fix is marked. Click a line to jump there, or practice it.
-		Heading("BREAKDOWN");
-		{
-			int here = static_cast<int>(uiViewerPlayhead.load());
-			if (AccentButton(std::format("Practice from here ({:.2f}s)", here / 120.0f).c_str()))
-				onGame([this, here]() { PracticeStartAt(here); });
-			ImGui::SameLine();
-			ImGui::TextDisabled("scrub to pick the moment; the lead-in still applies");
-		}
-		// The part of the rep the coach's root cause is in: its Practice button is highlighted
-		int rootSeg = -1;
+		// The root cause (the coach's), else the grades' biggest fix: the part of the rep to practice
+		int rootSeg = -1, fixSeg = -1;
+		std::string fixWhy;
 		if (!notes.empty() && notes[0].rootCause)
 			for (int i = 0; i < static_cast<int>(segs.size()); i++)
 				if (segs[i].kind == notes[0].seg) rootSeg = i;
-		bool rootListed = false;
-		for (const UiGrade& ug : grades) if (ug.segIndex == rootSeg && !ug.name.empty()) rootListed = true;
-		auto practiceButton = [&](int si) {
-			bool root = si == rootSeg;
-			if (root)
-			{
-				ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.42f, 0.10f, 1.0f));
-				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.78f, 0.55f, 0.15f, 1.0f));
-			}
-			ImGui::PushID(si + 2000);
-			if (ImGui::SmallButton("Practice")) onGame([this, si]() { PracticeStart(si); });
-			ImGui::PopID();
-			if (root)
-			{
-				ImGui::PopStyleColor(2);
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("The root cause is in this part: %s", notes[0].cue.c_str());
-			}
-		};
-		// Root cause in a part that has no grade line (e.g. the pop before a flip reset): give it its own line
-		if (rootSeg >= 0 && !rootListed)
-		{
-			practiceButton(rootSeg);
-			ImGui::SameLine();
-			ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.50f, 1.0f), "%s: root cause is here", Segmenter::Name(segs[rootSeg].kind));
-		}
-		// v3 "What if": a row under the part of the breakdown where the change would happen. At the shot (the
-		// flick or flip that made it, or the contact / read just before the touch), and stage 2: on the way to the
-		// key moment that set it up (getting the reset, the setup touch, the first air dribble touch).
-		int whatIfSeg = -1, whatIfKeySeg = -1;
-		{
-			int start = uiWhatIfStart;
-			auto eligible = [](SegKind k) { return k == SegKind::Flick || k == SegKind::Flip || k == SegKind::Contact || k == SegKind::Read; };
+		for (const UiGrade& g : grades) if (g.biggest) { fixSeg = g.segIndex; fixWhy = g.why; }
+		auto segAt = [&](int tick) -> int {
 			for (int i = 0; i < static_cast<int>(segs.size()); i++)
-				if (start >= 0 && eligible(segs[i].kind) && start >= segs[i].start && start <= segs[i].end) whatIfSeg = i;
-			if (whatIfSeg < 0 && start >= 0)
-				for (int i = 0; i < static_cast<int>(segs.size()); i++)
-					if (segs[i].kind == SegKind::Contact || segs[i].kind == SegKind::Flick || segs[i].kind == SegKind::Flip) whatIfSeg = i;
-			int keyKind = uiWhatIfKeyKind;
-			if (keyKind >= 0)
-				for (int i = 0; i < static_cast<int>(segs.size()); i++)
-					if (static_cast<int>(segs[i].kind) == keyKind && segs[i].kind != SegKind::Recovery) { whatIfKeySeg = i; break; }
-			if (whatIfKeySeg == whatIfSeg) whatIfKeySeg = -1;
-		}
-		std::string keyWhat;
-		{
-			std::lock_guard<std::mutex> lock(uiSegMutex);
-			keyWhat = uiWhatIfKeyWhat;
-		}
-		auto whatIfRow = [&](WhatIfPoint point) {
-			WhatIfStatus st;
-			std::string cue, detail, file, note, fixes;
-			int wGrade = 0, wDepth = 1;
-			bool wIn = false;
-			WhatIfPoint wPoint;
-			{
-				std::lock_guard<std::mutex> lock(whatIfMutex);
-				st = whatIf.status; cue = whatIf.cue; detail = whatIf.detail; file = whatIfFile; fixes = whatIf.fixes;
-				wGrade = whatIf.grade; wIn = whatIf.wentIn; note = whatIf.note; wDepth = whatIf.depth; wPoint = whatIf.point;
-			}
-			const bool key = point == WhatIfPoint::KeyMoment;
-			const bool mine = file == watching && wPoint == point;
-			const bool busyHere = whatIfBusy && file == watching && whatIfRunningPoint == static_cast<int>(point);
-			const int hereSeg = key ? whatIfKeySeg : whatIfSeg;
-			const ImVec4 pink(1.0f, 0.55f, 0.85f, 1.0f), gold(1.0f, 0.80f, 0.50f, 1.0f);
-			auto purpleButton = [](const char* label) {
-				ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.20f, 0.42f, 1.0f));
-				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.62f, 0.28f, 0.58f, 1.0f));
-				bool clicked = ImGui::SmallButton(label);
-				ImGui::PopStyleColor(2);
-				return clicked;
-			};
-			auto deeperButton = [&]() {
-				if (wDepth >= 2 || !predictor.Ready()) return;
-				if (purpleButton("Search deeper")) onGame([this, point]() { StartWhatIf(2, point); });
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("About 10x more tries: wider timing and aim, finer angles, and up to three changes together.\nTakes up to about 15 seconds in the background.");
-			};
-			ImGui::PushID(key ? 7001 : 7000);
-			ImGui::Indent(28.0f);
-			if (busyHere)
-			{
-				std::string busyText = whatIfDepth >= 2 ? "What if...  searching deeper (up to about 15 seconds)"
-					: key ? "What if...  trying different ways into " + keyWhat : "What if...  simulating small changes to this shot";
-				ImGui::TextDisabled("%s", busyText.c_str());
-			}
-			else if (!mine || st == WhatIfStatus::None)
-			{
-				if (!predictor.Ready())
-				{
-					ImGui::TextDisabled("What if?  (the simulator is still loading)");
-					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", predictor.Status().c_str());
-				}
-				else
-				{
-					if (purpleButton("What if?")) onGame([this, point]() { StartWhatIf(1, point); });
-					if (ImGui::IsItemHovered())
-					{
-						if (key)
-							ImGui::SetTooltip("Replays your inputs from up to half a second before %s, tries different ways into it\n"
-								"(boost, aim, air roll), then plays your shot out from there, with small changes to the shot too.\n"
-								"Shows the best one that would have scored better, or else a way in that fixes what the coach flagged.", keyWhat.c_str());
-						else
-							ImGui::SetTooltip("Replays your inputs from just before the shot in the simulator, then tries small changes:\n"
-								"flip timing and direction, flipping or jumping into the touch, steering, boost, air roll and aim.\n"
-								"Shows the best one that would have scored better, if there is one.");
-					}
-					ImGui::SameLine();
-					std::string hint = key ? "try different ways into " + keyWhat + " in the simulator" : "try small changes to this shot in the simulator";
-					ImGui::TextDisabled("%s", hint.c_str());
-				}
-			}
-			else if (st == WhatIfStatus::Found || st == WhatIfStatus::CleanerWayIn)
-			{
-				ImGui::TextColored(pink, "What if: %s", cue.c_str());
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", detail.c_str());
-				if (st == WhatIfStatus::Found)
-				{
-					ImGui::SameLine();
-					ImGui::PushStyleColor(ImGuiCol_Text, GradeColor(wGrade));
-					ImGui::Text("-> %d%s", wGrade, wIn ? ", goal" : "");
-					ImGui::PopStyleColor();
-					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", detail.c_str());
-				}
-				else
-				{
-					ImGui::TextColored(gold, "No goal from a different way in, but it cleans up what the coach flagged:");
-					ImGui::TextColored(gold, "%s", fixes.c_str());
-					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", detail.c_str());
-				}
-				bool showing = uiShowingWhatIf;
-				if (ImGui::SmallButton(showing ? "Back to your rep" : "Watch it"))
-					onGame([this, showing]() { ViewerShowWhatIf(!showing); });
-				if (ImGui::IsItemHovered() && !showing)
-					ImGui::SetTooltip("Plays the what-if with your car. Its path is the pink line; your real one shows in grey while it plays.");
-				ImGui::SameLine();
-				if (ImGui::SmallButton("Practice it")) onGame([this]() { PracticeWhatIf(); });
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Practice from where the what-if starts, with its path drawn faintly to follow.");
-				if (st == WhatIfStatus::CleanerWayIn) { ImGui::SameLine(); deeperButton(); }
-			}
-			else
-			{
-				ImGui::TextDisabled("What if: %s", WhatIf::StatusText(st));
-				if (ImGui::IsItemHovered() && !note.empty()) ImGui::SetTooltip("%s", note.c_str());
-
-				// Then point at what did decide it: the coach's root cause, or else the grades' biggest fix
-				auto practiceThere = [&](int si) {
-					ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.42f, 0.10f, 1.0f));
-					ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.78f, 0.55f, 0.15f, 1.0f));
-					ImGui::PushID(si + 3000);
-					if (ImGui::SmallButton("Practice that")) onGame([this, si]() { PracticeStart(si); });
-					ImGui::PopID();
-					ImGui::PopStyleColor(2);
-				};
-				int fixSeg = -1;
-				std::string fixWhy;
-				for (const UiGrade& g : grades) if (g.biggest) { fixSeg = g.segIndex; fixWhy = g.why; }
-				if (rootSeg >= 0 && rootSeg != hereSeg)
-				{
-					ImGui::TextColored(gold, "Root cause, %s (%s): %s", segs[rootSeg].start < segs[hereSeg >= 0 ? hereSeg : rootSeg].start ? "earlier" : "later",
-						Segmenter::Name(segs[rootSeg].kind), notes[0].cue.c_str());
-					if (ImGui::IsItemHovered() && !notes[0].detail.empty()) ImGui::SetTooltip("%s", notes[0].detail.c_str());
-					ImGui::SameLine();
-					practiceThere(rootSeg);
-					if (!key && rootSeg == whatIfKeySeg) ImGui::TextDisabled("(there's a What if? for %s on that line too)", keyWhat.c_str());
-				}
-				else if (rootSeg >= 0)
-				{
-					ImGui::TextColored(gold, "The coach's call for this part: %s", notes[0].cue.c_str());
-					if (ImGui::IsItemHovered() && !notes[0].detail.empty()) ImGui::SetTooltip("%s", notes[0].detail.c_str());
-				}
-				else if (fixSeg >= 0 && fixSeg < static_cast<int>(segs.size()) && fixSeg != hereSeg)
-				{
-					ImGui::TextColored(gold, "Biggest fix (%s): %s", Segmenter::Name(segs[fixSeg].kind), fixWhy.c_str());
-					ImGui::SameLine();
-					practiceThere(fixSeg);
-				}
-				if (st == WhatIfStatus::NothingBetter) deeperButton();
-			}
-			ImGui::Unindent(28.0f);
-			ImGui::PopID();
+				if (segs[i].kind != SegKind::Recovery && tick >= segs[i].start && tick <= segs[i].end) return i;
+			return -1;
 		};
-		bool whatIfListed = false, whatIfKeyListed = false;
-		for (const UiGrade& ug : grades)
+
+		// The tab you're on decides what plays in the world: your rep, or that line once it's found
 		{
-			if (ug.name.empty() || ug.segIndex < 0 || ug.segIndex >= static_cast<int>(segs.size())) continue;
-			const Segment& sg = segs[ug.segIndex];
-			int si = ug.segIndex;
-			practiceButton(si);
-			ImGui::SameLine();
-			Pill(ug.name, SegGradeColor(ug.name), 84.0f);
-			ImGui::SameLine();
-			if (ug.biggest) { ImGui::TextColored(kGold, "FIX"); ImGui::SameLine(); }
-			std::string line = std::format("{}: {}", Segmenter::Name(sg.kind), ug.why);
-			ImGui::PushID(si + 1000);
-			if (ImGui::Selectable(line.c_str(), false))
+			const int want = uiTab == 0 ? -1 : (line[uiTab - 1].shows() ? uiTab - 1 : -1);
+			static int requested = -2;
+			if (uiPracticeActive) requested = -2;
+			else if (want == uiShowing.load()) requested = -2;
+			else if (want != requested)
 			{
-				float target = static_cast<float>(sg.start);
-				onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
+				requested = want;
+				onGame([this, want]() { ViewerShowLine(want, true); });
 			}
-			ImGui::PopID();
-			if (si == whatIfKeySeg && !whatIfKeyListed) { whatIfKeyListed = true; whatIfRow(WhatIfPoint::KeyMoment); }
-			if (si == whatIfSeg && !whatIfListed) { whatIfListed = true; whatIfRow(WhatIfPoint::Shot); }
-		}
-		if (whatIfKeySeg >= 0 && !whatIfKeyListed)
-		{
-			ImGui::TextDisabled("%s:", Segmenter::Name(segs[whatIfKeySeg].kind));
-			whatIfRow(WhatIfPoint::KeyMoment);
-		}
-		if (whatIfSeg >= 0 && !whatIfListed)
-		{
-			ImGui::TextDisabled("%s:", Segmenter::Name(segs[whatIfSeg].kind));
-			whatIfRow(WhatIfPoint::Shot);
 		}
 
-		// ---- Stage 3: the engine line. A bot plays the shot perfectly (none of your inputs), or your own line
-		// reshaped, whichever plays out best. Same Watch it / Practice it as the what-ifs. ----
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		const float W = ImGui::GetContentRegionAvail().x;
+		ImGui::Spacing();
+
+		// ---------- Header: the grade gauge, what it was and why ----------
 		{
-			WhatIfStatus st;
-			std::string cue, detail, file, note;
-			int wGrade = 0, wDepth = 1;
-			bool wIn = false;
-			WhatIfPoint wPoint;
+			const ImVec2 p0 = ImGui::GetCursorScreenPos();
+			const float D = 112.0f;
+			const ImVec2 c(p0.x + D * 0.5f + 2.0f, p0.y + D * 0.5f);
+			const ImVec4 gc = GradeColor(overallGrade);
+			Gauge(dl, c, D * 0.5f - 12.0f, 9.0f, overallGrade, gc);
 			{
-				std::lock_guard<std::mutex> lock(whatIfMutex);
-				st = whatIf.status; cue = whatIf.cue; detail = whatIf.detail; file = whatIfFile; note = whatIf.note;
-				wGrade = whatIf.grade; wIn = whatIf.wentIn; wDepth = whatIf.depth; wPoint = whatIf.point;
+				FontScope f(fBig);
+				std::string n = overallGrade > 0 ? std::to_string(overallGrade) : "-";
+				ImVec2 ts = ImGui::CalcTextSize(n.c_str());
+				dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f - 5.0f), U32(kText), n.c_str());
 			}
-			const bool mine = file == watching && wPoint == WhatIfPoint::Engine;
-			const bool busyHere = whatIfBusy && file == watching && whatIfRunningPoint == static_cast<int>(WhatIfPoint::Engine);
-			const ImVec4 pink(1.0f, 0.55f, 0.85f, 1.0f);
-			auto engineButton = [](const char* label) {
-				ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.22f, 0.55f, 1.0f));
-				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.42f, 0.30f, 0.72f, 1.0f));
-				bool clicked = ImGui::SmallButton(label);
-				ImGui::PopStyleColor(2);
-				return clicked;
+			{
+				FontScope f(fLabel);
+				ImVec2 ts = ImGui::CalcTextSize("OF 5");
+				dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y + 18.0f), U32(kMuted), "OF 5");
+			}
+
+			// Keep and close, top right
+			const float bs = 30.0f;
+			ImVec2 xPos(p0.x + W - bs, p0.y), starPos(p0.x + W - 2 * bs - 6.0f, p0.y);
+			ImGui::SetCursorScreenPos(starPos);
+			const bool kept = cur && cur->kept;
+			if (ImGui::InvisibleButton("keep", ImVec2(bs, bs)) && cur) ToggleKeep(watching);
+			bool hov = ImGui::IsItemHovered();
+			dl->AddRect(starPos, ImVec2(starPos.x + bs, starPos.y + bs), U32(hov ? kLine : kLineSoft), 8.0f);
+			DrawStar(dl, ImVec2(starPos.x + bs * 0.5f, starPos.y + bs * 0.5f + 1.0f), 8.0f, kept, kept ? U32(Hex(0xFBBF24)) : U32(hov ? kText : kMuted));
+			if (hov) ImGui::SetTooltip(kept ? "Kept forever. Click to un-keep." : "Keep this rep forever (never cleaned up)");
+			ImGui::SetCursorScreenPos(xPos);
+			if (ImGui::InvisibleButton("close", ImVec2(bs, bs))) onGame([this]() { ViewerExit(); });
+			hov = ImGui::IsItemHovered();
+			dl->AddRect(xPos, ImVec2(xPos.x + bs, xPos.y + bs), U32(hov ? kLine : kLineSoft), 8.0f);
+			{
+				const ImVec2 m(xPos.x + bs * 0.5f, xPos.y + bs * 0.5f);
+				const ImU32 col = U32(hov ? kText : kMuted);
+				dl->AddLine(ImVec2(m.x - 5, m.y - 5), ImVec2(m.x + 5, m.y + 5), col, 2.0f);
+				dl->AddLine(ImVec2(m.x + 5, m.y - 5), ImVec2(m.x - 5, m.y + 5), col, 2.0f);
+			}
+			if (hov) ImGui::SetTooltip("Stop watching");
+
+			// The words, right of the gauge
+			const float tx = p0.x + D + 20.0f;
+			ImGui::SetCursorScreenPos(ImVec2(tx, p0.y + 6.0f));
+			ImGui::BeginGroup();
+			ImGui::PushTextWrapPos(p0.x + W - 2 * bs - 16.0f - (ImGui::GetWindowPos().x) + ImGui::GetScrollX());
+			{
+				FontScope f(fLabel);
+				ImGui::TextColored(kAccent, "%s", mechanic.c_str());
+				if (cur)
+				{
+					std::string when = cur->savedAt.size() >= 16 ? cur->savedAt.substr(11, 5) : cur->savedAt;
+					ImGui::SameLine();
+					ImGui::TextColored(kMuted, "%s", std::format("\xC2\xB7  {}  \xC2\xB7  {:.1f} S", when, cur->duration).c_str());
+					if (cur->rating > 0) { ImGui::SameLine(); ImGui::TextColored(kMuted, "%s", std::format("\xC2\xB7  YOU RATED IT {}", cur->rating).c_str()); }
+				}
+			}
+			{
+				FontScope f(fHead);
+				ImGui::TextWrapped("%s", overallName.empty() ? "Not graded" : overallName.c_str());
+			}
+			ImGui::PushStyleColor(ImGuiCol_Text, kSub);
+			if (!overallWhy.empty()) ImGui::TextWrapped("%s", overallWhy.c_str());
+			ImGui::PopStyleColor();
+			ImGui::PopTextWrapPos();
+			ImGui::EndGroup();
+			const float bottom = std::max(p0.y + D, ImGui::GetItemRectMax().y);
+			ImGui::SetCursorScreenPos(ImVec2(p0.x, bottom + 14.0f));
+		}
+
+		// ---------- The timeline card: markers, segments colored by grade, the playhead, transport ----------
+		if (!segs.empty() && segTotal > 1)
+		{
+			const ImVec2 p0 = ImGui::GetCursorScreenPos();
+			const float pad = 14.0f, markerH = 24.0f, barH = 30.0f, transportH = 32.0f;
+			const float cardH = pad + markerH + barH + 10.0f + transportH + pad;
+			dl->AddRectFilled(p0, ImVec2(p0.x + W, p0.y + cardH), U32(kPanel2), 12.0f);
+			dl->AddRect(p0, ImVec2(p0.x + W, p0.y + cardH), U32(kLineSoft), 12.0f);
+			const float x0 = p0.x + pad, x1 = p0.x + W - pad, barY = p0.y + pad + markerH;
+			auto xOf = [&](int tick) { return x0 + (x1 - x0) * static_cast<float>(std::clamp(tick, 0, segTotal - 1)) / static_cast<float>(segTotal - 1); };
+
+			// Markers: the root cause, and where the line on the open tab takes over
+			struct Marker { int tick; const char* text; ImVec4 color; };
+			std::vector<Marker> marks;
+			if (rootSeg >= 0) marks.push_back({ segs[rootSeg].start, "ROOT CAUSE", kRoot });
+			{
+				const int slot = uiTab == 2 ? kBestLine : kFixLine;
+				if (line[slot].shows() && line[slot].startTick >= 0)
+					marks.push_back({ line[slot].startTick, slot == kBestLine ? "ENGINE TAKES OVER" : "FIX", kAccent });
+			}
+			std::sort(marks.begin(), marks.end(), [](const Marker& a, const Marker& b) { return a.tick < b.tick; });
+			{
+				FontScope f(fLabel);
+				// Centered over the diamond, unless two would collide: then the left one ends at its diamond, the right one starts at its
+				bool clash = false;
+				if (marks.size() == 2)
+				{
+					const float wa = ImGui::CalcTextSize(marks[0].text).x, wb = ImGui::CalcTextSize(marks[1].text).x;
+					clash = xOf(marks[1].tick) - xOf(marks[0].tick) < (wa + wb) * 0.5f + 10.0f;
+				}
+				for (size_t i = 0; i < marks.size(); i++)
+				{
+					const float x = xOf(marks[i].tick);
+					Diamond(dl, ImVec2(x, barY - 7.0f), 4.5f, marks[i].color);
+					const ImVec2 ts = ImGui::CalcTextSize(marks[i].text);
+					float lx = clash ? (i == 0 ? x - ts.x - 2.0f : x + 2.0f) : x - ts.x * 0.5f;
+					lx = std::clamp(lx, x0, x1 - ts.x);
+					dl->AddText(ImVec2(lx, barY - 13.0f - ts.y), U32(marks[i].color), marks[i].text);
+				}
+			}
+
+			// Segments (the recovery runs as a thin strip underneath, since it overlaps the result)
+			int hoverSeg = -1;
+			const ImVec2 mouse = ImGui::GetIO().MousePos;
+			for (int si = 0; si < static_cast<int>(segs.size()); si++)
+			{
+				const Segment& sg = segs[si];
+				std::string gradeName;
+				for (const UiGrade& ug : grades) if (ug.segIndex == si) gradeName = ug.name;
+				float sx0 = xOf(sg.start) + 1.5f, sx1 = std::max(xOf(sg.end + 1) - 1.5f, sx0 + 3.0f);
+				if (sg.kind == SegKind::Recovery)
+				{
+					dl->AddRectFilled(ImVec2(sx0, barY + barH + 3.0f), ImVec2(sx1, barY + barH + 6.0f), U32(Hex(0xA78BFA), 0.55f), 2.0f);
+					continue;
+				}
+				const ImVec4 col = gradeName.empty() ? kMuted : SegGradeColor(gradeName);
+				const bool hovered = mouse.x >= sx0 && mouse.x < sx1 && mouse.y >= barY && mouse.y < barY + barH;
+				if (hovered) hoverSeg = si;
+				dl->AddRectFilled(ImVec2(sx0, barY), ImVec2(sx1, barY + barH), U32(col, gradeName.empty() ? 0.10f : (hovered ? 0.34f : 0.22f)), 5.0f);
+				dl->AddRectFilled(ImVec2(sx0, barY), ImVec2(sx1, barY + 2.0f), U32(col, gradeName.empty() ? 0.35f : 1.0f), 2.0f);
+				FontScope f(fLabel);
+				std::string name = Segmenter::Name(sg.kind);
+				ImVec2 ts = ImGui::CalcTextSize(name.c_str());
+				if (sx1 - sx0 > ts.x + 12.0f)
+					dl->AddText(ImVec2(sx0 + 7.0f, barY + (barH - ts.y) * 0.5f + 1.0f), U32(gradeName.empty() ? kMuted : kText, 0.92f), name.c_str());
+			}
+			// The bar scrubs: click or drag to move through the rep
+			ImGui::SetCursorScreenPos(ImVec2(x0, barY));
+			ImGui::InvisibleButton("scrubbar", ImVec2(x1 - x0, barH + 6.0f));
+			{
+				static int lastSent = -1;
+				if (ImGui::IsItemActive())
+				{
+					const int tick = std::clamp(static_cast<int>(std::lround((mouse.x - x0) / (x1 - x0) * (segTotal - 1))), 0, segTotal - 1);
+					if (tick != lastSent)
+					{
+						lastSent = tick;
+						const float target = static_cast<float>(tick);
+						onGame([this, target]() { viewerPlaying = false; uiViewerPlaying = false; ViewerSeek(target); });
+					}
+				}
+				else lastSent = -1;
+			}
+			if (hoverSeg >= 0 && ImGui::IsItemHovered())
+			{
+				std::string gradeName, why;
+				for (const UiGrade& ug : grades) if (ug.segIndex == hoverSeg) { gradeName = ug.name; why = ug.why; }
+				const Segment& sg = segs[hoverSeg];
+				ImGui::SetTooltip("%s%s%s: %.2fs to %.2fs%s%s", Segmenter::Name(sg.kind), gradeName.empty() ? "" : " - ", gradeName.c_str(),
+					sg.start / 120.0f, (sg.end + 1) / 120.0f, why.empty() ? "" : "\n", why.c_str());
+			}
+			// Playhead
+			{
+				const float px = xOf(std::min(head, segTotal - 1));
+				dl->AddLine(ImVec2(px, barY - 4.0f), ImVec2(px, barY + barH + 4.0f), U32(kText, 0.25f), 6.0f);
+				dl->AddLine(ImVec2(px, barY - 4.0f), ImVec2(px, barY + barH + 4.0f), U32(kText), 2.0f);
+			}
+
+			// Transport: back to start, play, step, time, speed, loop
+			ImGui::SetCursorScreenPos(ImVec2(x0, barY + barH + 12.0f));
+			const ImVec2 sq(32, 28);
+			if (ImGui::Button("|<", sq)) onGame([this]() { ViewerSeek(0.0f); });
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back to the start");
+			ImGui::SameLine(0, 6);
+			const bool playing = uiViewerPlaying;
+			if (AccentButton(playing ? "||" : ">", ImVec2(44, 28)))
+				onGame([this]() { viewerPlaying = !viewerPlaying; uiViewerPlaying = viewerPlaying; });
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip(playing ? "Pause" : "Play");
+			ImGui::SameLine(0, 6);
+			if (ImGui::Button("<", sq)) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) - 1.0f); });
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back 1 tick");
+			ImGui::SameLine(0, 6);
+			if (ImGui::Button(">##step", sq)) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) + 1.0f); });
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forward 1 tick");
+			ImGui::SameLine(0, 12);
+			{
+				FontScope f(fMono);
+				ImGui::AlignTextToFramePadding();
+				ImGui::TextColored(kSub, "%s", std::format("{:.2f} / {:.2f} s", headF / 120.0f, total / 120.0f).c_str());
+			}
+			// Speed, as a small segmented control on the right
+			{
+				const float speeds[4] = { 0.1f, 0.25f, 0.5f, 1.0f };
+				const char* names[4] = { "0.1x", "0.25x", "0.5x", "1x" };
+				float segW = 0.0f;
+				const ImGuiStyle& st = ImGui::GetStyle();
+				for (const char* n : names) segW += ImGui::CalcTextSize(n).x + st.FramePadding.x * 2.0f + 2.0f;
+				const float loopW = ImGui::GetFrameHeight() + st.ItemInnerSpacing.x + ImGui::CalcTextSize("Loop").x + 10.0f;
+				ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 8.0f, (x1 - ImGui::GetWindowPos().x) - segW - loopW));
+				ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2, 6));
+				for (int i = 0; i < 4; i++)
+				{
+					if (i > 0) ImGui::SameLine();
+					const bool on = std::fabs(uiViewerSpeed.load() - speeds[i]) < 0.001f;
+					ImGui::PushStyleColor(ImGuiCol_Button, on ? Hex(0x1F3350) : ImVec4(0, 0, 0, 0));
+					ImGui::PushStyleColor(ImGuiCol_Text, on ? kText : kMuted);
+					if (ImGui::Button(names[i], ImVec2(0, 28)))
+					{
+						const float sp = speeds[i];
+						uiViewerSpeed = sp;
+						onGame([this, sp]() { viewerSpeed = sp; });
+					}
+					ImGui::PopStyleColor(2);
+				}
+				ImGui::PopStyleVar();
+				ImGui::SameLine(0, 10);
+				ImGui::AlignTextToFramePadding();
+				if (ImGui::Checkbox("Loop", &uiLoop))
+				{
+					const bool loop = uiLoop;
+					onGame([this, loop]() { viewerLoop = loop; });
+				}
+			}
+			ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + cardH + 16.0f));
+		}
+
+		// ---------- Tabs: Your shot | Smallest fix | Best line ----------
+		auto tabStatus = [&](int tab, std::string& gradeText, ImVec4& gradeCol, std::string& sub) {
+			if (tab == 0)
+			{
+				gradeText = overallGrade > 0 ? std::to_string(overallGrade) : "-";
+				gradeCol = GradeColor(overallGrade);
+				sub = cur ? (cur->goal ? "goal" : overallGrade == 2 ? "close miss" : "miss") : "";
+				return;
+			}
+			const int slot = tab - 1;
+			const LineView& v = line[slot];
+			gradeCol = kMuted;
+			if (busySlot == slot || (busy && slot == kBestLine && busySlot == kFixLine && v.mine && v.status == WhatIfStatus::None) || (pending && !v.mine))
+			{
+				gradeText = busySlot == slot ? "" : "...";
+				sub = busySlot == slot ? "thinking" : "waiting";
+				if (!simReady) sub = "loading";
+				return;
+			}
+			if (!v.mine || v.status == WhatIfStatus::None) { gradeText = "-"; sub = simReady ? "" : "loading"; return; }
+			switch (v.status)
+			{
+			case WhatIfStatus::Found:
+				gradeText = std::to_string(v.grade);
+				gradeCol = GradeColor(v.grade);
+				sub = slot == kFixLine ? "found" : (v.grade >= 5 ? "a 5" : v.grade == overallGrade ? "cleaner" : "found");
+				return;
+			case WhatIfStatus::CleanerWayIn: gradeText = "~"; gradeCol = kAccent; sub = "cleaner way in"; return;
+			case WhatIfStatus::NotNeeded: gradeText = "-"; sub = "nothing to beat"; return;
+			case WhatIfStatus::NothingBetter: gradeText = "-"; sub = "none found"; return;
+			default: gradeText = "-"; sub = WhatIf::StatusText(v.status); return;
+			}
+		};
+		{
+			const char* names[3] = { "YOUR SHOT", "SMALLEST FIX", "BEST LINE" };
+			const float gap = 8.0f, tabW = (W - 2 * gap) / 3.0f, tabH = 60.0f;
+			const ImVec2 p0 = ImGui::GetCursorScreenPos();
+			for (int t = 0; t < 3; t++)
+			{
+				const ImVec2 a(p0.x + t * (tabW + gap), p0.y), b(a.x + tabW, a.y + tabH);
+				ImGui::SetCursorScreenPos(a);
+				ImGui::PushID(t + 8000);
+				if (ImGui::InvisibleButton("tab", ImVec2(tabW, tabH))) uiTab = t;
+				const bool hov = ImGui::IsItemHovered();
+				ImGui::PopID();
+				const bool on = uiTab == t;
+				dl->AddRectFilled(a, b, U32(on ? kPanel : (hov ? kPanel2 : kBg)), 12.0f, ImDrawCornerFlags_Top);
+				dl->AddRect(a, ImVec2(b.x, b.y + (on ? 1.0f : 0.0f)), U32(on ? kLine : kLineSoft), 12.0f, ImDrawCornerFlags_Top);
+				if (on) dl->AddRectFilled(ImVec2(a.x + 1, b.y - 1), ImVec2(b.x - 1, b.y + 2), U32(kPanel));   // open into the panel below
+				std::string gText, sub;
+				ImVec4 gCol;
+				tabStatus(t, gText, gCol, sub);
+				{
+					FontScope f(fLabel);
+					dl->AddText(ImVec2(a.x + 14, a.y + 10), U32(on ? kAccent : kMuted), names[t]);
+				}
+				float gx = a.x + 14;
+				{
+					FontScope f(fMono);
+					const ImVec2 ts = ImGui::CalcTextSize(gText.c_str());
+					dl->AddText(ImVec2(gx, a.y + 26), U32(gCol), gText.c_str());
+					gx += ts.x + 8.0f;
+				}
+				const int slot = t - 1;
+				if (t > 0 && busySlot == slot)
+				{
+					Spinner(dl, ImVec2(gx + 6.0f, a.y + 38.0f), 6.0f, 2.0f, kAccent);
+					const ImVec2 ts = ImGui::CalcTextSize(sub.c_str());
+					dl->AddText(ImVec2(gx + 20.0f, a.y + 38.0f - ts.y * 0.5f), U32(kMuted), sub.c_str());
+				}
+				else if (!sub.empty())
+				{
+					const ImVec2 ts = ImGui::CalcTextSize(sub.c_str());
+					dl->AddText(ImVec2(gx, a.y + 38.0f - ts.y * 0.5f), U32(kMuted), sub.c_str());
+				}
+			}
+			ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + tabH));
+		}
+
+		// ---------- The open tab's panel ----------
+		{
+			const ImVec2 p0 = ImGui::GetCursorScreenPos();
+			const float pad = 18.0f;
+			dl->ChannelsSplit(2);
+			dl->ChannelsSetCurrent(1);
+			ImGui::SetCursorScreenPos(ImVec2(p0.x + pad, p0.y + pad));
+			ImGui::BeginGroup();
+			ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + W - 2 * pad);
+			const float innerW = W - 2 * pad;
+
+			// Pieces the panels share
+			auto tiles = [&](const std::vector<ReviewStat>& ts) {
+				if (ts.empty()) return;
+				const float g = 10.0f, tw = (innerW - g * (ts.size() - 1)) / static_cast<float>(ts.size()), th = 72.0f;
+				const ImVec2 q = ImGui::GetCursorScreenPos();
+				for (size_t i = 0; i < ts.size(); i++)
+				{
+					const ImVec2 a(q.x + i * (tw + g), q.y), b(a.x + tw, a.y + th);
+					dl->AddRectFilled(a, b, U32(kPanel2), 10.0f);
+					dl->AddRect(a, b, U32(kLineSoft), 10.0f);
+					{ FontScope f(fLabel); dl->AddText(ImVec2(a.x + 12, a.y + 10), U32(kMuted), Upper(ts[i].label).c_str()); }
+					{ FontScope f(fMono); dl->AddText(ImVec2(a.x + 12, a.y + 25), U32(kText), ts[i].value.c_str()); }
+					dl->AddText(ImVec2(a.x + 12, a.y + 49), U32(kMuted), ts[i].sub.c_str());
+				}
+				ImGui::Dummy(ImVec2(innerW, th));
 			};
-			const int here = static_cast<int>(uiViewerPlayhead.load());
-			ImGui::PushID(7100);
-			if (busyHere)
+			auto headline = [&](const std::string& text) {
+				FontScope f(fHead);
+				ImGui::TextWrapped("%s", text.c_str());
+			};
+			auto subline = [&](const std::string& text) {
+				if (text.empty()) return;
+				ImGui::PushStyleColor(ImGuiCol_Text, kSub);
+				ImGui::TextWrapped("%s", text.c_str());
+				ImGui::PopStyleColor();
+			};
+			const ImVec2 btn((innerW - 10.0f) * 0.5f, 40.0f);
+			// An empty state: an icon, a title and a line of text
+			auto emptyState = [&](int icon, const std::string& title, const std::string& text) {
+				const ImVec2 q = ImGui::GetCursorScreenPos();
+				const float s = 46.0f;
+				const ImVec2 c(q.x + s * 0.5f, q.y + s * 0.5f);
+				if (icon == 0) Spinner(dl, c, 17.0f, 4.0f, kAccent);
+				else
+				{
+					const ImVec4 col = icon == 2 ? Hex(0x22D3EE) : kMuted;
+					dl->AddRectFilled(q, ImVec2(q.x + s, q.y + s), U32(icon == 2 ? Hex(0x0D2A33) : kPanel2), 12.0f);
+					dl->AddRect(q, ImVec2(q.x + s, q.y + s), U32(icon == 2 ? col : kLine), 12.0f);
+					if (icon == 1)
+					{
+						dl->AddCircle(ImVec2(c.x - 2, c.y - 2), 7.0f, U32(col), 20, 2.0f);
+						dl->AddLine(ImVec2(c.x + 3, c.y + 3), ImVec2(c.x + 8, c.y + 8), U32(col), 2.2f);
+					}
+					else
+					{
+						dl->AddLine(ImVec2(c.x - 8, c.y + 1), ImVec2(c.x - 2, c.y + 7), U32(col), 2.6f);
+						dl->AddLine(ImVec2(c.x - 2, c.y + 7), ImVec2(c.x + 9, c.y - 6), U32(col), 2.6f);
+					}
+				}
+				ImGui::SetCursorScreenPos(ImVec2(q.x + s + 16.0f, q.y + 2.0f));
+				ImGui::BeginGroup();
+				{ FontScope f(fBold); ImGui::TextWrapped("%s", title.c_str()); }
+				subline(text);
+				ImGui::EndGroup();
+				ImGui::SetCursorScreenPos(ImVec2(q.x, std::max(q.y + s, ImGui::GetItemRectMax().y) + 8.0f));
+			};
+			auto segName = [&](int tick) -> std::string {
+				const int si = segAt(tick);
+				return si >= 0 ? Segmenter::Name(segs[si].kind) : "";
+			};
+
+			if (uiTab == 0)
 			{
-				ImGui::TextDisabled(whatIfDepth >= 2 ? "Engine thinking harder...  (up to a minute)" : "Engine thinking...  (several seconds)");
-			}
-			else if (!predictor.Ready())
-			{
-				ImGui::TextDisabled("Engine line  (the simulator is still loading)");
+				// ---- Your shot ----
+				label("WHAT HAPPENED", kMuted);
+				std::string what = !notes.empty() ? notes[0].cue : fixSeg >= 0 && !fixWhy.empty() ? fixWhy : overallWhy;
+				if (!what.empty()) what[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(what[0])));
+				headline(what.empty() ? "No breakdown for this rep" : what);
+				if (!notes.empty())
+				{
+					std::string why = rootSeg >= 0 ? std::string("The root cause, in the ") + Segmenter::Name(segs[rootSeg].kind) + "."
+						: notes[0].label.empty() ? std::string() : notes[0].label.substr(0, notes[0].label.find(':')) + ".";
+					if (notes.size() > 1) why += "  Also: " + notes[1].cue;
+					subline(why);
+					if (ImGui::IsItemHovered() && !notes[0].detail.empty()) ImGui::SetTooltip("%s", notes[0].detail.c_str());
+				}
+				ImGui::Dummy(ImVec2(0, 4));
+				tiles(stats);
+				ImGui::Dummy(ImVec2(0, 4));
+				if (AccentButton("Watch your rep", btn)) onGame([this]() { ViewerShowLine(-1, false); });
+				ImGui::SameLine(0, 10);
+				const int practiceSeg = rootSeg >= 0 ? rootSeg : fixSeg;
+				if (practiceSeg >= 0 && practiceSeg < static_cast<int>(segs.size()))
+				{
+					if (OutlineButton(rootSeg >= 0 ? "Practice the root cause" : "Practice the biggest fix", btn, kRoot))
+						onGame([this, practiceSeg]() { PracticeStart(practiceSeg); });
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Drops you into %s in free play, as many tries as you want.", Segmenter::Name(segs[practiceSeg].kind));
+				}
+				else if (OutlineButton(std::format("Practice from here ({:.2f}s)", head / 120.0f).c_str(), btn))
+					onGame([this, head]() { PracticeStartAt(head); });
 			}
 			else
 			{
-				if (engineButton("Engine line")) onGame([this]() { StartWhatIf(1, WhatIfPoint::Engine, -1); });
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("A bot takes over half a second before your touch and plays the shot as well as it can, with perfect\n"
-						"inputs. It tries meeting the ball at every moment it could, and your own line reshaped, aims for 4s and 5s,\n"
-						"and only shows a line that beats your shot. It shows the ceiling for the shot, not what's comfortable.\n"
-						"For something entirely different (another setup, another approach), scrub back and use Engine from here.");
-				ImGui::SameLine();
-				if (engineButton(std::format("Engine from here ({:.2f}s)", here / 120.0f).c_str()))
-					onGame([this, here]() { StartWhatIf(1, WhatIfPoint::Engine, here); });
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Same, but the engine takes over your car at the moment you've scrubbed to.");
-				if (mine && st == WhatIfStatus::Found)
+				const int slot = uiTab - 1;
+				const LineView& v = line[slot];
+				const bool fixTab = slot == kFixLine;
+				if (!simReady)
+					emptyState(0, "Loading the simulator...", "The searches start as soon as it's ready.");
+				else if (busySlot == slot || ((pending || busy) && (!v.mine || v.status == WhatIfStatus::None)))
 				{
-					ImGui::TextColored(pink, "%s", cue.c_str());
-					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", detail.c_str());
-					ImGui::SameLine();
-					ImGui::PushStyleColor(ImGuiCol_Text, GradeColor(wGrade));
-					ImGui::Text("-> %d%s", wGrade, wIn ? ", goal" : "");
-					ImGui::PopStyleColor();
-					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", detail.c_str());
-					bool showing = uiShowingWhatIf;
-					if (ImGui::SmallButton(showing ? "Back to your rep" : "Watch it"))
-						onGame([this, showing]() { ViewerShowWhatIf(!showing); });
-					if (ImGui::IsItemHovered() && !showing)
-						ImGui::SetTooltip("Plays the engine's line with your car. Its path is the pink line; your real one shows in grey while it plays.");
-					ImGui::SameLine();
-					if (ImGui::SmallButton("Practice it")) onGame([this]() { PracticeWhatIf(); });
-					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Practice from where the engine takes over, with its path drawn faintly to follow.");
-					if (wDepth < 2) { ImGui::SameLine(); if (engineButton("Think harder")) { int es = whatIfEngineStart; onGame([this, es]() { StartWhatIf(2, WhatIfPoint::Engine, es); }); } }
+					std::string t = busySlot == slot
+						? (fixTab ? (whatIfRunningPoint == static_cast<int>(WhatIfPoint::KeyMoment) ? "Trying different ways into " + keyWhat + "..." : "Trying small changes to your shot...")
+							: (whatIfDepth >= 2 ? "Thinking harder..." : "Thinking..."))
+						: "Waiting for the smallest fix to finish...";
+					emptyState(0, t, fixTab ? "A few seconds. You can keep watching your rep meanwhile."
+						: whatIfDepth >= 2 ? "Up to a minute, in the background." : "Up to about 15 seconds, in the background.");
 				}
-				else if (mine && st != WhatIfStatus::None)
+				else if (!v.mine || v.status == WhatIfStatus::None)
 				{
-					ImGui::TextDisabled("%s", st == WhatIfStatus::NoShot ? "Engine: nothing to play from here." : st == WhatIfStatus::Cancelled ? "Engine: stopped."
-						: "Engine: it couldn't find a line that beats your shot from here.");
-					if (ImGui::IsItemHovered() && !note.empty()) ImGui::SetTooltip("%s", note.c_str());
-					if (!note.empty())
+					emptyState(1, "Not searched yet", "");
+					if (AccentButton(fixTab ? "Find the smallest fix" : "Find the best line", btn))
+						onGame([this, fixTab]() { StartWhatIf(1, fixTab ? WhatIfPoint::Shot : WhatIfPoint::Engine, -1); });
+				}
+				else if (v.status == WhatIfStatus::NotNeeded)
+					emptyState(2, "Nothing to beat. Clean rep.", overallWhy + ". Keep it to set the bar for this shot.");
+				else if (v.status == WhatIfStatus::Found || v.status == WhatIfStatus::CleanerWayIn)
+				{
+					if (v.status == WhatIfStatus::CleanerWayIn)
 					{
-						// How the search went, right there (so a slow or cut-short search is easy to spot)
-						ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-						ImGui::TextWrapped("%s", note.c_str());
-						ImGui::PopStyleColor();
+						label(("A CLEANER WAY INTO " + Upper(v.what)).c_str(), kMuted);
+						headline(v.cue);
+						subline("No goal from a different way in, but it fixes what the coach flagged: " + v.fixes);
 					}
-					if (wDepth < 2 && st == WhatIfStatus::NothingBetter)
+					else
 					{
+						label(fixTab ? (v.point == WhatIfPoint::KeyMoment ? ("A DIFFERENT WAY INTO " + Upper(v.what)).c_str() : "THE LEAST YOU COULD CHANGE")
+							: "THE ENGINE'S LINE", kMuted);
+						headline(v.cue);
+						subline(std::format("{}. It scored from {} of {} slightly different starts.", v.gradeWhy, v.held, v.heldOf));
+					}
+					if (ImGui::IsItemHovered() && !v.detail.empty()) ImGui::SetTooltip("%s", v.detail.c_str());
+					ImGui::Dummy(ImVec2(0, 4));
+					std::vector<ReviewStat> ts;
+					ts.push_back({ fixTab ? "Starts at" : "Takes over", std::format("{:.2f} s", v.startTick / 120.0f), segName(v.startTick) });
+					if (v.status == WhatIfStatus::Found)
+						ts.push_back({ "Grade", std::to_string(v.grade), std::format("you: {}", overallGrade) });
+					ts.push_back({ "Held up", std::format("{}/{}", v.held, v.heldOf), "nudged starts" });
+					tiles(ts);
+					ImGui::Dummy(ImVec2(0, 4));
+					if (AccentButton("Watch it", btn)) onGame([this, slot]() { ViewerShowLine(slot, false); });
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("Plays it with your car from just before it changes. Your real path shows in grey while it plays.");
+					ImGui::SameLine(0, 10);
+					if (OutlineButton("Practice it", btn)) onGame([this, slot]() { PracticeLine(slot); });
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Practice from where it takes over, with its path drawn faintly to follow.");
+				}
+				else
+				{
+					// Searched, nothing to show
+					if (v.status == WhatIfStatus::NothingBetter)
+						emptyState(1, fixTab ? "No small fix found" : "No better line found",
+							fixTab ? "Small changes to your inputs didn't beat your shot. The best line tab doesn't stick to your inputs."
+								: "Your shot was the best it could find from here.");
+					else
+						emptyState(1, WhatIf::StatusText(v.status), "");
+					if (fixTab && rootSeg >= 0)
+						subline("The coach's call, in the " + std::string(Segmenter::Name(segs[rootSeg].kind)) + ": " + notes[0].cue);
+				}
+
+				// Small extras: search more, or have the engine take over from the playhead
+				if (simReady && !busy && v.mine && v.status != WhatIfStatus::None && v.status != WhatIfStatus::NotNeeded)
+				{
+					ImGui::Dummy(ImVec2(0, 2));
+					if (fixTab)
+					{
+						if (v.depth < 2 && v.status != WhatIfStatus::Found)
+						{
+							const WhatIfPoint pt = v.point == WhatIfPoint::KeyMoment ? WhatIfPoint::KeyMoment : WhatIfPoint::Shot;
+							if (LinkButton("Search deeper")) onGame([this, pt]() { StartWhatIf(2, pt); });
+							if (ImGui::IsItemHovered()) ImGui::SetTooltip("About 10x more tries: wider timing and aim, finer angles, and up to three changes together.\nUp to about 15 seconds.");
+							ImGui::SameLine();
+						}
+					}
+					else
+					{
+						if (v.depth < 2)
+						{
+							const int es = whatIfEngineStart;
+							if (LinkButton("Think harder")) onGame([this, es]() { StartWhatIf(2, WhatIfPoint::Engine, es); });
+							if (ImGui::IsItemHovered()) ImGui::SetTooltip("About 5x more tries. Up to a minute in the background.");
+							ImGui::SameLine();
+						}
+						if (LinkButton(std::format("Take over from here ({:.2f}s)", head / 120.0f).c_str()))
+							onGame([this, head]() { StartWhatIf(1, WhatIfPoint::Engine, head); });
+						if (ImGui::IsItemHovered()) ImGui::SetTooltip("The engine takes over your car at the moment you've scrubbed to,\nfor something entirely different (another setup, another approach).");
 						ImGui::SameLine();
-						if (engineButton("Think harder")) { int es = whatIfEngineStart; onGame([this, es]() { StartWhatIf(2, WhatIfPoint::Engine, es); }); }
-						if (ImGui::IsItemHovered()) ImGui::SetTooltip("About 5x more tries. Takes up to a minute in the background.");
 					}
+					if (!v.note.empty())
+					{
+						ImGui::TextDisabled("How it searched");
+						if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", v.note.c_str());
+					}
+					else ImGui::NewLine();
 				}
 			}
-			ImGui::PopID();
+
+			ImGui::PopTextWrapPos();
+			ImGui::EndGroup();
+			const float bottom = std::max(ImGui::GetItemRectMax().y, p0.y + 200.0f) + pad;
+			dl->ChannelsSetCurrent(0);
+			dl->AddRectFilled(p0, ImVec2(p0.x + W, bottom), U32(kPanel), 12.0f, ImDrawCornerFlags_Bot);
+			dl->AddRect(p0, ImVec2(p0.x + W, bottom), U32(kLine), 12.0f, ImDrawCornerFlags_Bot);
+			{
+				// the open tab's top edge carries the accent
+				const float tabW = (W - 16.0f) / 3.0f, ax = p0.x + uiTab * (tabW + 8.0f);
+				dl->AddLine(ImVec2(p0.x + 1, p0.y), ImVec2(p0.x + W - 1, p0.y), U32(kLine));
+				dl->AddRectFilled(ImVec2(ax + 1, p0.y - 1), ImVec2(ax + tabW - 1, p0.y + 1), U32(kPanel));
+				dl->AddLine(ImVec2(ax + 12, p0.y - 60.0f + 1), ImVec2(ax + tabW - 12, p0.y - 60.0f + 1), U32(kAccent), 2.0f);
+			}
+			dl->ChannelsMerge();
+			ImGui::SetCursorScreenPos(ImVec2(p0.x, bottom + 14.0f));
 		}
 
+		// ---------- What went well / where it went wrong (the full breakdown, folded away) ----------
 		{
-			int th = *targetHitbox;
-			const char* thNames[3] = { "Off", "For your touch", "For the earliest intercept" };
-			ImGui::PushItemWidth(220);
-			if (ImGui::Combo("Target car outline", &th, thNames, 3))
+			const ImVec2 a = ImGui::GetCursorScreenPos(), b(a.x + W, a.y + 40.0f);
+			if (ImGui::InvisibleButton("details", ImVec2(W, 40.0f))) uiDetailsOpen = !uiDetailsOpen;
+			const bool hov = ImGui::IsItemHovered();
+			dl->AddRectFilled(a, b, U32(hov ? kPanel : kPanel2), 10.0f);
+			dl->AddRect(a, b, U32(kLineSoft), 10.0f);
 			{
-				float v = static_cast<float>(th);
-				onGame([this, v]() { cvarManager->getCvar("rlcoach_target_hitbox").setValue(v); });
+				FontScope f(fLabel);
+				const char* t = "WHAT WENT WELL  \xC2\xB7  WHERE IT WENT WRONG";
+				const ImVec2 ts = ImGui::CalcTextSize(t);
+				dl->AddText(ImVec2(a.x + 16, a.y + (40.0f - ts.y) * 0.5f), U32(kSub), t);
 			}
-			ImGui::PopItemWidth();
+			{
+				const ImVec2 c(b.x - 22.0f, a.y + 20.0f);
+				const ImU32 col = U32(kSub);
+				if (uiDetailsOpen) { dl->AddLine(ImVec2(c.x - 5, c.y + 3), ImVec2(c.x, c.y - 2), col, 2.0f); dl->AddLine(ImVec2(c.x, c.y - 2), ImVec2(c.x + 5, c.y + 3), col, 2.0f); }
+				else { dl->AddLine(ImVec2(c.x - 5, c.y - 2), ImVec2(c.x, c.y + 3), col, 2.0f); dl->AddLine(ImVec2(c.x, c.y + 3), ImVec2(c.x + 5, c.y - 2), col, 2.0f); }
+			}
 		}
-		if (ImGui::TreeNode("What the lines mean"))
+		if (uiDetailsOpen)
 		{
-			ImGui::TextColored(ImVec4(1.0f, 0.63f, 0.16f, 1.0f), "Orange");  ImGui::SameLine(); ImGui::TextDisabled("ball path");
-			ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "Blue");    ImGui::SameLine(); ImGui::TextDisabled("car path (bright = already played)");
-			ImGui::TextColored(kGold, "Yellow ring");                        ImGui::SameLine(); ImGui::TextDisabled("where you needed to hit the ball; yellow line = where it needed to go");
-			ImGui::TextColored(kGood, "Green ring");                         ImGui::SameLine(); ImGui::TextDisabled("where you hit it; green line = where it went");
-			ImGui::TextColored(kGold, "Yellow ghost ball");                  ImGui::SameLine(); ImGui::TextDisabled("earliest a fast, direct aerial could have met it");
-			ImGui::TextColored(kGold, "Yellow box");                         ImGui::SameLine(); ImGui::TextDisabled("your hitbox placed and aimed to make that ideal hit");
-			ImGui::TextColored(kGood, "Green box");                          ImGui::SameLine(); ImGui::TextDisabled("your real hitbox at contact");
-			ImGui::TextColored(ImVec4(1.0f, 0.43f, 0.78f, 1.0f), "Pink");    ImGui::SameLine(); ImGui::TextDisabled("the what-if's car path (lighter: its ball path); grey = your real path while it plays");
-			ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "White dashes");       ImGui::SameLine(); ImGui::TextDisabled("predicted ball path");
-			ImGui::TreePop();
+			ImGui::Spacing();
+			// v2 coaching: the root cause first, then one more; hover for the numbers behind it
+			for (const CoachNote& n : notes)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, n.rootCause ? Hex(0xFDBA74) : kSub);
+				ImGui::TextWrapped("%s %s", n.label.c_str(), n.cue.c_str());
+				ImGui::PopStyleColor();
+				if (ImGui::IsItemHovered() && !n.detail.empty()) ImGui::SetTooltip("%s", n.detail.c_str());
+			}
+			// Each graded part: practice it, its grade, the why. Click a line to jump there.
+			auto practiceButton = [&](int si) {
+				const bool root = si == rootSeg;
+				ImGui::PushID(si + 2000);
+				const bool clicked = root ? OutlineButton("Practice", ImVec2(84, 0), kRoot) : ImGui::Button("Practice", ImVec2(84, 0));
+				ImGui::PopID();
+				if (clicked) onGame([this, si]() { PracticeStart(si); });
+				if (root && ImGui::IsItemHovered() && !notes.empty()) ImGui::SetTooltip("The root cause is in this part: %s", notes[0].cue.c_str());
+			};
+			bool rootListed = false;
+			for (const UiGrade& ug : grades) if (ug.segIndex == rootSeg && !ug.name.empty()) rootListed = true;
+			if (rootSeg >= 0 && !rootListed)
+			{
+				practiceButton(rootSeg);
+				ImGui::SameLine();
+				ImGui::AlignTextToFramePadding();
+				ImGui::TextColored(Hex(0xFDBA74), "%s: root cause is here", Segmenter::Name(segs[rootSeg].kind));
+			}
+			for (const UiGrade& ug : grades)
+			{
+				if (ug.name.empty() || ug.segIndex < 0 || ug.segIndex >= static_cast<int>(segs.size())) continue;
+				const Segment& sg = segs[ug.segIndex];
+				const int si = ug.segIndex;
+				practiceButton(si);
+				ImGui::SameLine();
+				ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (ImGui::GetFrameHeight() - ImGui::GetTextLineHeight() - 4.0f) * 0.5f);
+				Pill(ug.name, SegGradeColor(ug.name), 84.0f);
+				ImGui::SameLine();
+				if (ug.biggest) { FontScope f(fLabel); ImGui::AlignTextToFramePadding(); ImGui::TextColored(kWarn, "FIX"); ImGui::SameLine(); }
+				std::string text = std::format("{}: {}", Segmenter::Name(sg.kind), ug.why);
+				ImGui::PushID(si + 1000);
+				if (ImGui::Selectable(text.c_str(), false))
+				{
+					const float target = static_cast<float>(sg.start);
+					onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
+				}
+				ImGui::PopID();
+			}
+			ImGui::Spacing();
+			if (OutlineButton(std::format("Practice from here ({:.2f}s)", head / 120.0f).c_str()))
+				onGame([this, head]() { PracticeStartAt(head); });
+			ImGui::SameLine();
+			ImGui::TextDisabled("scrub to pick the moment; the lead-in still applies");
+
+			if (cur)
+			{
+				// Your opinion of the recovery (same as keys 6-8 in the pack)
+				ImGui::AlignTextToFramePadding();
+				ImGui::TextDisabled("Your recovery rating:");
+				const int curRec = cur->recoveryRating;
+				const std::string recFile = watching;
+				for (int r = 1; r <= 3; r++)
+				{
+					ImGui::SameLine();
+					const bool on = curRec == r;
+					if (on)
+					{
+						unsigned char cr, cg, cb;
+						RecoveryRgb(r, cr, cg, cb);
+						ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(cr / 255.0f * 0.55f, cg / 255.0f * 0.55f, cb / 255.0f * 0.55f, 1.0f));
+					}
+					if (ImGui::SmallButton(RecoveryName(r))) SetRecoveryRating(recFile, r);
+					if (on) ImGui::PopStyleColor();
+				}
+				// Mark the whole shot as a double-tap drill: a goal without a double tap (or triple, quad...) counts as a 1
+				bool drill = shotBook.IsDoubleTapDrill(cur->shotKey);
+				ImGui::SameLine(0, 18);
+				if (ImGui::Checkbox("Double-tap drill", &drill) && writer)
+				{
+					shotBook.SetDoubleTapDrill(writer->Folder(), cur->shotKey, drill);
+					gradeBook.Invalidate(cur->shotKey);
+					StartGradeRefresh();
+					RepListItem again = *cur;
+					onGame([this, again]() { ViewerLoad(again); });   // redo this rep's breakdown now
+				}
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("For this shot, a goal that isn't a double tap counts as a 1.\nBackboard, ceiling and wall-top taps all count, and so do triple and quad taps.");
+			}
+			{
+				int th = *targetHitbox;
+				const char* thNames[3] = { "Off", "For your touch", "For the earliest intercept" };
+				ImGui::PushItemWidth(220);
+				if (ImGui::Combo("Target car outline", &th, thNames, 3))
+				{
+					const float v = static_cast<float>(th);
+					onGame([this, v]() { cvarManager->getCvar("rlcoach_target_hitbox").setValue(v); });
+				}
+				ImGui::PopItemWidth();
+			}
+			if (ImGui::TreeNode("What the lines mean"))
+			{
+				ImGui::TextColored(Hex(0xFFA028), "Orange");                     ImGui::SameLine(); ImGui::TextDisabled("ball path");
+				ImGui::TextColored(Hex(0x5ABEFF), "Blue");                       ImGui::SameLine(); ImGui::TextDisabled("car path (bright = already played)");
+				ImGui::TextColored(kGold, "Yellow ring");                        ImGui::SameLine(); ImGui::TextDisabled("where you needed to hit the ball; yellow line = where it needed to go");
+				ImGui::TextColored(kGood, "Green ring");                         ImGui::SameLine(); ImGui::TextDisabled("where you hit it; green line = where it went");
+				ImGui::TextColored(kGold, "Yellow ghost ball");                  ImGui::SameLine(); ImGui::TextDisabled("earliest a fast, direct aerial could have met it");
+				ImGui::TextColored(kGold, "Yellow box");                         ImGui::SameLine(); ImGui::TextDisabled("your hitbox placed and aimed to make that ideal hit");
+				ImGui::TextColored(kGood, "Green box");                          ImGui::SameLine(); ImGui::TextDisabled("your real hitbox at contact");
+				ImGui::TextColored(kAccent, "Cyan");                             ImGui::SameLine(); ImGui::TextDisabled("the line from the tab you last opened (lighter: its ball); grey = your real path while a line plays");
+				ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "White dashes");       ImGui::SameLine(); ImGui::TextDisabled("predicted ball path");
+				ImGui::TreePop();
+			}
 		}
 	}
 	else
@@ -1341,7 +1790,7 @@ void RLCoach::RenderWindow()
 		int range = *viewerRange;
 		const char* ranges[4] = { "Today", "Last 7 days", "Starred", "All" };
 		ImGui::SameLine();
-		ImGui::PushItemWidth(110);
+		ImGui::PushItemWidth(120);
 		if (ImGui::Combo("##range", &range, ranges, 4))
 		{
 			float v = static_cast<float>(range);
@@ -1383,32 +1832,22 @@ void RLCoach::RenderWindow()
 		ImGui::TextDisabled(range == 0 ? "No reps today yet. Switch to \"Last 7 days\" or \"All\" to see older ones."
 			: range == 2 ? "No starred reps. Star a rep to keep it forever and find it here." : "No reps to show.");
 
-	// A small 5-point star; filled when kept
-	auto drawStar = [](ImDrawList* dl, ImVec2 c, float r, bool filled, ImU32 col) {
-		ImVec2 pts[10];
-		for (int k = 0; k < 10; k++)
-		{
-			float a = -1.5708f + k * 0.62832f;
-			float rr = (k % 2 == 0) ? r : r * 0.45f;
-			pts[k] = ImVec2(c.x + rr * std::cos(a), c.y + rr * std::sin(a));
-		}
-		if (filled)
-			for (int k = 0; k < 10; k++) dl->AddTriangleFilled(c, pts[k], pts[(k + 1) % 10], col);
-		else
-			dl->AddPolyline(pts, 10, col, true, 1.2f);
-	};
-
-	ImGui::BeginChild("replist", ImVec2(0, uiViewerActive ? 220.0f : 380.0f), false);
+	ImGui::PushStyleColor(ImGuiCol_ChildBg, kPanel2);
+	ImGui::BeginChild("replist", ImVec2(0, uiViewerActive ? 220.0f : 380.0f), true);
+	ImGui::PopStyleColor();
 	ImGui::Columns(7, "repcols", false);
-	ImGui::SetColumnWidth(0, 34); ImGui::SetColumnWidth(1, 170); ImGui::SetColumnWidth(2, 70); ImGui::SetColumnWidth(3, 60);
-	ImGui::SetColumnWidth(4, 64); ImGui::SetColumnWidth(5, 70);
-	const char* heads[7] = { "", "When", "Ended", "Length", "Touches", "You", "Auto" };
-	for (const char* h : heads) { ImGui::TextDisabled("%s", h); ImGui::NextColumn(); }
+	ImGui::SetColumnWidth(0, 34); ImGui::SetColumnWidth(1, 170); ImGui::SetColumnWidth(2, 70); ImGui::SetColumnWidth(3, 64);
+	ImGui::SetColumnWidth(4, 68); ImGui::SetColumnWidth(5, 70);
+	const char* heads[7] = { "", "WHEN", "ENDED", "LENGTH", "TOUCHES", "YOU", "AUTO" };
+	{
+		FontScope f(fLabel);
+		for (const char* h : heads) { ImGui::TextColored(kMuted, "%s", h); ImGui::NextColumn(); }
+	}
 	ImGui::Separator();
 	std::string toggleKeep;
 	// Only draw the rows that are on screen. Drawing all of them (1,500+) overflows ImGui's vertex buffer,
 	// which shows up as smeared, garbled shapes. Every row is one fixed height so the clipper can skip the rest.
-	const float rowH = ImGui::GetTextLineHeightWithSpacing() + 2.0f;
+	const float rowH = ImGui::GetTextLineHeightWithSpacing() + 4.0f;
 	ImGuiListClipper clipper(static_cast<int>(shown.size()), rowH);
 	while (clipper.Step())
 	for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++)
@@ -1427,17 +1866,17 @@ void RLCoach::RenderWindow()
 			else if (!it.hasRecording) ImGui::Dummy(ImVec2(h + 4, h));
 			bool hover = it.hasRecording && ImGui::IsItemHovered();
 			ImGui::PopID();
-			ImU32 col = it.kept ? IM_COL32(255, 205, 64, 255) : (hover ? IM_COL32(220, 224, 232, 255) : IM_COL32(90, 96, 110, 255));
+			ImU32 col = it.kept ? IM_COL32(251, 191, 36, 255) : (hover ? U32(kText) : U32(kMuted, 0.6f));
 			if (it.hasRecording || it.kept)
-				drawStar(ImGui::GetWindowDrawList(), ImVec2(p.x + h * 0.5f + 2, p.y + h * 0.5f), h * 0.45f, it.kept, col);
+				DrawStar(ImGui::GetWindowDrawList(), ImVec2(p.x + h * 0.5f + 2, p.y + h * 0.5f), h * 0.42f, it.kept, col);
 			if (hover) ImGui::SetTooltip(it.kept ? "Kept forever. Click to un-keep." : "Keep this rep forever");
 		}
 		ImGui::NextColumn();
 
 		std::string when = it.savedAt.size() >= 19 ? it.savedAt.substr(5, 11) : it.savedAt;
-		std::string label = std::format("{}##row{}", when, i);
+		std::string rowLabel = std::format("{}##row{}", when, i);
 		if (!it.hasRecording) ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-		if (ImGui::Selectable(label.c_str(), selectedRep == i || isWatching, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
+		if (ImGui::Selectable(rowLabel.c_str(), selectedRep == i || isWatching, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
 		{
 			selectedRep = i;
 			if (ImGui::IsMouseDoubleClicked(0) && it.hasRecording)
@@ -1452,7 +1891,7 @@ void RLCoach::RenderWindow()
 		if (it.imported)
 		{
 			ImGui::SameLine();
-			Pill(it.importedFrom, ImVec4(0.75f, 0.6f, 1.0f, 1.0f));
+			Pill(it.importedFrom, Hex(0xC4B5FD));
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shared with you (imported from %s)", it.importedFrom.c_str());
 		}
 		ImGui::NextColumn();
@@ -1469,11 +1908,9 @@ void RLCoach::RenderWindow()
 		else
 		{
 			Pill(std::to_string(ag->second.overall), GradeColor(ag->second.overall), 26.0f);
-			if (ag->second.shotType == 1) { ImGui::SameLine(); ImGui::TextDisabled("ground"); }
-			if (ag->second.shotType == 2) { ImGui::SameLine(); ImGui::TextDisabled("dbl tap"); }
-			if (ag->second.shotType == 3) { ImGui::SameLine(); ImGui::TextDisabled("dribble"); }
-			if (ag->second.shotType == 4) { ImGui::SameLine(); ImGui::TextDisabled("air drib"); }
-			if (ag->second.shotType == 5) { ImGui::SameLine(); ImGui::TextDisabled("reset"); }
+			static const char* kinds[6] = { "", "ground", "dbl tap", "dribble", "air drib", "reset" };
+			const int st = ag->second.shotType;
+			if (st >= 1 && st <= 5) { ImGui::SameLine(); ImGui::TextDisabled("%s", kinds[st]); }
 		}
 		ImGui::NextColumn();
 		if (ImGui::GetCursorPosY() < rowTop + rowH) ImGui::SetCursorPosY(rowTop + rowH);   // keep every row the same height
@@ -1483,7 +1920,7 @@ void RLCoach::RenderWindow()
 	if (!toggleKeep.empty()) ToggleKeep(toggleKeep);
 
 	bool canWatchSelected = selectedRep >= 0 && selectedRep < static_cast<int>(repList.size()) && repList[selectedRep].hasRecording;
-	if (canWatchSelected && AccentButton("Watch selected"))
+	if (canWatchSelected && AccentButton("Watch selected", ImVec2(150, 34)))
 	{
 		RepListItem pick = repList[selectedRep];
 		onGame([this, pick]() { ViewerLoad(pick); });
@@ -1493,7 +1930,7 @@ void RLCoach::RenderWindow()
 	if (latest)
 	{
 		if (canWatchSelected) ImGui::SameLine();
-		if (ImGui::Button("Watch latest"))
+		if (OutlineButton("Watch latest", ImVec2(150, 34)))
 		{
 			RepListItem pick = *latest;
 			onGame([this, pick]() { ViewerLoad(pick); });
