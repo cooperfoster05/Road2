@@ -3,11 +3,13 @@
 
 inline void OverallRgb(int o, unsigned char& r, unsigned char& g, unsigned char& b)
 {
-	if (o >= 4) { r = 115; g = 230; b = 115; }
-	else if (o == 3) { r = 255; g = 204; b = 77; }
-	else if (o == 2) { r = 255; g = 160; b = 80; }
-	else if (o == 1) { r = 255; g = 115; b = 102; }
-	else { r = 160; g = 160; b = 160; }
+	// The rep viewer's grade colors (Oct 24): 5 cyan, 4 green, 3 amber, 2 orange, 1 red
+	if (o >= 5) { r = 34; g = 211; b = 238; }
+	else if (o == 4) { r = 74; g = 222; b = 128; }
+	else if (o == 3) { r = 251; g = 191; b = 36; }
+	else if (o == 2) { r = 251; g = 146; b = 60; }
+	else if (o == 1) { r = 248; g = 113; b = 113; }
+	else { r = 141; g = 160; b = 188; }
 }
 
 // Your opinion of the recovery after a rep (keys 6-8): kept separate from the 1-5 shot rating
@@ -24,10 +26,10 @@ inline const char* RecoveryName(int r)
 
 inline void RecoveryRgb(int r, unsigned char& red, unsigned char& g, unsigned char& b)
 {
-	if (r == 3) { red = 115; g = 230; b = 115; }
-	else if (r == 2) { red = 255; g = 204; b = 77; }
-	else if (r == 1) { red = 255; g = 115; b = 102; }
-	else { red = 160; g = 160; b = 160; }
+	if (r == 3) { red = 74; g = 222; b = 128; }
+	else if (r == 2) { red = 251; g = 191; b = 36; }
+	else if (r == 1) { red = 248; g = 113; b = 113; }
+	else { red = 141; g = 160; b = 188; }
 }
 
 inline const char* RatingName(int r)

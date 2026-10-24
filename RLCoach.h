@@ -165,7 +165,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	// Grade of the last saved rep, shown on the panel in the pack
 	// A panel line can mix colors (e.g. "Takeoff " gray + "Sloppy" yellow)
 	struct PanelChunk { std::string text; unsigned char r, g, b; };
-	struct PanelGradeLine { std::vector<PanelChunk> chunks; };
+	struct PanelGradeLine { std::vector<PanelChunk> chunks; int grade = 0; };   // grade 1-5: drawn as a small gauge before the line
 	std::vector<PanelGradeLine> lastRepGradeLines;
 	void GradeFinishedRep(const RepSummary& s);
 	bool  haveLastRep = false;

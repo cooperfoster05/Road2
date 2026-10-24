@@ -577,10 +577,11 @@ void RLCoach::GradeFinishedRep(const RepSummary& s)
 
 	unsigned char orr, og, ob;
 	OverallRgb(g.overall, orr, og, ob);
-	lastRepGradeLines.push_back({ { { std::format("GRADE {}: {}  ({}){}", g.overall, Grader::OverallName(g.overall), g.overallWhy,
+	// The grade itself shows as a small gauge in front of the line (RLCoachHud.cpp)
+	lastRepGradeLines.push_back({ { { Grader::OverallName(g.overall), orr, og, ob }, { std::format("  {}{}", g.overallWhy,
 		!shot.valid || shot.type == ShotType::Aerial ? "" : shot.type == ShotType::Ground ? "  [ground shot]"
 		: shot.type == ShotType::Dribble ? "  [dribble]" : shot.type == ShotType::AirDribble ? "  [air dribble]"
-		: shot.type == ShotType::FlipReset ? "  [flip reset]" : "  [double tap]"), orr, og, ob } } });
+		: shot.type == ShotType::FlipReset ? "  [flip reset]" : "  [double tap]"), 150, 160, 178 } }, g.overall });
 
 	// One line of segment grades, each grade in its own color (same colors as the rep viewer)
 	PanelGradeLine chips;

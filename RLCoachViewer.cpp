@@ -942,6 +942,7 @@ namespace
 void RLCoach::RenderWindow()
 {
 	using namespace UiStyle;
+	const float S = kScale;   // the whole window's size (the fonts are loaded at the same scale, UiFonts.h)
 	if (!repListLoaded || repListStale.exchange(false)) RefreshRepList();
 	FetchUiFonts();
 	FontScope bodyFont(uiFonts[UiFonts::Body]);
@@ -971,8 +972,8 @@ void RLCoach::RenderWindow()
 	}
 	{
 		std::string info = std::format("{} reps", repList.size());
-		float w = ImGui::CalcTextSize(info.c_str()).x + ImGui::CalcTextSize("Refresh").x + 40.0f;
-		ImGui::SameLine(std::max(200.0f, ImGui::GetWindowContentRegionMax().x - w));
+		float w = ImGui::CalcTextSize(info.c_str()).x + ImGui::CalcTextSize("Refresh").x + 40.0f * S;
+		ImGui::SameLine(std::max(200.0f * S, ImGui::GetWindowContentRegionMax().x - w));
 		ImGui::TextDisabled("%s", info.c_str());
 		ImGui::SameLine();
 		if (LinkButton("Refresh")) RefreshRepList();
@@ -989,7 +990,7 @@ void RLCoach::RenderWindow()
 	if (uiPracticeActive)
 	{
 		Heading("PRACTICE");
-		ImGui::PushItemWidth(260);
+		ImGui::PushItemWidth(260 * S);
 		int pct = static_cast<int>(std::lround(uiPracticeSpeed.load() * 100.0f));
 		if (ImGui::SliderInt("Game speed", &pct, 10, 100, "%d%%"))
 		{
@@ -1012,7 +1013,7 @@ void RLCoach::RenderWindow()
 			uiPracticeAutoRamp = ramp;
 			onGame([this, ramp]() { practiceAutoRamp = ramp; practiceStreak = 0; });
 		}
-		if (AccentButton("Retry", ImVec2(90, 0))) onGame([this]() { PracticeRetry(); });
+		if (AccentButton("Retry", ImVec2(90 * S, 0))) onGame([this]() { PracticeRetry(); });
 		ImGui::SameLine();
 		if (OutlineButton("Stop practicing")) onGame([this]() { PracticeExit(); });
 		ImGui::SameLine();
@@ -1103,49 +1104,50 @@ void RLCoach::RenderWindow()
 		// ---------- Header: the grade gauge, what it was and why ----------
 		{
 			const ImVec2 p0 = ImGui::GetCursorScreenPos();
-			const float D = 112.0f;
-			const ImVec2 c(p0.x + D * 0.5f + 2.0f, p0.y + D * 0.5f);
+			const float D = 112.0f * S;
+			const ImVec2 c(p0.x + D * 0.5f + 2.0f * S, p0.y + D * 0.5f);
 			const ImVec4 gc = GradeColor(overallGrade);
-			Gauge(dl, c, D * 0.5f - 12.0f, 9.0f, overallGrade, gc);
+			Gauge(dl, c, D * 0.5f - 12.0f * S, 9.0f * S, overallGrade, gc);
 			{
 				FontScope f(fBig);
 				std::string n = overallGrade > 0 ? std::to_string(overallGrade) : "-";
 				ImVec2 ts = ImGui::CalcTextSize(n.c_str());
-				dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f - 5.0f), U32(kText), n.c_str());
+				dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f - 5.0f * S), U32(kText), n.c_str());
 			}
 			{
 				FontScope f(fLabel);
 				ImVec2 ts = ImGui::CalcTextSize("OF 5");
-				dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y + 18.0f), U32(kMuted), "OF 5");
+				dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y + 18.0f * S), U32(kMuted), "OF 5");
 			}
 
 			// Keep and close, top right
-			const float bs = 30.0f;
-			ImVec2 xPos(p0.x + W - bs, p0.y), starPos(p0.x + W - 2 * bs - 6.0f, p0.y);
+			const float bs = 30.0f * S;
+			ImVec2 xPos(p0.x + W - bs, p0.y), starPos(p0.x + W - 2 * bs - 6.0f * S, p0.y);
 			ImGui::SetCursorScreenPos(starPos);
 			const bool kept = cur && cur->kept;
 			if (ImGui::InvisibleButton("keep", ImVec2(bs, bs)) && cur) ToggleKeep(watching);
 			bool hov = ImGui::IsItemHovered();
-			dl->AddRect(starPos, ImVec2(starPos.x + bs, starPos.y + bs), U32(hov ? kLine : kLineSoft), 8.0f);
-			DrawStar(dl, ImVec2(starPos.x + bs * 0.5f, starPos.y + bs * 0.5f + 1.0f), 8.0f, kept, kept ? U32(Hex(0xFBBF24)) : U32(hov ? kText : kMuted));
+			dl->AddRect(starPos, ImVec2(starPos.x + bs, starPos.y + bs), U32(hov ? kLine : kLineSoft), 8.0f * S);
+			DrawStar(dl, ImVec2(starPos.x + bs * 0.5f, starPos.y + bs * 0.5f + 1.0f), 8.0f * S, kept, kept ? U32(Hex(0xFBBF24)) : U32(hov ? kText : kMuted));
 			if (hov) ImGui::SetTooltip(kept ? "Kept forever. Click to un-keep." : "Keep this rep forever (never cleaned up)");
 			ImGui::SetCursorScreenPos(xPos);
 			if (ImGui::InvisibleButton("close", ImVec2(bs, bs))) onGame([this]() { ViewerExit(); });
 			hov = ImGui::IsItemHovered();
-			dl->AddRect(xPos, ImVec2(xPos.x + bs, xPos.y + bs), U32(hov ? kLine : kLineSoft), 8.0f);
+			dl->AddRect(xPos, ImVec2(xPos.x + bs, xPos.y + bs), U32(hov ? kLine : kLineSoft), 8.0f * S);
 			{
 				const ImVec2 m(xPos.x + bs * 0.5f, xPos.y + bs * 0.5f);
 				const ImU32 col = U32(hov ? kText : kMuted);
-				dl->AddLine(ImVec2(m.x - 5, m.y - 5), ImVec2(m.x + 5, m.y + 5), col, 2.0f);
-				dl->AddLine(ImVec2(m.x + 5, m.y - 5), ImVec2(m.x - 5, m.y + 5), col, 2.0f);
+				const float k = 5.0f * S;
+				dl->AddLine(ImVec2(m.x - k, m.y - k), ImVec2(m.x + k, m.y + k), col, 2.0f);
+				dl->AddLine(ImVec2(m.x + k, m.y - k), ImVec2(m.x - k, m.y + k), col, 2.0f);
 			}
 			if (hov) ImGui::SetTooltip("Stop watching");
 
 			// The words, right of the gauge
-			const float tx = p0.x + D + 20.0f;
-			ImGui::SetCursorScreenPos(ImVec2(tx, p0.y + 6.0f));
+			const float tx = p0.x + D + 20.0f * S;
+			ImGui::SetCursorScreenPos(ImVec2(tx, p0.y + 6.0f * S));
 			ImGui::BeginGroup();
-			ImGui::PushTextWrapPos(p0.x + W - 2 * bs - 16.0f - (ImGui::GetWindowPos().x) + ImGui::GetScrollX());
+			ImGui::PushTextWrapPos(p0.x + W - 2 * bs - 16.0f * S - (ImGui::GetWindowPos().x) + ImGui::GetScrollX());
 			{
 				FontScope f(fLabel);
 				ImGui::TextColored(kAccent, "%s", mechanic.c_str());
@@ -1167,17 +1169,17 @@ void RLCoach::RenderWindow()
 			ImGui::PopTextWrapPos();
 			ImGui::EndGroup();
 			const float bottom = std::max(p0.y + D, ImGui::GetItemRectMax().y);
-			ImGui::SetCursorScreenPos(ImVec2(p0.x, bottom + 14.0f));
+			ImGui::SetCursorScreenPos(ImVec2(p0.x, bottom + 14.0f * S));
 		}
 
 		// ---------- The timeline card: markers, segments colored by grade, the playhead, transport ----------
 		if (!segs.empty() && segTotal > 1)
 		{
 			const ImVec2 p0 = ImGui::GetCursorScreenPos();
-			const float pad = 14.0f, markerH = 24.0f, barH = 30.0f, transportH = 32.0f;
-			const float cardH = pad + markerH + barH + 10.0f + transportH + pad;
-			dl->AddRectFilled(p0, ImVec2(p0.x + W, p0.y + cardH), U32(kPanel2), 12.0f);
-			dl->AddRect(p0, ImVec2(p0.x + W, p0.y + cardH), U32(kLineSoft), 12.0f);
+			const float pad = 14.0f * S, markerH = 24.0f * S, barH = 30.0f * S, transportH = 32.0f * S;
+			const float cardH = pad + markerH + barH + 10.0f * S + transportH + pad;
+			dl->AddRectFilled(p0, ImVec2(p0.x + W, p0.y + cardH), U32(kPanel2), 12.0f * S);
+			dl->AddRect(p0, ImVec2(p0.x + W, p0.y + cardH), U32(kLineSoft), 12.0f * S);
 			const float x0 = p0.x + pad, x1 = p0.x + W - pad, barY = p0.y + pad + markerH;
 			auto xOf = [&](int tick) { return x0 + (x1 - x0) * static_cast<float>(std::clamp(tick, 0, segTotal - 1)) / static_cast<float>(segTotal - 1); };
 
@@ -1198,16 +1200,16 @@ void RLCoach::RenderWindow()
 				if (marks.size() == 2)
 				{
 					const float wa = ImGui::CalcTextSize(marks[0].text).x, wb = ImGui::CalcTextSize(marks[1].text).x;
-					clash = xOf(marks[1].tick) - xOf(marks[0].tick) < (wa + wb) * 0.5f + 10.0f;
+					clash = xOf(marks[1].tick) - xOf(marks[0].tick) < (wa + wb) * 0.5f + 10.0f * S;
 				}
 				for (size_t i = 0; i < marks.size(); i++)
 				{
 					const float x = xOf(marks[i].tick);
-					Diamond(dl, ImVec2(x, barY - 7.0f), 4.5f, marks[i].color);
+					Diamond(dl, ImVec2(x, barY - 7.0f * S), 4.5f * S, marks[i].color);
 					const ImVec2 ts = ImGui::CalcTextSize(marks[i].text);
-					float lx = clash ? (i == 0 ? x - ts.x - 2.0f : x + 2.0f) : x - ts.x * 0.5f;
+					float lx = clash ? (i == 0 ? x - ts.x - 2.0f * S : x + 2.0f * S) : x - ts.x * 0.5f;
 					lx = std::clamp(lx, x0, x1 - ts.x);
-					dl->AddText(ImVec2(lx, barY - 13.0f - ts.y), U32(marks[i].color), marks[i].text);
+					dl->AddText(ImVec2(lx, barY - 13.0f * S - ts.y), U32(marks[i].color), marks[i].text);
 				}
 			}
 
@@ -1222,23 +1224,23 @@ void RLCoach::RenderWindow()
 				float sx0 = xOf(sg.start) + 1.5f, sx1 = std::max(xOf(sg.end + 1) - 1.5f, sx0 + 3.0f);
 				if (sg.kind == SegKind::Recovery)
 				{
-					dl->AddRectFilled(ImVec2(sx0, barY + barH + 3.0f), ImVec2(sx1, barY + barH + 6.0f), U32(Hex(0xA78BFA), 0.55f), 2.0f);
+					dl->AddRectFilled(ImVec2(sx0, barY + barH + 3.0f * S), ImVec2(sx1, barY + barH + 6.0f * S), U32(Hex(0xA78BFA), 0.55f), 2.0f);
 					continue;
 				}
 				const ImVec4 col = gradeName.empty() ? kMuted : SegGradeColor(gradeName);
 				const bool hovered = mouse.x >= sx0 && mouse.x < sx1 && mouse.y >= barY && mouse.y < barY + barH;
 				if (hovered) hoverSeg = si;
-				dl->AddRectFilled(ImVec2(sx0, barY), ImVec2(sx1, barY + barH), U32(col, gradeName.empty() ? 0.10f : (hovered ? 0.34f : 0.22f)), 5.0f);
+				dl->AddRectFilled(ImVec2(sx0, barY), ImVec2(sx1, barY + barH), U32(col, gradeName.empty() ? 0.10f : (hovered ? 0.34f : 0.22f)), 5.0f * S);
 				dl->AddRectFilled(ImVec2(sx0, barY), ImVec2(sx1, barY + 2.0f), U32(col, gradeName.empty() ? 0.35f : 1.0f), 2.0f);
 				FontScope f(fLabel);
 				std::string name = Segmenter::Name(sg.kind);
 				ImVec2 ts = ImGui::CalcTextSize(name.c_str());
-				if (sx1 - sx0 > ts.x + 12.0f)
-					dl->AddText(ImVec2(sx0 + 7.0f, barY + (barH - ts.y) * 0.5f + 1.0f), U32(gradeName.empty() ? kMuted : kText, 0.92f), name.c_str());
+				if (sx1 - sx0 > ts.x + 12.0f * S)
+					dl->AddText(ImVec2(sx0 + 7.0f * S, barY + (barH - ts.y) * 0.5f + 1.0f), U32(gradeName.empty() ? kMuted : kText, 0.92f), name.c_str());
 			}
 			// The bar scrubs: click or drag to move through the rep
 			ImGui::SetCursorScreenPos(ImVec2(x0, barY));
-			ImGui::InvisibleButton("scrubbar", ImVec2(x1 - x0, barH + 6.0f));
+			ImGui::InvisibleButton("scrubbar", ImVec2(x1 - x0, barH + 6.0f * S));
 			{
 				static int lastSent = -1;
 				if (ImGui::IsItemActive())
@@ -1264,27 +1266,27 @@ void RLCoach::RenderWindow()
 			// Playhead
 			{
 				const float px = xOf(std::min(head, segTotal - 1));
-				dl->AddLine(ImVec2(px, barY - 4.0f), ImVec2(px, barY + barH + 4.0f), U32(kText, 0.25f), 6.0f);
-				dl->AddLine(ImVec2(px, barY - 4.0f), ImVec2(px, barY + barH + 4.0f), U32(kText), 2.0f);
+				dl->AddLine(ImVec2(px, barY - 4.0f * S), ImVec2(px, barY + barH + 4.0f * S), U32(kText, 0.25f), 6.0f * S);
+				dl->AddLine(ImVec2(px, barY - 4.0f * S), ImVec2(px, barY + barH + 4.0f * S), U32(kText), 2.0f);
 			}
 
 			// Transport: back to start, play, step, time, speed, loop
-			ImGui::SetCursorScreenPos(ImVec2(x0, barY + barH + 12.0f));
-			const ImVec2 sq(32, 28);
+			ImGui::SetCursorScreenPos(ImVec2(x0, barY + barH + 12.0f * S));
+			const ImVec2 sq(32 * S, 28 * S);
 			if (ImGui::Button("|<", sq)) onGame([this]() { ViewerSeek(0.0f); });
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back to the start");
-			ImGui::SameLine(0, 6);
+			ImGui::SameLine(0, 6 * S);
 			const bool playing = uiViewerPlaying;
-			if (AccentButton(playing ? "||" : ">", ImVec2(44, 28)))
+			if (AccentButton(playing ? "||" : ">", ImVec2(44 * S, 28 * S)))
 				onGame([this]() { viewerPlaying = !viewerPlaying; uiViewerPlaying = viewerPlaying; });
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip(playing ? "Pause" : "Play");
-			ImGui::SameLine(0, 6);
+			ImGui::SameLine(0, 6 * S);
 			if (ImGui::Button("<", sq)) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) - 1.0f); });
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back 1 tick");
-			ImGui::SameLine(0, 6);
+			ImGui::SameLine(0, 6 * S);
 			if (ImGui::Button(">##step", sq)) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) + 1.0f); });
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forward 1 tick");
-			ImGui::SameLine(0, 12);
+			ImGui::SameLine(0, 12 * S);
 			{
 				FontScope f(fMono);
 				ImGui::AlignTextToFramePadding();
@@ -1298,7 +1300,7 @@ void RLCoach::RenderWindow()
 				const ImGuiStyle& st = ImGui::GetStyle();
 				for (const char* n : names) segW += ImGui::CalcTextSize(n).x + st.FramePadding.x * 2.0f + 2.0f;
 				const float loopW = ImGui::GetFrameHeight() + st.ItemInnerSpacing.x + ImGui::CalcTextSize("Loop").x + 10.0f;
-				ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 8.0f, (x1 - ImGui::GetWindowPos().x) - segW - loopW));
+				ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 8.0f * S, (x1 - ImGui::GetWindowPos().x) - segW - loopW));
 				ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2, 6));
 				for (int i = 0; i < 4; i++)
 				{
@@ -1306,7 +1308,7 @@ void RLCoach::RenderWindow()
 					const bool on = std::fabs(uiViewerSpeed.load() - speeds[i]) < 0.001f;
 					ImGui::PushStyleColor(ImGuiCol_Button, on ? Hex(0x1F3350) : ImVec4(0, 0, 0, 0));
 					ImGui::PushStyleColor(ImGuiCol_Text, on ? kText : kMuted);
-					if (ImGui::Button(names[i], ImVec2(0, 28)))
+					if (ImGui::Button(names[i], ImVec2(0, 28 * S)))
 					{
 						const float sp = speeds[i];
 						uiViewerSpeed = sp;
@@ -1315,7 +1317,7 @@ void RLCoach::RenderWindow()
 					ImGui::PopStyleColor(2);
 				}
 				ImGui::PopStyleVar();
-				ImGui::SameLine(0, 10);
+				ImGui::SameLine(0, 10 * S);
 				ImGui::AlignTextToFramePadding();
 				if (ImGui::Checkbox("Loop", &uiLoop))
 				{
@@ -1323,7 +1325,7 @@ void RLCoach::RenderWindow()
 					onGame([this, loop]() { viewerLoop = loop; });
 				}
 			}
-			ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + cardH + 16.0f));
+			ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + cardH + 16.0f * S));
 		}
 
 		// ---------- Tabs: Your shot | Smallest fix | Best line ----------
@@ -1361,7 +1363,7 @@ void RLCoach::RenderWindow()
 		};
 		{
 			const char* names[3] = { "YOUR SHOT", "SMALLEST FIX", "BEST LINE" };
-			const float gap = 8.0f, tabW = (W - 2 * gap) / 3.0f, tabH = 60.0f;
+			const float gap = 8.0f * S, tabW = (W - 2 * gap) / 3.0f, tabH = 60.0f * S;
 			const ImVec2 p0 = ImGui::GetCursorScreenPos();
 			for (int t = 0; t < 3; t++)
 			{
@@ -1372,34 +1374,34 @@ void RLCoach::RenderWindow()
 				const bool hov = ImGui::IsItemHovered();
 				ImGui::PopID();
 				const bool on = uiTab == t;
-				dl->AddRectFilled(a, b, U32(on ? kPanel : (hov ? kPanel2 : kBg)), 12.0f, ImDrawCornerFlags_Top);
-				dl->AddRect(a, ImVec2(b.x, b.y + (on ? 1.0f : 0.0f)), U32(on ? kLine : kLineSoft), 12.0f, ImDrawCornerFlags_Top);
+				dl->AddRectFilled(a, b, U32(on ? kPanel : (hov ? kPanel2 : kBg)), 12.0f * S, ImDrawCornerFlags_Top);
+				dl->AddRect(a, ImVec2(b.x, b.y + (on ? 1.0f : 0.0f)), U32(on ? kLine : kLineSoft), 12.0f * S, ImDrawCornerFlags_Top);
 				if (on) dl->AddRectFilled(ImVec2(a.x + 1, b.y - 1), ImVec2(b.x - 1, b.y + 2), U32(kPanel));   // open into the panel below
 				std::string gText, sub;
 				ImVec4 gCol;
 				tabStatus(t, gText, gCol, sub);
 				{
 					FontScope f(fLabel);
-					dl->AddText(ImVec2(a.x + 14, a.y + 10), U32(on ? kAccent : kMuted), names[t]);
+					dl->AddText(ImVec2(a.x + 14 * S, a.y + 10 * S), U32(on ? kAccent : kMuted), names[t]);
 				}
-				float gx = a.x + 14;
+				float gx = a.x + 14 * S;
 				{
 					FontScope f(fMono);
 					const ImVec2 ts = ImGui::CalcTextSize(gText.c_str());
-					dl->AddText(ImVec2(gx, a.y + 26), U32(gCol), gText.c_str());
-					gx += ts.x + 8.0f;
+					dl->AddText(ImVec2(gx, a.y + 26 * S), U32(gCol), gText.c_str());
+					gx += ts.x + 8.0f * S;
 				}
 				const int slot = t - 1;
 				if (t > 0 && busySlot == slot)
 				{
-					Spinner(dl, ImVec2(gx + 6.0f, a.y + 38.0f), 6.0f, 2.0f, kAccent);
+					Spinner(dl, ImVec2(gx + 6.0f * S, a.y + 38.0f * S), 6.0f * S, 2.0f, kAccent);
 					const ImVec2 ts = ImGui::CalcTextSize(sub.c_str());
-					dl->AddText(ImVec2(gx + 20.0f, a.y + 38.0f - ts.y * 0.5f), U32(kMuted), sub.c_str());
+					dl->AddText(ImVec2(gx + 20.0f * S, a.y + 38.0f * S - ts.y * 0.5f), U32(kMuted), sub.c_str());
 				}
 				else if (!sub.empty())
 				{
 					const ImVec2 ts = ImGui::CalcTextSize(sub.c_str());
-					dl->AddText(ImVec2(gx, a.y + 38.0f - ts.y * 0.5f), U32(kMuted), sub.c_str());
+					dl->AddText(ImVec2(gx, a.y + 38.0f * S - ts.y * 0.5f), U32(kMuted), sub.c_str());
 				}
 			}
 			ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + tabH));
@@ -1408,7 +1410,7 @@ void RLCoach::RenderWindow()
 		// ---------- The open tab's panel ----------
 		{
 			const ImVec2 p0 = ImGui::GetCursorScreenPos();
-			const float pad = 18.0f;
+			const float pad = 18.0f * S;
 			dl->ChannelsSplit(2);
 			dl->ChannelsSetCurrent(1);
 			ImGui::SetCursorScreenPos(ImVec2(p0.x + pad, p0.y + pad));
@@ -1419,16 +1421,16 @@ void RLCoach::RenderWindow()
 			// Pieces the panels share
 			auto tiles = [&](const std::vector<ReviewStat>& ts) {
 				if (ts.empty()) return;
-				const float g = 10.0f, tw = (innerW - g * (ts.size() - 1)) / static_cast<float>(ts.size()), th = 72.0f;
+				const float g = 10.0f * S, tw = (innerW - g * (ts.size() - 1)) / static_cast<float>(ts.size()), th = 72.0f * S;
 				const ImVec2 q = ImGui::GetCursorScreenPos();
 				for (size_t i = 0; i < ts.size(); i++)
 				{
 					const ImVec2 a(q.x + i * (tw + g), q.y), b(a.x + tw, a.y + th);
-					dl->AddRectFilled(a, b, U32(kPanel2), 10.0f);
-					dl->AddRect(a, b, U32(kLineSoft), 10.0f);
-					{ FontScope f(fLabel); dl->AddText(ImVec2(a.x + 12, a.y + 10), U32(kMuted), Upper(ts[i].label).c_str()); }
-					{ FontScope f(fMono); dl->AddText(ImVec2(a.x + 12, a.y + 25), U32(kText), ts[i].value.c_str()); }
-					dl->AddText(ImVec2(a.x + 12, a.y + 49), U32(kMuted), ts[i].sub.c_str());
+					dl->AddRectFilled(a, b, U32(kPanel2), 10.0f * S);
+					dl->AddRect(a, b, U32(kLineSoft), 10.0f * S);
+					{ FontScope f(fLabel); dl->AddText(ImVec2(a.x + 12 * S, a.y + 10 * S), U32(kMuted), Upper(ts[i].label).c_str()); }
+					{ FontScope f(fMono); dl->AddText(ImVec2(a.x + 12 * S, a.y + 25 * S), U32(kText), ts[i].value.c_str()); }
+					dl->AddText(ImVec2(a.x + 12 * S, a.y + 49 * S), U32(kMuted), ts[i].sub.c_str());
 				}
 				ImGui::Dummy(ImVec2(innerW, th));
 			};
@@ -1442,35 +1444,35 @@ void RLCoach::RenderWindow()
 				ImGui::TextWrapped("%s", text.c_str());
 				ImGui::PopStyleColor();
 			};
-			const ImVec2 btn((innerW - 10.0f) * 0.5f, 40.0f);
+			const ImVec2 btn((innerW - 10.0f * S) * 0.5f, 40.0f * S);
 			// An empty state: an icon, a title and a line of text
 			auto emptyState = [&](int icon, const std::string& title, const std::string& text) {
 				const ImVec2 q = ImGui::GetCursorScreenPos();
-				const float s = 46.0f;
+				const float s = 46.0f * S;
 				const ImVec2 c(q.x + s * 0.5f, q.y + s * 0.5f);
-				if (icon == 0) Spinner(dl, c, 17.0f, 4.0f, kAccent);
+				if (icon == 0) Spinner(dl, c, 17.0f * S, 4.0f * S, kAccent);
 				else
 				{
 					const ImVec4 col = icon == 2 ? Hex(0x22D3EE) : kMuted;
-					dl->AddRectFilled(q, ImVec2(q.x + s, q.y + s), U32(icon == 2 ? Hex(0x0D2A33) : kPanel2), 12.0f);
-					dl->AddRect(q, ImVec2(q.x + s, q.y + s), U32(icon == 2 ? col : kLine), 12.0f);
+					dl->AddRectFilled(q, ImVec2(q.x + s, q.y + s), U32(icon == 2 ? Hex(0x0D2A33) : kPanel2), 12.0f * S);
+					dl->AddRect(q, ImVec2(q.x + s, q.y + s), U32(icon == 2 ? col : kLine), 12.0f * S);
 					if (icon == 1)
 					{
-						dl->AddCircle(ImVec2(c.x - 2, c.y - 2), 7.0f, U32(col), 20, 2.0f);
-						dl->AddLine(ImVec2(c.x + 3, c.y + 3), ImVec2(c.x + 8, c.y + 8), U32(col), 2.2f);
+						dl->AddCircle(ImVec2(c.x - 2 * S, c.y - 2 * S), 7.0f * S, U32(col), 20, 2.0f);
+						dl->AddLine(ImVec2(c.x + 3 * S, c.y + 3 * S), ImVec2(c.x + 8 * S, c.y + 8 * S), U32(col), 2.2f);
 					}
 					else
 					{
-						dl->AddLine(ImVec2(c.x - 8, c.y + 1), ImVec2(c.x - 2, c.y + 7), U32(col), 2.6f);
-						dl->AddLine(ImVec2(c.x - 2, c.y + 7), ImVec2(c.x + 9, c.y - 6), U32(col), 2.6f);
+						dl->AddLine(ImVec2(c.x - 8 * S, c.y + 1 * S), ImVec2(c.x - 2 * S, c.y + 7 * S), U32(col), 2.4f);
+						dl->AddLine(ImVec2(c.x - 2 * S, c.y + 7 * S), ImVec2(c.x + 9 * S, c.y - 6 * S), U32(col), 2.4f);
 					}
 				}
-				ImGui::SetCursorScreenPos(ImVec2(q.x + s + 16.0f, q.y + 2.0f));
+				ImGui::SetCursorScreenPos(ImVec2(q.x + s + 16.0f * S, q.y + 2.0f * S));
 				ImGui::BeginGroup();
 				{ FontScope f(fBold); ImGui::TextWrapped("%s", title.c_str()); }
 				subline(text);
 				ImGui::EndGroup();
-				ImGui::SetCursorScreenPos(ImVec2(q.x, std::max(q.y + s, ImGui::GetItemRectMax().y) + 8.0f));
+				ImGui::SetCursorScreenPos(ImVec2(q.x, std::max(q.y + s, ImGui::GetItemRectMax().y) + 8.0f * S));
 			};
 			auto segName = [&](int tick) -> std::string {
 				const int si = segAt(tick);
@@ -1496,7 +1498,7 @@ void RLCoach::RenderWindow()
 				tiles(stats);
 				ImGui::Dummy(ImVec2(0, 4));
 				if (AccentButton("Watch your rep", btn)) onGame([this]() { ViewerShowLine(-1, false); });
-				ImGui::SameLine(0, 10);
+				ImGui::SameLine(0, 10 * S);
 				const int practiceSeg = rootSeg >= 0 ? rootSeg : fixSeg;
 				if (practiceSeg >= 0 && practiceSeg < static_cast<int>(segs.size()))
 				{
@@ -1558,7 +1560,7 @@ void RLCoach::RenderWindow()
 					if (AccentButton("Watch it", btn)) onGame([this, slot]() { ViewerShowLine(slot, false); });
 					if (ImGui::IsItemHovered())
 						ImGui::SetTooltip("Plays it with your car from just before it changes. Your real path shows in grey while it plays.");
-					ImGui::SameLine(0, 10);
+					ImGui::SameLine(0, 10 * S);
 					if (OutlineButton("Practice it", btn)) onGame([this, slot]() { PracticeLine(slot); });
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Practice from where it takes over, with its path drawn faintly to follow.");
 				}
@@ -1614,39 +1616,40 @@ void RLCoach::RenderWindow()
 
 			ImGui::PopTextWrapPos();
 			ImGui::EndGroup();
-			const float bottom = std::max(ImGui::GetItemRectMax().y, p0.y + 200.0f) + pad;
+			const float bottom = std::max(ImGui::GetItemRectMax().y, p0.y + 200.0f * S) + pad;
 			dl->ChannelsSetCurrent(0);
-			dl->AddRectFilled(p0, ImVec2(p0.x + W, bottom), U32(kPanel), 12.0f, ImDrawCornerFlags_Bot);
-			dl->AddRect(p0, ImVec2(p0.x + W, bottom), U32(kLine), 12.0f, ImDrawCornerFlags_Bot);
+			dl->AddRectFilled(p0, ImVec2(p0.x + W, bottom), U32(kPanel), 12.0f * S, ImDrawCornerFlags_Bot);
+			dl->AddRect(p0, ImVec2(p0.x + W, bottom), U32(kLine), 12.0f * S, ImDrawCornerFlags_Bot);
 			{
 				// the open tab's top edge carries the accent
-				const float tabW = (W - 16.0f) / 3.0f, ax = p0.x + uiTab * (tabW + 8.0f);
+				const float tabW = (W - 16.0f * S) / 3.0f, ax = p0.x + uiTab * (tabW + 8.0f * S);
 				dl->AddLine(ImVec2(p0.x + 1, p0.y), ImVec2(p0.x + W - 1, p0.y), U32(kLine));
 				dl->AddRectFilled(ImVec2(ax + 1, p0.y - 1), ImVec2(ax + tabW - 1, p0.y + 1), U32(kPanel));
-				dl->AddLine(ImVec2(ax + 12, p0.y - 60.0f + 1), ImVec2(ax + tabW - 12, p0.y - 60.0f + 1), U32(kAccent), 2.0f);
+				dl->AddLine(ImVec2(ax + 12 * S, p0.y - 60.0f * S + 1), ImVec2(ax + tabW - 12 * S, p0.y - 60.0f * S + 1), U32(kAccent), 2.0f);
 			}
 			dl->ChannelsMerge();
-			ImGui::SetCursorScreenPos(ImVec2(p0.x, bottom + 14.0f));
+			ImGui::SetCursorScreenPos(ImVec2(p0.x, bottom + 14.0f * S));
 		}
 
 		// ---------- What went well / where it went wrong (the full breakdown, folded away) ----------
 		{
-			const ImVec2 a = ImGui::GetCursorScreenPos(), b(a.x + W, a.y + 40.0f);
-			if (ImGui::InvisibleButton("details", ImVec2(W, 40.0f))) uiDetailsOpen = !uiDetailsOpen;
+			const ImVec2 a = ImGui::GetCursorScreenPos(), b(a.x + W, a.y + 40.0f * S);
+			if (ImGui::InvisibleButton("details", ImVec2(W, 40.0f * S))) uiDetailsOpen = !uiDetailsOpen;
 			const bool hov = ImGui::IsItemHovered();
-			dl->AddRectFilled(a, b, U32(hov ? kPanel : kPanel2), 10.0f);
-			dl->AddRect(a, b, U32(kLineSoft), 10.0f);
+			dl->AddRectFilled(a, b, U32(hov ? kPanel : kPanel2), 10.0f * S);
+			dl->AddRect(a, b, U32(kLineSoft), 10.0f * S);
 			{
 				FontScope f(fLabel);
 				const char* t = "WHAT WENT WELL  \xC2\xB7  WHERE IT WENT WRONG";
 				const ImVec2 ts = ImGui::CalcTextSize(t);
-				dl->AddText(ImVec2(a.x + 16, a.y + (40.0f - ts.y) * 0.5f), U32(kSub), t);
+				dl->AddText(ImVec2(a.x + 16 * S, a.y + (40.0f * S - ts.y) * 0.5f), U32(kSub), t);
 			}
 			{
-				const ImVec2 c(b.x - 22.0f, a.y + 20.0f);
+				const ImVec2 c(b.x - 22.0f * S, a.y + 20.0f * S);
 				const ImU32 col = U32(kSub);
-				if (uiDetailsOpen) { dl->AddLine(ImVec2(c.x - 5, c.y + 3), ImVec2(c.x, c.y - 2), col, 2.0f); dl->AddLine(ImVec2(c.x, c.y - 2), ImVec2(c.x + 5, c.y + 3), col, 2.0f); }
-				else { dl->AddLine(ImVec2(c.x - 5, c.y - 2), ImVec2(c.x, c.y + 3), col, 2.0f); dl->AddLine(ImVec2(c.x, c.y + 3), ImVec2(c.x + 5, c.y - 2), col, 2.0f); }
+				const float k = 5.0f * S, u = 2.5f * S;
+				if (uiDetailsOpen) { dl->AddLine(ImVec2(c.x - k, c.y + u), ImVec2(c.x, c.y - u), col, 2.0f); dl->AddLine(ImVec2(c.x, c.y - u), ImVec2(c.x + k, c.y + u), col, 2.0f); }
+				else { dl->AddLine(ImVec2(c.x - k, c.y - u), ImVec2(c.x, c.y + u), col, 2.0f); dl->AddLine(ImVec2(c.x, c.y + u), ImVec2(c.x + k, c.y - u), col, 2.0f); }
 			}
 		}
 		if (uiDetailsOpen)
@@ -1664,7 +1667,7 @@ void RLCoach::RenderWindow()
 			auto practiceButton = [&](int si) {
 				const bool root = si == rootSeg;
 				ImGui::PushID(si + 2000);
-				const bool clicked = root ? OutlineButton("Practice", ImVec2(84, 0), kRoot) : ImGui::Button("Practice", ImVec2(84, 0));
+				const bool clicked = root ? OutlineButton("Practice", ImVec2(84 * S, 0), kRoot) : ImGui::Button("Practice", ImVec2(84 * S, 0));
 				ImGui::PopID();
 				if (clicked) onGame([this, si]() { PracticeStart(si); });
 				if (root && ImGui::IsItemHovered() && !notes.empty()) ImGui::SetTooltip("The root cause is in this part: %s", notes[0].cue.c_str());
@@ -1685,8 +1688,8 @@ void RLCoach::RenderWindow()
 				const int si = ug.segIndex;
 				practiceButton(si);
 				ImGui::SameLine();
-				ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (ImGui::GetFrameHeight() - ImGui::GetTextLineHeight() - 4.0f) * 0.5f);
-				Pill(ug.name, SegGradeColor(ug.name), 84.0f);
+				ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (ImGui::GetFrameHeight() - ImGui::GetTextLineHeight() - 4.0f * S) * 0.5f);
+				Pill(ug.name, SegGradeColor(ug.name), 84.0f * S);
 				ImGui::SameLine();
 				if (ug.biggest) { FontScope f(fLabel); ImGui::AlignTextToFramePadding(); ImGui::TextColored(kWarn, "FIX"); ImGui::SameLine(); }
 				std::string text = std::format("{}: {}", Segmenter::Name(sg.kind), ug.why);
@@ -1726,7 +1729,7 @@ void RLCoach::RenderWindow()
 				}
 				// Mark the whole shot as a double-tap drill: a goal without a double tap (or triple, quad...) counts as a 1
 				bool drill = shotBook.IsDoubleTapDrill(cur->shotKey);
-				ImGui::SameLine(0, 18);
+				ImGui::SameLine(0, 18 * S);
 				if (ImGui::Checkbox("Double-tap drill", &drill) && writer)
 				{
 					shotBook.SetDoubleTapDrill(writer->Folder(), cur->shotKey, drill);
@@ -1741,7 +1744,7 @@ void RLCoach::RenderWindow()
 			{
 				int th = *targetHitbox;
 				const char* thNames[3] = { "Off", "For your touch", "For the earliest intercept" };
-				ImGui::PushItemWidth(220);
+				ImGui::PushItemWidth(220 * S);
 				if (ImGui::Combo("Target car outline", &th, thNames, 3))
 				{
 					const float v = static_cast<float>(th);
@@ -1790,7 +1793,7 @@ void RLCoach::RenderWindow()
 		int range = *viewerRange;
 		const char* ranges[4] = { "Today", "Last 7 days", "Starred", "All" };
 		ImGui::SameLine();
-		ImGui::PushItemWidth(120);
+		ImGui::PushItemWidth(120 * S);
 		if (ImGui::Combo("##range", &range, ranges, 4))
 		{
 			float v = static_cast<float>(range);
@@ -1833,11 +1836,11 @@ void RLCoach::RenderWindow()
 			: range == 2 ? "No starred reps. Star a rep to keep it forever and find it here." : "No reps to show.");
 
 	ImGui::PushStyleColor(ImGuiCol_ChildBg, kPanel2);
-	ImGui::BeginChild("replist", ImVec2(0, uiViewerActive ? 220.0f : 380.0f), true);
+	ImGui::BeginChild("replist", ImVec2(0, (uiViewerActive ? 220.0f : 380.0f) * S), true);
 	ImGui::PopStyleColor();
 	ImGui::Columns(7, "repcols", false);
-	ImGui::SetColumnWidth(0, 34); ImGui::SetColumnWidth(1, 170); ImGui::SetColumnWidth(2, 70); ImGui::SetColumnWidth(3, 64);
-	ImGui::SetColumnWidth(4, 68); ImGui::SetColumnWidth(5, 70);
+	ImGui::SetColumnWidth(0, 34 * S); ImGui::SetColumnWidth(1, 150 * S); ImGui::SetColumnWidth(2, 70 * S); ImGui::SetColumnWidth(3, 64 * S);
+	ImGui::SetColumnWidth(4, 68 * S); ImGui::SetColumnWidth(5, 70 * S);
 	const char* heads[7] = { "", "WHEN", "ENDED", "LENGTH", "TOUCHES", "YOU", "AUTO" };
 	{
 		FontScope f(fLabel);
@@ -1847,7 +1850,7 @@ void RLCoach::RenderWindow()
 	std::string toggleKeep;
 	// Only draw the rows that are on screen. Drawing all of them (1,500+) overflows ImGui's vertex buffer,
 	// which shows up as smeared, garbled shapes. Every row is one fixed height so the clipper can skip the rest.
-	const float rowH = ImGui::GetTextLineHeightWithSpacing() + 4.0f;
+	const float rowH = ImGui::GetTextLineHeightWithSpacing() + 4.0f * S;
 	ImGuiListClipper clipper(static_cast<int>(shown.size()), rowH);
 	while (clipper.Step())
 	for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++)
@@ -1899,7 +1902,7 @@ void RLCoach::RenderWindow()
 		ImGui::Text("%.1fs", it.duration); ImGui::NextColumn();
 		ImGui::Text("%d", it.touches); ImGui::NextColumn();
 		if (!it.hasRecording) ImGui::PopStyleColor();
-		if (it.rating > 0) Pill(std::to_string(it.rating), GradeColor(it.rating), 26.0f);
+		if (it.rating > 0) Pill(std::to_string(it.rating), GradeColor(it.rating), 26.0f * S);
 		else ImGui::TextDisabled("-");
 		ImGui::NextColumn();
 		auto ag = uiAutoGrades.find(it.file);
@@ -1907,7 +1910,7 @@ void RLCoach::RenderWindow()
 		else if (ag->second.overall <= 0) ImGui::TextDisabled("-");
 		else
 		{
-			Pill(std::to_string(ag->second.overall), GradeColor(ag->second.overall), 26.0f);
+			Pill(std::to_string(ag->second.overall), GradeColor(ag->second.overall), 26.0f * S);
 			static const char* kinds[6] = { "", "ground", "dbl tap", "dribble", "air drib", "reset" };
 			const int st = ag->second.shotType;
 			if (st >= 1 && st <= 5) { ImGui::SameLine(); ImGui::TextDisabled("%s", kinds[st]); }
@@ -1920,7 +1923,7 @@ void RLCoach::RenderWindow()
 	if (!toggleKeep.empty()) ToggleKeep(toggleKeep);
 
 	bool canWatchSelected = selectedRep >= 0 && selectedRep < static_cast<int>(repList.size()) && repList[selectedRep].hasRecording;
-	if (canWatchSelected && AccentButton("Watch selected", ImVec2(150, 34)))
+	if (canWatchSelected && AccentButton("Watch selected", ImVec2(150 * S, 34 * S)))
 	{
 		RepListItem pick = repList[selectedRep];
 		onGame([this, pick]() { ViewerLoad(pick); });
@@ -1930,7 +1933,7 @@ void RLCoach::RenderWindow()
 	if (latest)
 	{
 		if (canWatchSelected) ImGui::SameLine();
-		if (OutlineButton("Watch latest", ImVec2(150, 34)))
+		if (OutlineButton("Watch latest", ImVec2(150 * S, 34 * S)))
 		{
 			RepListItem pick = *latest;
 			onGame([this, pick]() { ViewerLoad(pick); });

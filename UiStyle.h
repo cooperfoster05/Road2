@@ -11,6 +11,10 @@
 
 namespace UiStyle
 {
+	// The viewer's size (Oct 24: at 1.0 it took over a quarter of a 1080p screen). Everything in the window is drawn at
+	// this scale; the fonts in UiFonts.h are loaded at the matching sizes, so change both together.
+	inline constexpr float kScale = 0.8f;
+
 	inline ImVec4 Hex(unsigned rgb, float a = 1.0f)
 	{
 		return ImVec4(((rgb >> 16) & 0xFF) / 255.0f, ((rgb >> 8) & 0xFF) / 255.0f, (rgb & 0xFF) / 255.0f, a);
@@ -57,9 +61,9 @@ namespace UiStyle
 				c(ImGuiCol_TitleBgActive, Hex(0x0E1727));
 				c(ImGuiCol_TitleBgCollapsed, Hex(0x0E1727, 0.9f));
 				c(ImGuiCol_Border, kLine);
-				f(ImGuiStyleVar_WindowRounding, 12.0f);
+				f(ImGuiStyleVar_WindowRounding, 12.0f * kScale);
 				f(ImGuiStyleVar_WindowBorderSize, 1.0f);
-				v2(ImGuiStyleVar_WindowPadding, ImVec2(18, 14));
+				v2(ImGuiStyleVar_WindowPadding, ImVec2(18 * kScale, 14 * kScale));
 			}
 			c(ImGuiCol_Text, kText);
 			c(ImGuiCol_TextDisabled, kMuted);
@@ -81,15 +85,15 @@ namespace UiStyle
 			c(ImGuiCol_ScrollbarGrab, Hex(0x1F3350));
 			c(ImGuiCol_ScrollbarGrabHovered, Hex(0x2A456B));
 			c(ImGuiCol_PopupBg, Hex(0x0E1727, 0.98f));
-			f(ImGuiStyleVar_FrameRounding, 7.0f);
-			f(ImGuiStyleVar_ChildRounding, 10.0f);
+			f(ImGuiStyleVar_FrameRounding, 7.0f * kScale);
+			f(ImGuiStyleVar_ChildRounding, 10.0f * kScale);
 			f(ImGuiStyleVar_GrabRounding, 6.0f);
 			f(ImGuiStyleVar_PopupRounding, 8.0f);
 			f(ImGuiStyleVar_ScrollbarRounding, 6.0f);
 			f(ImGuiStyleVar_FrameBorderSize, 0.0f);
 			f(ImGuiStyleVar_GrabMinSize, 10.0f);
-			v2(ImGuiStyleVar_FramePadding, ImVec2(10, 5));
-			v2(ImGuiStyleVar_ItemSpacing, ImVec2(8, 7));
+			v2(ImGuiStyleVar_FramePadding, ImVec2(10 * kScale, 5 * kScale));
+			v2(ImGuiStyleVar_ItemSpacing, ImVec2(8 * kScale, 7 * kScale));
 		}
 		~Scope()
 		{
@@ -115,11 +119,11 @@ namespace UiStyle
 	inline void Pill(const std::string& text, ImVec4 color, float minWidth = 0.0f)
 	{
 		ImVec2 ts = ImGui::CalcTextSize(text.c_str());
-		float w = std::max(ts.x + 14.0f, minWidth), h = ts.y + 4.0f;
+		float w = std::max(ts.x + 14.0f * kScale, minWidth), h = ts.y + 4.0f * kScale;
 		ImVec2 p = ImGui::GetCursorScreenPos();
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 		dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), U32(color, 0.16f), h * 0.5f);
-		dl->AddText(ImVec2(p.x + (w - ts.x) * 0.5f, p.y + 2.0f), U32(color), text.c_str());
+		dl->AddText(ImVec2(p.x + (w - ts.x) * 0.5f, p.y + 2.0f * kScale), U32(color), text.c_str());
 		ImGui::Dummy(ImVec2(w, h));
 	}
 

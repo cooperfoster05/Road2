@@ -66,6 +66,34 @@ namespace HudDraw
 		}
 	}
 
+	// An arc from angle a0 to a1 (radians, clockwise on screen), drawn as short line segments
+	inline void Arc(CanvasWrapper& c, float cx, float cy, float r, float a0, float a1, float width, Rgba col)
+	{
+		SetColor(c, col);
+		int steps = std::max(6, static_cast<int>(std::fabs(a1 - a0) * r * 0.5f));
+		for (int i = 0; i < steps; i++)
+		{
+			float t0 = a0 + (a1 - a0) * i / steps, t1 = a0 + (a1 - a0) * (i + 1) / steps;
+			c.DrawLine(Vector2F{ cx + r * std::cos(t0), cy + r * std::sin(t0) }, Vector2F{ cx + r * std::cos(t1), cy + r * std::sin(t1) }, width);
+		}
+	}
+
+	// A one-pixel outline with rounded corners
+	inline void RoundOutline(CanvasWrapper& c, float x, float y, float w, float h, float r, Rgba col)
+	{
+		r = std::max(0.0f, std::min(r, std::min(w, h) * 0.5f));
+		SetColor(c, col);
+		c.DrawLine(Vector2F{ x + r, y }, Vector2F{ x + w - r, y }, 1.0f);
+		c.DrawLine(Vector2F{ x + r, y + h }, Vector2F{ x + w - r, y + h }, 1.0f);
+		c.DrawLine(Vector2F{ x, y + r }, Vector2F{ x, y + h - r }, 1.0f);
+		c.DrawLine(Vector2F{ x + w, y + r }, Vector2F{ x + w, y + h - r }, 1.0f);
+		const float pi = 3.14159265f;
+		Arc(c, x + r, y + r, r, pi, 1.5f * pi, 1.0f, col);
+		Arc(c, x + w - r, y + r, r, 1.5f * pi, 2.0f * pi, 1.0f, col);
+		Arc(c, x + w - r, y + h - r, r, 0.0f, 0.5f * pi, 1.0f, col);
+		Arc(c, x + r, y + h - r, r, 0.5f * pi, pi, 1.0f, col);
+	}
+
 	inline Vector2F TextSize(CanvasWrapper& c, const std::string& s, float scale)
 	{
 		return c.GetStringSize(s, scale, scale);

@@ -18,12 +18,45 @@ using namespace HudDraw;
 
 namespace
 {
-	// Panel colors
-	const Rgba kPanelBg{ 13, 15, 21, 205 };
-	const Rgba kHeaderBg{ 27, 31, 42, 235 };
-	const Rgba kTitle{ 238, 242, 250, 255 };
-	const Rgba kSection{ 128, 138, 156, 255 };
-	const Rgba kDivider{ 255, 255, 255, 22 };
+	// Panel colors: the rep viewer's look (Oct 24): navy, thin blue-grey outlines, cyan for the name
+	const Rgba kPanelBg{ 11, 18, 32, 226 };
+	const Rgba kHeaderBg{ 14, 23, 39, 238 };
+	const Rgba kBorder{ 35, 57, 90, 255 };
+	const Rgba kTitle{ 56, 189, 248, 255 };
+	const Rgba kSection{ 141, 160, 188, 255 };
+	const Rgba kDivider{ 35, 57, 90, 200 };
+	const Rgba kTrack{ 24, 38, 61, 255 };
+
+	// The panel's lines come with colors from the old palette (here and in RLCoach.cpp); this maps them onto the new one
+	Rgba Restyle(unsigned char r, unsigned char g, unsigned char b)
+	{
+		struct Map { unsigned char r, g, b; Rgba to; };
+		static const Map kMap[] = {
+			{ 240, 244, 250, { 230, 237, 247, 255 } }, { 238, 242, 250, { 230, 237, 247, 255 } }, { 225, 230, 238, { 230, 237, 247, 255 } },
+			{ 220, 224, 232, { 230, 237, 247, 255 } }, { 200, 205, 215, { 200, 212, 228, 255 } }, { 190, 190, 190, { 169, 184, 207, 255 } },
+			{ 150, 160, 178, { 169, 184, 207, 255 } }, { 130, 138, 152, { 141, 160, 188, 255 } }, { 110, 118, 132, { 141, 160, 188, 255 } },
+			{ 115, 230, 115, { 74, 222, 128, 255 } }, { 120, 230, 120, { 74, 222, 128, 255 } },
+			{ 255, 204, 77, { 251, 191, 36, 255 } }, { 255, 200, 0, { 251, 191, 36, 255 } }, { 255, 200, 60, { 251, 191, 36, 255 } },
+			{ 200, 170, 60, { 251, 191, 36, 255 } }, { 255, 160, 80, { 251, 146, 60, 255 } }, { 255, 205, 130, { 253, 186, 116, 255 } },
+			{ 255, 115, 102, { 248, 113, 113, 255 } }, { 255, 120, 120, { 248, 113, 113, 255 } }, { 255, 90, 90, { 248, 113, 113, 255 } },
+			{ 153, 204, 255, { 94, 200, 229, 255 } }, { 160, 205, 255, { 125, 211, 252, 255 } }, { 120, 160, 255, { 56, 189, 248, 255 } },
+			{ 80, 200, 230, { 56, 189, 248, 255 } }, { 120, 200, 255, { 56, 189, 248, 255 } },
+			{ 200, 200, 200, { 169, 184, 207, 255 } }, { 160, 160, 160, { 141, 160, 188, 255 } },
+		};
+		for (const Map& m : kMap) if (m.r == r && m.g == g && m.b == b) return m.to;
+		return Rgba{ r, g, b, 255 };
+	}
+
+	// The grade color (as in the rep viewer: 5 cyan, 4 green, 3 amber, 2 orange, 1 red)
+	Rgba GradeRgba(int o)
+	{
+		if (o >= 5) return { 34, 211, 238, 255 };
+		if (o == 4) return { 74, 222, 128, 255 };
+		if (o == 3) return { 251, 191, 36, 255 };
+		if (o == 2) return { 251, 146, 60, 255 };
+		if (o == 1) return { 248, 113, 113, 255 };
+		return { 141, 160, 188, 255 };
+	}
 }
 
 void RLCoach::RenderHud(CanvasWrapper canvas)
@@ -80,6 +113,7 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 		std::vector<PanelChunk> chunks;
 		float scale = 1.0f;
 		bool detail = false;
+		int grade = 0;      // 1-5: a small grade gauge leads the line
 	};
 	std::vector<HudLine> lines;
 	auto add = [&](std::string text, unsigned char r = 225, unsigned char g = 230, unsigned char b = 238, bool detail = false, float scale = 1.0f) {
@@ -89,10 +123,11 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 		l.scale = scale;
 		lines.push_back(std::move(l));
 	};
-	auto addChunks = [&](const std::vector<PanelChunk>& chunks, bool detail = false) {
+	auto addChunks = [&](const std::vector<PanelChunk>& chunks, bool detail = false, int grade = 0) {
 		HudLine l;
 		l.chunks = chunks;
 		l.detail = detail;
+		l.grade = grade;
 		lines.push_back(std::move(l));
 	};
 	auto section = [&](const char* title, bool detail = false) {
@@ -121,12 +156,12 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 
 	// Mode tag in the header
 	std::string tag;
-	Rgba tagCol{ 170, 176, 190, 255 };
+	Rgba tagCol{ 141, 160, 188, 255 };
 
 	if (practiceState != PracticeState::Off)
 	{
 		tag = "PRACTICE";
-		tagCol = { 80, 200, 230, 255 };
+		tagCol = { 74, 222, 128, 255 };
 		int pct = static_cast<int>(practiceSpeed * 100.0f + 0.5f);
 		add(practiceLabel, 240, 244, 250);
 		add(std::format("{}% speed   {:.2f}s lead-in{}", pct, practiceLeadIn, practiceAutoRamp ? "   auto-ramp" : ""), 150, 160, 178, true);
@@ -140,7 +175,7 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 		if (!practiceResultLines.empty())
 		{
 			section("LAST ATTEMPT");
-			for (const PanelGradeLine& gl : practiceResultLines) addChunks(gl.chunks);
+			for (const PanelGradeLine& gl : practiceResultLines) addChunks(gl.chunks, false, gl.grade);
 		}
 		if (!practiceRefLabel.empty()) add(practiceRefLabel, 130, 138, 152, true);
 		add("Retry: rlcoach_practice_retry   Stop: rlcoach_practice_exit", 110, 118, 132, true);
@@ -148,7 +183,7 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 	else if (viewerActive && !viewerFrames.empty())
 	{
 		tag = "REPLAY";
-		tagCol = { 120, 160, 255, 255 };
+		tagCol = { 56, 189, 248, 255 };
 		int i = std::min(static_cast<int>(viewerPlayhead), static_cast<int>(viewerFrames.size()) - 1);
 		const Frame& f = viewerFrames[i];
 		std::string when = viewerRep.savedAt.size() >= 19 ? viewerRep.savedAt.substr(5, 11) : viewerRep.savedAt;
@@ -166,7 +201,7 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 			section("GRADE");
 			unsigned char r, g, b;
 			OverallRgb(viewerGrade.overall, r, g, b);
-			add(std::format("{}  {}", viewerGrade.overall, Grader::OverallName(viewerGrade.overall)), r, g, b, false, 1.15f);
+			addChunks({ { Grader::OverallName(viewerGrade.overall), r, g, b } }, false, viewerGrade.overall);
 			if (viewerShot.valid && viewerShot.type != ShotType::Aerial)
 				add(std::format("Graded as a {}", viewerShot.type == ShotType::Ground ? "ground shot"
 					: viewerShot.type == ShotType::Dribble ? "dribble" : viewerShot.type == ShotType::AirDribble ? "air dribble"
@@ -218,11 +253,11 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 		if (!*recordingEnabled) { tag = "OFF"; add("Recording off  (F2 > Plugins > RLCoach)", 150, 160, 178); }
 		else if (state == RepState::Recording && !pendingEndReason.empty())
 		{
-			tag = "REC"; tagCol = { 255, 90, 90, 255 };
+			tag = "REC"; tagCol = { 248, 113, 113, 255 };
 			add(std::format("Shot over ({}), catching your recovery", pendingEndReason), 240, 244, 250);
 		}
-		else if (state == RepState::Recording) { tag = "REC"; tagCol = { 255, 90, 90, 255 }; add("Recording rep", 240, 244, 250); }
-		else if (state == RepState::Armed) { tag = "ARMED"; tagCol = { 255, 200, 60, 255 }; add("Rep starts when you move", 240, 244, 250); }
+		else if (state == RepState::Recording) { tag = "REC"; tagCol = { 248, 113, 113, 255 }; add("Recording rep", 240, 244, 250); }
+		else if (state == RepState::Armed) { tag = "ARMED"; tagCol = { 251, 191, 36, 255 }; add("Rep starts when you move", 240, 244, 250); }
 		else { tag = "READY"; add("Reset the shot or ball to start", 200, 205, 215); }
 
 		if (*recordingEnabled) add(std::format("{} rep{} this session", repsThisSession, repsThisSession == 1 ? "" : "s"), 150, 160, 178, true);
@@ -240,7 +275,7 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 			section("LAST REP");
 			add(std::format("{}   {:.2f}s   {} touch{}", lastRep.endReason, lastRep.durationS,
 				lastRep.touches, lastRep.touches == 1 ? "" : "es"), 150, 160, 178, true);
-			for (const PanelGradeLine& gl : lastRepGradeLines) addChunks(gl.chunks);
+			for (const PanelGradeLine& gl : lastRepGradeLines) addChunks(gl.chunks, false, gl.grade);
 			if (*manualGrading)
 			{
 				if (lastRating == 0) add("Rate it: 1 Missed  2 Close  3 Bad-in  4 Good-in  5 Great-in", 255, 200, 0);
@@ -285,57 +320,79 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 	Vector2 screen = canvas.GetSize();
 	const float S = *hudScale * (screen.Y / 1080.0f);
 	const float x = *hudX * screen.X, y = *hudY * screen.Y;
-	const float padding = 12.0f * S, lineH = 17.0f * S, headerH = 26.0f * S, accentW = 3.0f * S, radius = 8.0f * S;
+	const float padding = 12.0f * S, lineH = 17.0f * S, headerH = 28.0f * S, radius = 9.0f * S;
 	const float textScale = S;
+	const float gaugeR = 10.0f * S, gaugeW = gaugeR * 2.0f + 10.0f * S;   // the small grade gauge and the room it takes
 
-	auto lineHeight = [&](const HudLine& l) { return l.kind == HudLine::Section ? lineH * 0.8f + 7.0f * S : lineH * l.scale; };
-	float bodyH = 0.0f, width = 250.0f * S;
+	auto lineHeight = [&](const HudLine& l) {
+		if (l.kind == HudLine::Section) return lineH * 0.8f + 9.0f * S;
+		return l.grade > 0 ? std::max(lineH * l.scale, gaugeR * 2.0f + 6.0f * S) : lineH * l.scale;
+	};
+	float bodyH = 0.0f, width = 260.0f * S;
 	for (const HudLine& l : lines)
 	{
 		bodyH += lineHeight(l);
-		float w = 0.0f;
+		float w = l.grade > 0 ? gaugeW : 0.0f;
 		for (const PanelChunk& c : l.chunks) w += TextSize(canvas, c.text, l.scale * textScale).X;
-		width = std::max(width, w + padding * 2 + accentW);
+		width = std::max(width, w + padding * 2);
 	}
-	float tagW = TextSize(canvas, tag, 0.75f * textScale).X + 14.0f * S;
-	width = std::max(width, TextSize(canvas, "RL COACH", 1.0f * textScale).X + tagW + padding * 3);
-	const float height = headerH + padding * 0.6f + bodyH + padding * 0.7f;
+	float tagW = TextSize(canvas, tag, 0.75f * textScale).X + (tag == "REC" ? 28.0f : 20.0f) * S;
+	width = std::max(width, TextSize(canvas, "ROAD2", 1.0f * textScale).X + tagW + padding * 3);
+	const float height = headerH + padding * 0.7f + bodyH + padding * 0.7f;
 
 	// ---- Draw ----
 	RoundBox(canvas, x, y, width, height, radius, kPanelBg);
 	RoundBox(canvas, x, y, width, headerH, radius, kHeaderBg);
 	Box(canvas, x, y + headerH - radius, width, radius, kHeaderBg);   // square off the header's bottom corners
-	Box(canvas, x, y + headerH, accentW, height - headerH - radius, Rgba{ tagCol.r, tagCol.g, tagCol.b, 200 });
+	Box(canvas, x + 1.0f, y + headerH, width - 2.0f, 1.0f, kDivider);
+	RoundOutline(canvas, x, y, width, height, radius, kBorder);
 
-	float titleH = TextSize(canvas, "RL COACH", textScale).Y;
-	Text(canvas, x + padding, y + (headerH - titleH) * 0.5f, "RL COACH", textScale, kTitle);
+	float titleH = TextSize(canvas, "ROAD2", textScale).Y;
+	Text(canvas, x + padding, y + (headerH - titleH) * 0.5f, "ROAD2", textScale, kTitle);
 
 	// Mode tag pill
-	float pillH = headerH - 9.0f * S;
+	float pillH = headerH - 11.0f * S;
 	float pillX = x + width - padding - tagW, pillY = y + (headerH - pillH) * 0.5f;
-	RoundBox(canvas, pillX, pillY, tagW, pillH, pillH * 0.5f, Rgba{ tagCol.r, tagCol.g, tagCol.b, 55 });
-	if (tag == "REC") Disc(canvas, pillX + 8.0f * S, pillY + pillH * 0.5f, 3.0f * S, tagCol);
+	RoundBox(canvas, pillX, pillY, tagW, pillH, pillH * 0.5f, Rgba{ tagCol.r, tagCol.g, tagCol.b, 40 });
+	RoundOutline(canvas, pillX, pillY, tagW, pillH, pillH * 0.5f, Rgba{ tagCol.r, tagCol.g, tagCol.b, 150 });
+	if (tag == "REC") Disc(canvas, pillX + 9.0f * S, pillY + pillH * 0.5f, 3.0f * S, tagCol);
 	TextCentered(canvas, pillX + tagW * 0.5f + (tag == "REC" ? 4.0f * S : 0.0f), pillY + pillH * 0.5f, tag, 0.75f * textScale, tagCol);
 
-	float cy = y + headerH + padding * 0.6f;
+	float cy = y + headerH + padding * 0.7f;
 	bool first = true;
 	for (const HudLine& l : lines)
 	{
-		float cx = x + padding + accentW;
+		float cx = x + padding;
+		const float lh = lineHeight(l);
 		if (l.kind == HudLine::Section)
 		{
-			if (!first) Box(canvas, cx, cy + 2.0f * S, width - padding * 2 - accentW, 1.0f, kDivider);
-			Text(canvas, cx, cy + 6.0f * S, l.chunks[0].text, l.scale * textScale, kSection, false);
+			if (!first) Box(canvas, cx, cy + 3.0f * S, width - padding * 2, 1.0f, kDivider);
+			Text(canvas, cx, cy + 7.0f * S, l.chunks[0].text, l.scale * textScale, kSection, false);
 		}
 		else
 		{
-			for (const PanelChunk& c : l.chunks)
+			float ty = cy;
+			if (l.grade > 0)
 			{
-				Text(canvas, cx, cy, c.text, l.scale * textScale, Rgba{ c.r, c.g, c.b, 255 });
+				// The grade as a small gauge, like the rep viewer's: a 270 degree ring filled from 1 to 5
+				const float gcx = cx + gaugeR, gcy = cy + lh * 0.5f - 1.0f * S;
+				const float pi = 3.14159265f, a0 = 0.75f * pi, sweep = 1.5f * pi;
+				const Rgba gc = GradeRgba(l.grade);
+				Arc(canvas, gcx, gcy, gaugeR, a0, a0 + sweep, 3.0f * S, kTrack);
+				Arc(canvas, gcx, gcy, gaugeR, a0, a0 + sweep * std::min(1.0f, l.grade / 5.0f), 3.0f * S, gc);
+				TextCentered(canvas, gcx, gcy, std::to_string(l.grade), 0.95f * textScale, Rgba{ 230, 237, 247, 255 });
+				cx += gaugeW;
+				ty = cy + (lh - lineH * l.scale) * 0.5f - 1.0f * S;
+			}
+			for (size_t k = 0; k < l.chunks.size(); k++)
+			{
+				const PanelChunk& c = l.chunks[k];
+				const Rgba col = l.grade > 0 && k == 0 ? GradeRgba(l.grade) : Restyle(c.r, c.g, c.b);
+				Text(canvas, cx, ty, c.text, l.scale * textScale, col);
 				cx += TextSize(canvas, c.text, l.scale * textScale).X;
 			}
 		}
-		cy += lineHeight(l);
+		cy += lh;
 		first = false;
 	}
 }

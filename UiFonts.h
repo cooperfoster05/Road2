@@ -12,13 +12,15 @@ namespace UiFonts
 {
 	enum Face { Body, Bold, Label, Head, Mono, Big, kCount };
 	struct Spec { const char* name; const char* source; const char* file; int size; };
+	// Sizes are for UiStyle::kScale = 0.8 (16, 16, 12, 20, 19, 44 at full size); the names carry the size, so a
+	// changed size loads as a new font instead of reusing one BakkesMod already loaded at the old size
 	inline const Spec kSpecs[kCount] = {
-		{ "rlcoach_body",  "Inter-Regular.ttf",       "RLCoach_Inter-Regular.ttf",       16 },
-		{ "rlcoach_bold",  "Inter-SemiBold.ttf",      "RLCoach_Inter-SemiBold.ttf",      16 },
-		{ "rlcoach_label", "Inter-Bold.ttf",          "RLCoach_Inter-Bold.ttf",          12 },
-		{ "rlcoach_head",  "Inter-SemiBold.ttf",      "RLCoach_Inter-SemiBold.ttf",      20 },
-		{ "rlcoach_mono",  "JetBrainsMono-Bold.ttf",  "RLCoach_JetBrainsMono-Bold.ttf",  19 },
-		{ "rlcoach_big",   "JetBrainsMono-Bold.ttf",  "RLCoach_JetBrainsMono-Bold.ttf",  44 },
+		{ "rlcoach_body13",  "Inter-Regular.ttf",       "RLCoach_Inter-Regular.ttf",       13 },
+		{ "rlcoach_bold13",  "Inter-SemiBold.ttf",      "RLCoach_Inter-SemiBold.ttf",      13 },
+		{ "rlcoach_label10", "Inter-Bold.ttf",          "RLCoach_Inter-Bold.ttf",          10 },
+		{ "rlcoach_head16",  "Inter-SemiBold.ttf",      "RLCoach_Inter-SemiBold.ttf",      16 },
+		{ "rlcoach_mono15",  "JetBrainsMono-Bold.ttf",  "RLCoach_JetBrainsMono-Bold.ttf",  15 },
+		{ "rlcoach_big35",   "JetBrainsMono-Bold.ttf",  "RLCoach_JetBrainsMono-Bold.ttf",  35 },
 	};
 
 	// Latin, plus the few symbols the review uses: dashes, bullet, ellipsis, arrows, minus
