@@ -3703,6 +3703,70 @@ EngineResult Engine::Line(const std::vector<Frame>& fr, bool realIn, bool floorB
 	return std::move(best);
 }
 
+// A line good enough to stop the ceiling-shot stages: a 5, or a 4 that's really clean (every part of the shot graded
+// Clean or Solid, and it holds from nearly every nudged start)
+static bool GoodEnoughToStop(const EngineResult& r, const ShotReference& ref)
+{
+	if (r.status != EngineStatus::Found) return false;
+	if (r.grade >= 5) return true;
+	if (r.grade < 4 || r.frames.empty()) return false;
+	if (r.heldOf > 0 && r.held < r.heldOf - 1) return false;
+	ShotAnalysis a = ShotGeometry::Analyze(r.frames);
+	RepSegments segs = Segmenter::Split(r.frames, r.eventTick);
+	RepGrade g = Grader::GradeRep(r.frames, segs, a, r.wentIn, false, ref);
+	for (const SegmentGrade& sg : g.segs)
+	{
+		if (sg.segIndex < 0 || sg.segIndex >= static_cast<int>(segs.segs.size())) continue;
+		SegKind k = segs.segs[sg.segIndex].kind;
+		if (k == SegKind::Recovery || k == SegKind::Result) continue;
+		if (sg.grade == Grade::Sloppy || sg.grade == Grade::Costly || sg.grade == Grade::Throw) return false;
+	}
+	return true;
+}
+
+static EngineResult CeilingStages(const std::vector<Frame>& fr, const ShotAnalysis& real, bool realIn, bool floorBeforeGoal, int eventTick,
+	const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds, int s, int depth)
+{
+	const int n = static_cast<int>(fr.size());
+	struct Stage { int start; const char* name; };
+	std::vector<Stage> stages{ { s, "" } };
+	const int fromCeiling = std::max(real.startTick + 1, real.ceilLand + 6);
+	if (fromCeiling < s - 20) stages.push_back({ fromCeiling, "from the ceiling" });
+	const int fromWall = real.ceilWallTouch >= 0 ? std::max(real.startTick + 1, real.ceilWallTouch - 30) : -1;
+	if (fromWall >= 1 && fromWall < stages.back().start - 20) stages.push_back({ fromWall, "from your wall touch" });
+
+	auto t0 = std::chrono::steady_clock::now();
+	EngineResult best;
+	int bestStage = -1, tries = 0;
+	std::string searched;
+	for (size_t i = 0; i < stages.size(); i++)
+	{
+		const int st = std::clamp(stages[i].start, 1, std::max(1, n - 2));
+		EngineResult r = LineAt(fr, realIn, floorBeforeGoal, eventTick, ref, carBody, cancel, maxSeconds, st, depth);
+		tries += r.tries;
+		if (r.status == EngineStatus::Cancelled || r.status == EngineStatus::NoBall || (cancel && cancel->load()))
+		{
+			if (bestStage < 0) return r;
+			break;
+		}
+		searched += i == 0 ? "0.5 s before your touch" : std::string(i + 1 == stages.size() ? " and " : ", ") + stages[i].name;
+		const bool found = r.status == EngineStatus::Found;
+		if (found && (bestStage < 0 || best.status != EngineStatus::Found || r.grade > best.grade)) { best = std::move(r); bestStage = static_cast<int>(i); }
+		else if (bestStage < 0) { best = std::move(r); bestStage = static_cast<int>(i); }
+		if (GoodEnoughToStop(best, ref)) break;
+	}
+	if (best.status == EngineStatus::Found && bestStage > 0)
+	{
+		const std::string tag = stages[bestStage].name;
+		if (best.cue.rfind("Engine (", 0) == 0) best.cue = "Engine (" + tag + ", " + best.cue.substr(8);
+		else if (best.cue.rfind("Engine", 0) == 0) best.cue = "Engine (" + tag + ")" + best.cue.substr(6);
+	}
+	best.note += " Searched " + searched + (best.status == EngineStatus::Found && bestStage > 0 ? std::string("; the best line came ") + stages[bestStage].name + "." : ".");
+	best.tries = tries;
+	best.ms = std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count() * 1000.0f;
+	return best;
+}
+
 static EngineResult LineOnce(const std::vector<Frame>& fr, bool realIn, bool floorBeforeGoal, int eventTick,
 	const ShotReference& ref, int carBody, const std::atomic<bool>* cancel, float maxSeconds, int startTick, int depth)
 {
@@ -3717,6 +3781,13 @@ static EngineResult LineOnce(const std::vector<Frame>& fr, bool realIn, bool flo
 #ifdef ENGINE_CONTACT_ONLY
 	return LineAt(fr, realIn, floorBeforeGoal, eventTick, ref, carBody, cancel, maxSeconds, s, depth);
 #else
+	// Ceiling shots (Coop, Oct 25): one stage at a time, stopping as soon as one finds a good 5 or a really clean 4.
+	// 1. The usual 0.5 s before the touch (it keeps your drop and only changes the flip and the hit).
+	// 2. From the ceiling, just after you landed on it (it picks when and where to fall off).
+	// 3. From just before the wall touch (it redoes the setup too).
+	// Each stage gets a full search; the best line across the stages wins, a tie keeps the earlier stage (smaller change).
+	if (real.valid && real.type == ShotType::CeilingShot)
+		return CeilingStages(fr, real, realIn, floorBeforeGoal, eventTick, ref, carBody, cancel, maxSeconds, s, depth);
 	// Either start (Oct 20): the two starts find lines on different reps. From 0.5 s out the engine is stuck with your
 	// approach; from your setup (takeoff, wall pop, the start of the dribble) it can redo the approach. So: search
 	// from 0.5 s out first; unless that already found a 4 or 5, also search from your setup and keep the better line

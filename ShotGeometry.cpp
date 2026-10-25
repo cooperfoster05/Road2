@@ -18,6 +18,7 @@ namespace
 	constexpr float kCarMaxSpeed = 2300.0f;
 	constexpr float kCeilingCarZ = 1900.0f;      // wheels down this high = on the ceiling (it's at 2,044)
 	constexpr float kBallOnCeilingZ = 1945.0f;   // ball center this high = touching the ceiling
+	constexpr int   kCeilOneHitTicks = 45;       // air touches all within this of the shot = one hit (a flip reports two)
 	constexpr float kGroundShotMaxZ = 350.0f;   // ball center below this at the touch = a ground shot (jump, flip and low aerial shots included; raised from 260 on Oct 9 ratings)
 	// Fastest average acceleration seen toward the ball in recorded reps (98th percentile = 1300).
 	constexpr float kReachAccel = 1300.0f;
@@ -397,7 +398,12 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 
 	// Ceiling shot: an aerial where you came down off the ceiling into the shot, touching nothing else on the way.
 	// (A reset, an air dribble or a backboard read after the ceiling stays that mechanic.)
-	if (s.type == ShotType::Aerial)
+	// Also (Oct 25, Coop's first ceiling session): a low ball met in the air after coming down (not a ground shot), a
+	// ball that bounced off the ceiling or a wall top before your shot (not a double tap; a backboard read after the
+	// ceiling still is one), and a flip that touched the ball twice in a fraction of a second (not an air dribble).
+	const bool airTouchIsOneHit = s.type == ShotType::AirDribble && s.airFirstTouch >= k - kCeilOneHitTicks;
+	if (s.type == ShotType::Aerial || (s.type == ShotType::Ground && !s.carGrounded)
+		|| (s.type == ShotType::DoubleTap && s.tapSurface != 1) || airTouchIsOneHit)
 	{
 		auto onCeiling = [&](int i) { return fr[i].onGround && fr[i].carZ > kCeilingCarZ; };
 		int leave = -1;
@@ -414,11 +420,13 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 			for (int i = land; i >= std::max(1, s.startTick); i--) if (fr[i].touch && !fr[i - 1].touch) { wt = i; break; }
 			s.ceilingShot = true;
 			s.type = ShotType::CeilingShot;
+			s.doubleTap = false;
+			s.airDribble = false;
 			s.ceilLand = land;
 			s.ceilLeave = leave;
 			s.ceilWallTouch = wt;
 			int jumpOff = -1;
-			for (int i = std::max(1, leave - 3); i <= std::min(k - 1, leave + 6); i++)
+			for (int i = std::max(std::max(1, land), leave - 10); i <= std::min(k - 1, leave + 6); i++)   // the press lands a few ticks before the wheels let go
 				if (fr[i].jump && !fr[i - 1].jump) { jumpOff = i; break; }
 			s.ceilJumped = jumpOff >= 0;
 			for (int i = (jumpOff >= 0 ? jumpOff + 1 : leave + 1); i <= k && i < n; i++)

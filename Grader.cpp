@@ -51,8 +51,9 @@ namespace
 	constexpr float kCsApexSolid = 1400.0f;
 	constexpr float kCsWallSpeedClean = 1400.0f, kCsWallSpeedSolid = 900.0f;   // your speed into the wall touch (coaches: full speed)
 	constexpr float kCsLeaveClean = 250.0f, kCsLeaveSolid = 500.0f;           // met the ball this close to the side of your line off the ceiling
-	constexpr float kCsFivePlay = 3.0f;         // 5: wall touch to shot this quick...
-	constexpr float kCsFiveCornerX = 580.0f;    // ...and top half of the net or this far toward a corner
+	constexpr float kCsGoodZ = 300.0f;          // 4: at least this high at the line (Oct 25: Coop's two low clean ones were 3s, his 4 was 336)
+	constexpr float kCsFivePlay = 4.0f;         // 5: wall touch to shot this quick (Coop's clean goals took 2.8-4.1 s)...
+	constexpr float kCsFiveCornerX = 580.0f;    // ...and in a top corner: top half of the net AND this far toward a side (Oct 25: his 5 was 501 high, 631 out; his 4 336 high, 622 out)
 	const Cutoffs& For(ShotType t)
 	{
 		return t == ShotType::Ground ? kGround : t == ShotType::DoubleTap ? kDoubleTap : t == ShotType::Dribble ? kDribble
@@ -406,11 +407,14 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		Grade leaveG = shot.leaveOffset <= kCsLeaveClean ? Grade::Clean : shot.leaveOffset <= kCsLeaveSolid ? Grade::Solid : Grade::Sloppy;
 		gradeSeg(findSeg(SegKind::Ceiling, 0), leaveG, std::format("{:.2f}s on the ceiling; met the ball {:.0f} to the side of the line you left it on{}",
 			shot.ceilSec, shot.leaveOffset, leaveG == Grade::Sloppy ? " (line up with the ball while you're up there)" : ""));
-		Grade jumpG = !shot.ceilJumped ? Grade::Clean : shot.ballHitCeiling ? Grade::Solid : Grade::Sloppy;
+		// Jumping off and flipping before the flip timer runs out works too, it just throws away the free flip
+		const bool quickAfterJump = shot.ceilJumped && shot.ceilFlipShot && shot.dropSec <= 1.25f;
+		Grade jumpG = !shot.ceilJumped ? Grade::Clean : (shot.ballHitCeiling || quickAfterJump) ? Grade::Solid : Grade::Sloppy;
 		Grade flipG = shot.ceilFlipShot ? Grade::Clean : shot.ceilFlip >= 0 ? Grade::Sloppy : Grade::Costly;
 		std::string flipName = shot.ceilFlip >= 0 ? ShotGeometry::FlipName(shot.flipKind, false) : std::string();
 		std::string why = !shot.ceilJumped ? "Fell off the ceiling (flip kept)"
 			: shot.ballHitCeiling ? "Jumped down off the ceiling (fine here: the ball was coming off the ceiling)"
+			: quickAfterJump ? "Jumped off the ceiling and shot before the flip ran out (falling off keeps it for as long as you need)"
 			: "Jumped off the ceiling (fall off instead, so you keep your flip)";
 		why += shot.ceilFlipShot ? std::format(", then shot with a {} {:.2f}s later", flipName, shot.dropSec)
 			: shot.ceilFlip >= 0 ? std::format(", used a {} but not into the shot", flipName)
@@ -484,15 +488,16 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 	else if (shot.type == ShotType::CeilingShot)
 	{
 		// 3 = a goal; 4 = off the flip you kept (fell off, didn't jump) with the ball kept off the ceiling;
-		// 5 = a 4 that's also quick from the wall touch, hard, and high or toward a corner
-		bool clean = shot.ceilFlipShot && !shot.ceilJumped && !shot.ballHitCeiling;
-		bool placed = shot.reachesGoalLine && (shot.crossZ >= kCeilingShot.upperZ || std::fabs(shot.crossX) >= kCsFiveCornerX);
+		// 5 = a 4 that's also hard, in a top corner, and not a slow play from the wall touch
+		bool clean = shot.ceilFlipShot && !shot.ceilJumped && !shot.ballHitCeiling && shot.reachesGoalLine && shot.crossZ >= kCsGoodZ;
+		bool placed = shot.reachesGoalLine && shot.crossZ >= kCeilingShot.upperZ && std::fabs(shot.crossX) >= kCsFiveCornerX;   // top corner
 		bool quick = shot.ceilWallTouch < 0 || shot.ceilPlaySec <= kCsFivePlay;
 		bool great = clean && placed && quick && shot.shotSpeed >= kCeilingShot.fast;
 		g.overall = clean ? (great ? 5 : 4) : 3;
 		std::string why = std::format("Ceiling shot goal, {} ({})", shot.shotSpeed >= kCeilingShot.fast ? "hard" : "soft", Units::Speed(shot.shotSpeed));
-		if (great) why += ", off the flip, quick and well placed";
+		if (great) why += ", off the flip, top corner";
 		else if (clean) why += ", off the flip you kept";
+		else if (shot.ceilFlipShot && !shot.ceilJumped && !shot.ballHitCeiling) why += ", off the flip you kept, but low in the net";
 		else if (shot.ceilJumped && !shot.ballHitCeiling) why += " (jumped off the ceiling)";
 		else if (shot.ballHitCeiling) why += " (the ball hit the ceiling first)";
 		else why += " (not off the flip)";

@@ -145,6 +145,9 @@ bool Mechanics::SameMechanic(const ShotAnalysis& yours, const std::vector<Frame>
 		return true;
 	case ShotType::CeilingShot:
 		if (!line.ceilingShot) return no("didn't come off the ceiling");
+		// Oct 25: the engine liked to drift down and wait for the ball to drop near the floor, then tap it in.
+		// That's not the shot: meet it no more than 0.3 s later than you did.
+		if (line.touchTick > yours.touchTick + 36) return no("waited for the ball to drop instead of meeting it");
 		if (!yours.ceilJumped && line.ceilJumped) return no("jumped off the ceiling");
 		if (yours.ceilFlipShot && !line.ceilFlipShot) return no("the flip wasn't used on the shot");
 		return true;
