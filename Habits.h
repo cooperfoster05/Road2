@@ -58,7 +58,7 @@ private:
 		double Sd() const;
 	};
 	struct Entry { int type = 0; bool goal = false; int flip = 0; HabitMetrics m; };
-	static constexpr int kTypes = 6, kHabits = 4, kFlips = 6;
+	static constexpr int kTypes = 7, kHabits = 4, kFlips = 6;
 	int flickN[kFlips] = {}, flickGoals[kFlips] = {};   // dribbles only, by FlipKind
 
 	std::mutex mtx;

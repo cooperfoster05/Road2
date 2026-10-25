@@ -44,10 +44,19 @@ namespace
 	constexpr float kFrGreatZ = 560.0f, kFrGreatSpeed = 2400.0f;   // a 5: top of the net and hard
 	constexpr float kFrClosingClean = 150.0f;  // reset: moving into the ball at least this fast = Clean
 	constexpr float kFrLostBall = 700.0f;      // after the reset the ball got farther than this from your car = lost it
+	// Ceiling shots (Oct 24, first pass from the coaching research; no rated ceiling shots yet, so tune once there are):
+	// closeMiss, and upperZ = the top half of the net for the 5
+	constexpr Cutoffs kCeilingShot{ 250.0f, 360.0f, 2000.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
+	constexpr float kCsApexClean = 1700.0f;     // setup: the ball peaked at least this high (without touching the ceiling)
+	constexpr float kCsApexSolid = 1400.0f;
+	constexpr float kCsWallSpeedClean = 1400.0f, kCsWallSpeedSolid = 900.0f;   // your speed into the wall touch (coaches: full speed)
+	constexpr float kCsLeaveClean = 250.0f, kCsLeaveSolid = 500.0f;           // met the ball this close to the side of your line off the ceiling
+	constexpr float kCsFivePlay = 3.0f;         // 5: wall touch to shot this quick...
+	constexpr float kCsFiveCornerX = 580.0f;    // ...and top half of the net or this far toward a corner
 	const Cutoffs& For(ShotType t)
 	{
 		return t == ShotType::Ground ? kGround : t == ShotType::DoubleTap ? kDoubleTap : t == ShotType::Dribble ? kDribble
-			: t == ShotType::AirDribble ? kAirDribble : t == ShotType::FlipReset ? kFlipReset : kAerial;
+			: t == ShotType::AirDribble ? kAirDribble : t == ShotType::FlipReset ? kFlipReset : t == ShotType::CeilingShot ? kCeilingShot : kAerial;
 	}
 
 	// Dribble goals: the flick's lift (how fast it sent the ball up off your roof) and its speed split 3s from 4s.
@@ -228,7 +237,7 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 
 	const int shotTouch = static_cast<int>(segs.touchTicks.size());  // segments are numbered by touch, 1-based
 	// Bouncing in is a flaw for aerials; for ground shots the ball being on the floor is normal
-	bool bounced = shot.type == ShotType::Aerial && (bouncedIn || (wentIn && shot.dipsToFloor));
+	bool bounced = (shot.type == ShotType::Aerial || shot.type == ShotType::CeilingShot) && (bouncedIn || (wentIn && shot.dipsToFloor));
 	float myTouchSec = (shot.touchTick - shot.startTick) / 120.0f;
 	float vsBest = ref.valid ? myTouchSec - ref.touchSec : 0.0f;
 
@@ -381,6 +390,34 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		gradeSeg(findSeg(SegKind::Flip, 0), fg, why);
 	}
 
+	// ---- Ceiling shot: the wall touch, the ceiling, the drop and the flip ----
+	if (shot.type == ShotType::CeilingShot)
+	{
+		if (shot.ceilWallTouch >= 0)
+		{
+			Grade pathG = shot.ballHitCeiling ? Grade::Sloppy : shot.ballApexZ >= kCsApexClean ? Grade::Clean : shot.ballApexZ >= kCsApexSolid ? Grade::Solid : Grade::Sloppy;
+			Grade speedG = shot.wallTouchCarSpeed >= kCsWallSpeedClean ? Grade::Clean : shot.wallTouchCarSpeed >= kCsWallSpeedSolid ? Grade::Solid : Grade::Sloppy;
+			std::string why = std::format("Hit it up the wall at {}; it peaked {:.0f} high", Units::Speed(shot.wallTouchCarSpeed), shot.ballApexZ);
+			if (shot.ballHitCeiling) why += " (it hit the ceiling and dropped back: keep it just under)";
+			else if (pathG == Grade::Sloppy) why += " (not near the ceiling: hit it harder up the wall)";
+			else if (speedG == Grade::Sloppy) why += " (come in faster: the wall touch sets the shot's speed)";
+			gradeSeg(findSeg(SegKind::Approach, 0), Worse(pathG, speedG), why);
+		}
+		Grade leaveG = shot.leaveOffset <= kCsLeaveClean ? Grade::Clean : shot.leaveOffset <= kCsLeaveSolid ? Grade::Solid : Grade::Sloppy;
+		gradeSeg(findSeg(SegKind::Ceiling, 0), leaveG, std::format("{:.2f}s on the ceiling; met the ball {:.0f} to the side of the line you left it on{}",
+			shot.ceilSec, shot.leaveOffset, leaveG == Grade::Sloppy ? " (line up with the ball while you're up there)" : ""));
+		Grade jumpG = !shot.ceilJumped ? Grade::Clean : shot.ballHitCeiling ? Grade::Solid : Grade::Sloppy;
+		Grade flipG = shot.ceilFlipShot ? Grade::Clean : shot.ceilFlip >= 0 ? Grade::Sloppy : Grade::Costly;
+		std::string flipName = shot.ceilFlip >= 0 ? ShotGeometry::FlipName(shot.flipKind, false) : std::string();
+		std::string why = !shot.ceilJumped ? "Fell off the ceiling (flip kept)"
+			: shot.ballHitCeiling ? "Jumped down off the ceiling (fine here: the ball was coming off the ceiling)"
+			: "Jumped off the ceiling (fall off instead, so you keep your flip)";
+		why += shot.ceilFlipShot ? std::format(", then shot with a {} {:.2f}s later", flipName, shot.dropSec)
+			: shot.ceilFlip >= 0 ? std::format(", used a {} but not into the shot", flipName)
+			: ", never used the flip";
+		gradeSeg(findSeg(SegKind::Drop, 0), Worse(jumpG, flipG), why);
+	}
+
 	// ---- Contact: aim error, explained by where you hit the ball ----
 	int contactIdx = findSeg(SegKind::Contact, shotTouch);
 	// Pushed in from right at the goal line: the angle math means nothing that close, and it went in
@@ -441,6 +478,24 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		g.overall = (high && fastEnough) ? (great ? 5 : 4) : 3;
 		std::string why = std::format("Flip reset goal, {}, {} ({}){}", high ? "high in the net" : "low in the net",
 			fastEnough ? "with pace" : "slow", Units::Speed(shot.shotSpeed), shot.flipShot ? ", shot off the flip" : "");
+		gradeSeg(resultIdx, g.overall >= 5 ? Grade::Clean : g.overall == 4 ? Grade::Solid : Grade::Sloppy, why);
+		g.overallWhy = why;
+	}
+	else if (shot.type == ShotType::CeilingShot)
+	{
+		// 3 = a goal; 4 = off the flip you kept (fell off, didn't jump) with the ball kept off the ceiling;
+		// 5 = a 4 that's also quick from the wall touch, hard, and high or toward a corner
+		bool clean = shot.ceilFlipShot && !shot.ceilJumped && !shot.ballHitCeiling;
+		bool placed = shot.reachesGoalLine && (shot.crossZ >= kCeilingShot.upperZ || std::fabs(shot.crossX) >= kCsFiveCornerX);
+		bool quick = shot.ceilWallTouch < 0 || shot.ceilPlaySec <= kCsFivePlay;
+		bool great = clean && placed && quick && shot.shotSpeed >= kCeilingShot.fast;
+		g.overall = clean ? (great ? 5 : 4) : 3;
+		std::string why = std::format("Ceiling shot goal, {} ({})", shot.shotSpeed >= kCeilingShot.fast ? "hard" : "soft", Units::Speed(shot.shotSpeed));
+		if (great) why += ", off the flip, quick and well placed";
+		else if (clean) why += ", off the flip you kept";
+		else if (shot.ceilJumped && !shot.ballHitCeiling) why += " (jumped off the ceiling)";
+		else if (shot.ballHitCeiling) why += " (the ball hit the ceiling first)";
+		else why += " (not off the flip)";
 		gradeSeg(resultIdx, g.overall >= 5 ? Grade::Clean : g.overall == 4 ? Grade::Solid : Grade::Sloppy, why);
 		g.overallWhy = why;
 	}

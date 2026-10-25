@@ -16,6 +16,8 @@ namespace
 	constexpr float kWinZLo = kBallR;
 	constexpr float kWinZHi = kGoalH - kBallR;
 	constexpr float kCarMaxSpeed = 2300.0f;
+	constexpr float kCeilingCarZ = 1900.0f;      // wheels down this high = on the ceiling (it's at 2,044)
+	constexpr float kBallOnCeilingZ = 1945.0f;   // ball center this high = touching the ceiling
 	constexpr float kGroundShotMaxZ = 350.0f;   // ball center below this at the touch = a ground shot (jump, flip and low aerial shots included; raised from 260 on Oct 9 ratings)
 	// Fastest average acceleration seen toward the ball in recorded reps (98th percentile = 1300).
 	constexpr float kReachAccel = 1300.0f;
@@ -393,6 +395,61 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 		s.airDribble = false;
 	}
 
+	// Ceiling shot: an aerial where you came down off the ceiling into the shot, touching nothing else on the way.
+	// (A reset, an air dribble or a backboard read after the ceiling stays that mechanic.)
+	if (s.type == ShotType::Aerial)
+	{
+		auto onCeiling = [&](int i) { return fr[i].onGround && fr[i].carZ > kCeilingCarZ; };
+		int leave = -1;
+		for (int i = k - 1; i >= std::max(1, k - 480); i--)
+		{
+			if (onCeiling(i)) { leave = i; break; }
+			if (OnSurface(fr[i])) break;      // landed on the floor or a wall after the ceiling: not a drop off it
+		}
+		if (leave >= 0)
+		{
+			int land = leave;
+			while (land > 0 && onCeiling(land - 1)) land--;
+			int wt = -1;
+			for (int i = land; i >= std::max(1, s.startTick); i--) if (fr[i].touch && !fr[i - 1].touch) { wt = i; break; }
+			s.ceilingShot = true;
+			s.type = ShotType::CeilingShot;
+			s.ceilLand = land;
+			s.ceilLeave = leave;
+			s.ceilWallTouch = wt;
+			int jumpOff = -1;
+			for (int i = std::max(1, leave - 3); i <= std::min(k - 1, leave + 6); i++)
+				if (fr[i].jump && !fr[i - 1].jump) { jumpOff = i; break; }
+			s.ceilJumped = jumpOff >= 0;
+			for (int i = (jumpOff >= 0 ? jumpOff + 1 : leave + 1); i <= k && i < n; i++)
+				if (fr[i].jump && !fr[i - 1].jump && !OnSurface(fr[i])) { s.ceilFlip = i; break; }
+			s.ceilFlipShot = s.ceilFlip >= 0 && k - s.ceilFlip >= 0 && k - s.ceilFlip <= 40;
+			const int from = wt >= 0 ? wt : land;
+			for (int i = from; i < k; i++)
+			{
+				s.ballApexZ = std::max(s.ballApexZ, fr[i].ballZ);
+				if (fr[i].ballZ > kBallOnCeilingZ) s.ballHitCeiling = true;
+			}
+			if (wt >= 0)
+			{
+				const Frame& w = fr[wt - 1];
+				s.wallTouchCarSpeed = std::sqrt(w.carVX * w.carVX + w.carVY * w.carVY + w.carVZ * w.carVZ);
+				const Frame& b = fr[std::min(n - 1, wt + 3)];
+				s.wallTouchBallSpeed = std::sqrt(b.ballVX * b.ballVX + b.ballVY * b.ballVY + b.ballVZ * b.ballVZ);
+				s.ceilPlaySec = (k - wt) / 120.0f;
+			}
+			// Lined up: how far to the side of your line of travel (when you left the ceiling) you met the ball.
+			// Distance along the line is just how far you carried forward on the way down.
+			const Frame& m = fr[std::min(k, n - 1)];
+			const Frame& lv = fr[leave];
+			float ox = m.ballX - lv.carX, oy = m.ballY - lv.carY;
+			float vx = lv.carVX, vy = lv.carVY, vl = std::sqrt(vx * vx + vy * vy);
+			s.leaveOffset = vl > 200.0f ? std::fabs(ox * vy - oy * vx) / vl : 0.0f;
+			s.ceilSec = (leave - land + 1) / 120.0f;
+			s.dropSec = (k - leave) / 120.0f;
+		}
+	}
+
 	// The flip behind the shot: your flick off a dribble, or the flip you used off a reset
 	if (s.dribble && s.flickJumpTick >= 0)
 	{
@@ -402,6 +459,8 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 	}
 	else if (s.type == ShotType::FlipReset)
 		s.flipTick = s.resetDodge;
+	else if (s.type == ShotType::CeilingShot)
+		s.flipTick = s.ceilFlip;
 	if (s.flipTick >= 0) s.flipKind = ClassifyFlip(fr[s.flipTick], s.flipRight);
 
 	s.valid = true;

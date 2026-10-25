@@ -111,7 +111,7 @@ namespace
 		{
 		case Habit::NoseLate:
 			return t == ShotType::DoubleTap ? SegKind::Read : t == ShotType::AirDribble ? SegKind::AirDribble
-				: t == ShotType::FlipReset ? SegKind::Flip : SegKind::Flight;
+				: t == ShotType::FlipReset ? SegKind::Flip : t == ShotType::CeilingShot ? SegKind::Drop : SegKind::Flight;
 		case Habit::BoostFrac: return SegKind::Flight;
 		case Habit::FlickChoice: return SegKind::Flick;
 		default: return t == ShotType::Dribble ? SegKind::Flick : SegKind::Contact;

@@ -459,6 +459,11 @@ namespace
 				p.key = KeyEvent::WallTap; p.keyReal = shot.backboardTick; p.seg = SegKind::Setup; p.what = "the setup touch";
 				p.s = shot.setupTouchTick - 30;
 			}
+			else if (shot.type == ShotType::CeilingShot && shot.ceilWallTouch >= 0)
+			{
+				p.key = KeyEvent::Touch; p.keyReal = shot.ceilWallTouch; p.seg = SegKind::Approach; p.what = "the wall touch";
+				p.s = shot.ceilWallTouch - 40;
+			}
 			else if (shot.type == ShotType::AirDribble && shot.airFirstTouch >= 0)
 			{
 				p.key = KeyEvent::Touch; p.keyReal = shot.airFirstTouch; p.seg = SegKind::AirDribble; p.what = "the first touch";
@@ -484,7 +489,7 @@ namespace
 		p.closer = p.flip >= 0 ? p.flip - 10 : p.k - 16;
 		if (p.s < 0 || p.closer <= p.s + 4) p.closer = -1;
 		// The breakdown line: the flick or flip that made the shot, or the contact / read
-		p.seg = shot.dribble ? SegKind::Flick : shot.type == ShotType::FlipReset ? SegKind::Flip : SegKind::Contact;
+		p.seg = shot.dribble ? SegKind::Flick : shot.type == ShotType::FlipReset ? SegKind::Flip : shot.type == ShotType::CeilingShot ? SegKind::Drop : SegKind::Contact;
 		return p;
 	}
 }

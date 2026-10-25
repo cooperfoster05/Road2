@@ -42,6 +42,7 @@ namespace
 		case ShotType::Dribble:    return { { Habit::CarSpeed, -1, 150.0f } };
 		case ShotType::AirDribble: return { { Habit::NoseLate, +1, 8.0f }, { Habit::CarSpeed, -1, 150.0f } };
 		case ShotType::FlipReset:  return { { Habit::NoseLate, +1, 8.0f } };
+		case ShotType::CeilingShot: return { { Habit::NoseLate, +1, 8.0f } };
 		}
 		return {};
 	}
@@ -67,6 +68,7 @@ namespace
 		case ShotType::Dribble:    return "dribble";
 		case ShotType::AirDribble: return "air dribble";
 		case ShotType::FlipReset:  return "flip reset";
+		case ShotType::CeilingShot: return "ceiling shot";
 		default:                   return "aerial";
 		}
 	}

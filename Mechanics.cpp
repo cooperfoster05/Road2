@@ -41,6 +41,12 @@ namespace
 				  { SegKind::Reset, "Reset", "your wheels touch the ball and give you your flip back" },
 				  { SegKind::Flip, "Flip", "you use the flip" },
 				  { SegKind::Contact, "Shot", "the flip hits the ball toward the goal" } } },
+			{ ShotType::CeilingShot, "Ceiling shot",
+				"A ceiling shot: onto the ceiling and down into the shot, falling off it if you didn't jump, and shot off the flip if yours was.",
+				{ { SegKind::Approach, "Setup", "the wall touch sends the ball up and you get onto the ceiling" },
+				  { SegKind::Ceiling, "Ceiling", "you're on the ceiling, lined up with the ball" },
+				  { SegKind::Drop, "Drop", "you fall off and flip into the ball" },
+				  { SegKind::Contact, "Shot", "the flip hits the ball toward the goal" } } },
 		};
 		return t;
 	}
@@ -137,6 +143,11 @@ bool Mechanics::SameMechanic(const ShotAnalysis& yours, const std::vector<Frame>
 		// Kept about as close as you kept it (your own air dribbles sit around a third of the air time within 230)
 		if (line.airCloseFrac < std::min(0.5f, 0.75f * yours.airCloseFrac)) return no("the ball wasn't kept close");
 		return true;
+	case ShotType::CeilingShot:
+		if (!line.ceilingShot) return no("didn't come off the ceiling");
+		if (!yours.ceilJumped && line.ceilJumped) return no("jumped off the ceiling");
+		if (yours.ceilFlipShot && !line.ceilFlipShot) return no("the flip wasn't used on the shot");
+		return true;
 	case ShotType::FlipReset:
 		if (!line.flipReset) return no("no reset");
 		if (yours.flipShot && (line.resetDodge < 0 || !line.flipShot)) return no("the flip wasn't used on the shot");
@@ -161,6 +172,8 @@ int Mechanics::StepsPassed(const MechanicSpec& spec, const ShotAnalysis& a, bool
 		case SegKind::AirDribble: ok = a.airDribble && a.airTouches >= 2; break;
 		case SegKind::Reset:      ok = a.flipReset; break;
 		case SegKind::Flip:       ok = a.flipReset && a.resetDodge >= 0; break;
+		case SegKind::Ceiling:    ok = a.ceilingShot; break;
+		case SegKind::Drop:       ok = a.ceilingShot && a.ceilFlip >= 0; break;
 		case SegKind::Contact:    ok = wentIn; break;
 		default:                  ok = true; break;   // getting there: passed if a later step happened
 		}
@@ -179,6 +192,7 @@ int Mechanics::MechanicStart(const ShotAnalysis& a, int frameCount)
 	case ShotType::DoubleTap:  if (a.setupTouchTick >= 0) t = a.setupTouchTick - 60; break;
 	case ShotType::AirDribble: if (a.airStart >= 0) t = a.airStart - 30; break;
 	case ShotType::FlipReset:  if (a.resetTakeoff >= 0) t = a.resetTakeoff - 30; break;
+	case ShotType::CeilingShot: t = a.ceilWallTouch >= 0 ? a.ceilWallTouch - 30 : a.ceilLand - 30; break;
 	case ShotType::Dribble:    if (a.dribbleStart >= 0) t = a.dribbleStart - 30; break;
 	default: break;
 	}

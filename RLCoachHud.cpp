@@ -219,7 +219,7 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 			if (viewerShot.valid && viewerShot.type != ShotType::Aerial)
 				add(std::format("Graded as a {}", viewerShot.type == ShotType::Ground ? "ground shot"
 					: viewerShot.type == ShotType::Dribble ? "dribble" : viewerShot.type == ShotType::AirDribble ? "air dribble"
-					: viewerShot.type == ShotType::FlipReset ? "flip reset" : "double tap"), 150, 160, 178, true);
+					: viewerShot.type == ShotType::FlipReset ? "flip reset" : viewerShot.type == ShotType::CeilingShot ? "ceiling shot" : "double tap"), 150, 160, 178, true);
 			add(viewerGrade.overallWhy, 150, 160, 178, true);
 		}
 		if (viewerGrade.biggestFix >= 0)

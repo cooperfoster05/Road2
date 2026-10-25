@@ -13,7 +13,7 @@ struct V3
 };
 
 // Which grader a rep goes to, decided from the shot touch
-enum class ShotType { Aerial = 0, Ground = 1, DoubleTap = 2, Dribble = 3, AirDribble = 4, FlipReset = 5 };
+enum class ShotType { Aerial = 0, Ground = 1, DoubleTap = 2, Dribble = 3, AirDribble = 4, FlipReset = 5, CeilingShot = 6 };
 
 // An air dribble that ended in your final touch: touches in a row in the air, no landing, ball kept close
 struct AirDribbleSpan
@@ -127,6 +127,23 @@ struct ShotAnalysis
 	bool  resetAfterAirDribble = false;   // air dribble touches before the reset
 	float resetClosing = 0;       // how fast you were moving into the ball just before the reset (- = it fell onto you)
 	float resetKeptMax = 0;       // farthest the ball got from your car between the reset and the shot
+
+	// Ceiling shots (Oct 24): onto the ceiling, fall off it, then the shot (usually off the flip you kept by not jumping)
+	bool  ceilingShot = false;
+	int   ceilLand = -1;          // first tick of your last stretch on the ceiling
+	int   ceilLeave = -1;         // last tick on the ceiling
+	int   ceilWallTouch = -1;     // your last touch before getting onto the ceiling (the wall touch that set it up; -1 = none)
+	bool  ceilJumped = false;     // jumped off the ceiling (coaches: fall off it so you keep the flip)
+	int   ceilFlip = -1;          // the flip you used after leaving the ceiling (-1 = never flipped)
+	bool  ceilFlipShot = false;   // the final touch came off that flip (within 1/3 s of starting it)
+	bool  ballHitCeiling = false; // the ball touched the ceiling between the wall touch and your shot
+	float ballApexZ = 0;          // the ball's highest point between the wall touch and your shot
+	float wallTouchCarSpeed = 0;  // your speed into the wall touch
+	float wallTouchBallSpeed = 0; // the ball's speed off it
+	float leaveOffset = 0;        // how far to the side of your line of travel off the ceiling you met the ball
+	float ceilSec = 0;            // time on the ceiling
+	float dropSec = 0;            // from leaving the ceiling to the shot
+	float ceilPlaySec = 0;        // from the wall touch to the shot
 
 	// The flip that made the shot: the flick on a dribble, the flip off the reset on a flip reset
 	int   flipTick = -1;

@@ -41,7 +41,7 @@ namespace Mechanics
 
 	// Where "from the start of the mechanic" begins: half a second before the setup touch of a double tap, as you
 	// leave the ground for an air dribble or a flip reset, as the ball settles for a dribble, the ball starting to
-	// move for a ground shot or an aerial. Used by "Engine from here" defaults, the benchmarks and (later) lessons.
+	// move for a ground shot or an aerial, just before the wall touch for a ceiling shot. Used by "Engine from here" defaults, the benchmarks and (later) lessons.
 	int MechanicStart(const ShotAnalysis& a, int frameCount);
 
 	// Fastest shot a line may hit and still count (a slow tip or dink doesn't), by mechanic

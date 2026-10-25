@@ -581,7 +581,7 @@ void RLCoach::GradeFinishedRep(const RepSummary& s)
 	lastRepGradeLines.push_back({ { { Grader::OverallName(g.overall), orr, og, ob }, { std::format("  {}{}", g.overallWhy,
 		!shot.valid || shot.type == ShotType::Aerial ? "" : shot.type == ShotType::Ground ? "  [ground shot]"
 		: shot.type == ShotType::Dribble ? "  [dribble]" : shot.type == ShotType::AirDribble ? "  [air dribble]"
-		: shot.type == ShotType::FlipReset ? "  [flip reset]" : "  [double tap]"), 150, 160, 178 } }, g.overall });
+		: shot.type == ShotType::FlipReset ? "  [flip reset]" : shot.type == ShotType::CeilingShot ? "  [ceiling shot]" : "  [double tap]"), 150, 160, 178 } }, g.overall });
 
 	// One line of segment grades, each grade in its own color (same colors as the rep viewer)
 	PanelGradeLine chips;

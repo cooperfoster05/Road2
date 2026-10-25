@@ -74,6 +74,7 @@ static std::string ReviewMechanic(int shotType)
 	case 3: return "DRIBBLE";
 	case 4: return "AIR DRIBBLE";
 	case 5: return "FLIP RESET";
+	case 6: return "CEILING SHOT";
 	default: return "AERIAL";
 	}
 }
@@ -93,6 +94,8 @@ static std::vector<ReviewStat> ReviewStats(const ShotAnalysis& s, bool wentIn, c
 	out.push_back({ "Shot speed", num(Units::ConvertSpeed(s.shotSpeed)), Units::SpeedLabel() });
 	if (s.type == ShotType::DoubleTap)
 		out.push_back({ "Off the wall", num(s.reboundDist), "300+ for a 5" });
+	else if (s.type == ShotType::CeilingShot && s.ceilWallTouch >= 0)
+		out.push_back({ "Wall to shot", std::format("{:.2f} s", s.ceilPlaySec), "3.0 s or less for a 5" });
 	else if (s.type != ShotType::Ground && ref.valid)
 	{
 		const float vs = (s.touchTick - s.startTick) / 120.0f - ref.touchSec;
@@ -1934,9 +1937,9 @@ void RLCoach::RenderWindow()
 		else
 		{
 			Pill(std::to_string(ag->second.overall), GradeColor(ag->second.overall), 26.0f * S);
-			static const char* kinds[6] = { "", "ground", "dbl tap", "dribble", "air drib", "reset" };
+			static const char* kinds[7] = { "", "ground", "dbl tap", "dribble", "air drib", "reset", "ceiling" };
 			const int st = ag->second.shotType;
-			if (st >= 1 && st <= 5) { ImGui::SameLine(); ImGui::TextDisabled("%s", kinds[st]); }
+			if (st >= 1 && st <= 6) { ImGui::SameLine(); ImGui::TextDisabled("%s", kinds[st]); }
 		}
 		ImGui::NextColumn();
 		if (ImGui::GetCursorPosY() < rowTop + rowH) ImGui::SetCursorPosY(rowTop + rowH);   // keep every row the same height
