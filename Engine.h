@@ -9,6 +9,7 @@
 #include "RepData.h"
 #include "ShotBook.h"
 #include <atomic>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,13 @@ struct EngineResult
 	int   tries = 0;
 	float ms = 0;
 	std::string note;
+
+	// The simplifier (Oct 24): the line as inputs a person could copy (holds, a few stick positions), shown in place of
+	// the perfect one when it scores at the same grade and holds up the same way
+	bool  simplified = false;
+	int   inputChanges = 0, inputChangesPerfect = 0;   // how many times the inputs change, simplified vs perfect
+	std::vector<std::pair<int, int>> fineSpans;   // where the engine's fine inputs had to stay ("fine aim here"): first, last tick
+	std::vector<Frame> perfectFrames;   // the perfect line, when the shown one is simplified
 };
 
 namespace Engine

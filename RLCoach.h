@@ -328,8 +328,10 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	int   practiceFrozenTicks = 0;   // ticks since this attempt was (re)frozen: input is ignored for the first few
 	float practiceSavedGameSpeed = 1.0f;
 	std::vector<PanelGradeLine> practiceResultLines;
-	std::vector<Frame> practiceRefFrames;    // your best rep on this shot, drawn faintly
+	std::vector<Frame> practiceRefFrames;    // your best rep on this shot (or the line you're practicing), drawn faintly
 	std::string practiceRefLabel;
+	bool practiceGhostLine = false;          // practiceRefFrames is a line to follow: its inputs show as the controller ghost
+	std::vector<std::pair<int, int>> practiceFineSpans;   // where that line's inputs are fine aim (ticks)
 
 	// Copies for the viewer window
 	std::atomic<bool>  uiPracticeActive{ false };
@@ -371,6 +373,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::shared_ptr<int>   padTheme;          // rlcoach_pad_theme: 0 dark, 1 light
 	std::shared_ptr<int>   padJump, padBoost, padSlide, padRollLeft, padRollRight;   // rlcoach_pad_<action>: button index
 	std::shared_ptr<int>   targetHitbox;      // rlcoach_target_hitbox: 0 off, 1 for your touch, 2 for the earliest intercept
+	std::shared_ptr<float> ghostOpacity;      // rlcoach_ghost_opacity: the controller ghost when practicing a line, 0-1 (0 = off)
 	void RegisterLookCvars();
 	void RenderLookSettings();
 	void RenderPadSettings();

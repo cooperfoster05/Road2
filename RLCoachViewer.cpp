@@ -560,6 +560,10 @@ namespace
 		r.note = e.note;
 		r.tries = e.tries;
 		r.ms = e.ms;
+		r.simplified = e.simplified;
+		r.inputChanges = e.inputChanges;
+		r.inputChangesPerfect = e.inputChangesPerfect;
+		r.fineSpans = e.fineSpans;
 		return r;
 	}
 
@@ -798,6 +802,7 @@ void RLCoach::PracticeLine(int slot)
 	std::vector<Frame> alt;
 	int start = 0;
 	std::string cue;
+	std::vector<std::pair<int, int>> fine;
 	{
 		std::lock_guard<std::mutex> lock(whatIfMutex);
 		const WhatIfResult& r = lineResult[slot];
@@ -805,12 +810,15 @@ void RLCoach::PracticeLine(int slot)
 		alt = r.frames;
 		start = r.startTick;
 		cue = r.cue;
+		fine = r.fineSpans;
 	}
 	if (viewerShowing >= 0) ViewerShowLine(-1, true);
 	PracticeStartAt(start);
 	if (practiceState == PracticeState::Off) return;
 	practiceRefFrames = std::move(alt);
 	practiceRefLabel = std::string(slot == kBestLine ? "Faint line: the engine's line (" : "Faint line: the smallest fix (") + cue + ")";
+	practiceGhostLine = true;   // its inputs show on the controller as the ghost
+	practiceFineSpans = std::move(fine);
 }
 
 // While watching your rep: the last line you looked at, faintly in cyan from where it changes. While watching a
@@ -912,6 +920,9 @@ namespace
 		std::string what, cue, detail, gradeWhy, fixes, note;
 		int grade = 0, held = 0, heldOf = 0, startTick = -1, depth = 1;
 		bool wentIn = false, mine = false;
+		bool simplified = false;
+		int changes = 0, changesPerfect = 0;
+		std::vector<int> fineAt;
 		bool shows() const { return mine && (status == WhatIfStatus::Found || status == WhatIfStatus::CleanerWayIn); }
 	};
 
@@ -1060,6 +1071,9 @@ void RLCoach::RenderWindow()
 				v.status = r.status; v.point = r.point; v.what = r.what; v.cue = r.cue; v.detail = r.detail; v.gradeWhy = r.gradeWhy;
 				v.fixes = r.fixes; v.note = r.note; v.grade = r.grade; v.held = r.held; v.heldOf = r.heldOf; v.startTick = r.startTick;
 				v.depth = r.depth; v.wentIn = r.wentIn;
+				v.simplified = r.simplified; v.changes = r.inputChanges; v.changesPerfect = r.inputChangesPerfect;
+				v.fineAt.clear();
+				for (const auto& f : r.fineSpans) v.fineAt.push_back(f.first);
 			}
 		}
 		const bool busy = whatIfBusy;
@@ -1544,9 +1558,18 @@ void RLCoach::RenderWindow()
 					else
 					{
 						label(fixTab ? (v.point == WhatIfPoint::KeyMoment ? ("A DIFFERENT WAY INTO " + Upper(v.what)).c_str() : "THE LEAST YOU COULD CHANGE")
-							: "THE ENGINE'S LINE", kMuted);
+							: v.simplified ? "THE ENGINE'S LINE, SIMPLIFIED" : "THE ENGINE'S LINE", kMuted);
 						headline(v.cue);
 						subline(std::format("{}. It scored from {} of {} slightly different starts.", v.gradeWhy, v.held, v.heldOf));
+						if (!fixTab && v.simplified)
+						{
+							std::string fineText;
+							for (size_t k = 0; k < v.fineAt.size() && k < 3; k++) fineText += std::format("{}{:.2f} s", k ? ", " : "", v.fineAt[k] / 120.0f);
+							subline(std::format("Copyable: {} input changes (the perfect version needs {}).{}", v.changes, v.changesPerfect,
+								fineText.empty() ? std::string() : " Fine aim at " + fineText + "."));
+						}
+						else if (!fixTab && v.changesPerfect > 0)
+							subline(std::format("Perfect inputs ({} changes): a simpler version didn't hold up, so this one is hard to copy.", v.changesPerfect));
 					}
 					if (ImGui::IsItemHovered() && !v.detail.empty()) ImGui::SetTooltip("%s", v.detail.c_str());
 					ImGui::Dummy(ImVec2(0, 4));

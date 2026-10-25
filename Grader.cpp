@@ -35,12 +35,15 @@ namespace
 	// Dribbles: only closeMiss is used (goals are graded by the flick, below). Tuned on Coop's 163 rated free play
 	// dribbles (Oct 10), 88% exact: a miss within 140 was a 2 (almost all of them just over the bar).
 	constexpr Cutoffs kDribble{ 140.0f, 350.0f, 2400.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
-	// Air dribbles: closeMiss, and upperZ = high enough in the net for a 4 (details below)
-	constexpr Cutoffs kAirDribble{ 150.0f, 480.0f, 2400.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
+	// Air dribbles: closeMiss, and upperZ = high enough in the net for a 4 (details below). 480 -> 460 on Oct 24:
+	// matched Coop's ratings on 3 more of his 88 rated air dribble goals
+	constexpr Cutoffs kAirDribble{ 150.0f, 460.0f, 2400.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
 	// Flip resets, tuned on Coop's 117 rated flip resets (Oct 11): closeMiss, upperZ for a 4, and fast = the speed
 	// a 4 needs. Most of his goals were 3s; height in the net (and not dribbling it in slowly) made the 4s.
 	constexpr Cutoffs kFlipReset{ 250.0f, 450.0f, 1700.0f, 0.20f, 3.5f, 1.6f, 0.05f, 200.0f, 3500.0f };
 	constexpr float kFrGreatZ = 560.0f, kFrGreatSpeed = 2400.0f;   // a 5: top of the net and hard
+	constexpr float kFrClosingClean = 150.0f;  // reset: moving into the ball at least this fast = Clean
+	constexpr float kFrLostBall = 700.0f;      // after the reset the ball got farther than this from your car = lost it
 	const Cutoffs& For(ShotType t)
 	{
 		return t == ShotType::Ground ? kGround : t == ShotType::DoubleTap ? kDoubleTap : t == ShotType::Dribble ? kDribble
@@ -63,6 +66,8 @@ namespace
 	constexpr float kAdCornerX = 580.0f;       // 5: this far from the middle of the goal at the line...
 	constexpr float kAdSoftPush = 500.0f;      // ...off touches averaging this much push or less (carried, not hit)
 	constexpr int   kAdLongTouches = 5;
+	constexpr float kAdPopClean = 950.0f;      // setup: popped off the wall at or below this (about 46% up)
+	constexpr float kAdPopLate = 1230.0f;      // past this (60% up) you've fallen behind the ball
 	constexpr float kAdLongSec = 4.5f;
 	Grade FromAirControl(int touches, float push)
 	{
@@ -100,11 +105,30 @@ namespace
 	// down from above the goal doesn't count against it.
 	constexpr float kDtFivePace = 0.65f, kDtFiveOffWall = 300.0f, kDtSideAngle = 35.0f;
 
-	// First-pass setup and read grades for double taps (refine once there are more rated double taps)
-	Grade FromBackboardSpot(float z, float absX)
+	// Double tap setup (Oct 24, from the coaching research and Coop's rated double taps): a high spot on the
+	// backboard, not past the middle toward the far side when you came from a side, and not so wide it's outside
+	// the goal (his setups past ~1,800 from the middle were all 1s). Hit too hard (fast into the board and it came
+	// 1,500+ off the wall before you got there) = Sloppy: coaches warn the rebound runs away from you.
+	constexpr float kDtSideCarX = 800.0f;      // the setup touch this far from the middle = you came from a side
+	constexpr float kDtFarSideClean = 600.0f;  // a Clean spot can be at most this far past the middle, toward the far side
+	constexpr float kDtTooHardSpeed = 2600.0f, kDtTooHardRebound = 1500.0f;
+	Grade FromBackboardSpot(const ShotAnalysis& shot, std::string& note)
 	{
-		if (z >= 500.0f && z <= 1300.0f && absX <= 1600.0f) return Grade::Clean;
-		if (z >= 300.0f && z <= 1700.0f && absX <= 2400.0f) return Grade::Solid;
+		const float z = shot.backboardZ, ax = std::fabs(shot.backboardX);
+		const bool fromSide = std::fabs(shot.setupCarX) >= kDtSideCarX;
+		const float nearX = fromSide ? shot.backboardX * (shot.setupCarX > 0.0f ? 1.0f : -1.0f) : ax;   // - = far side
+		if (shot.intoBoardSpeed >= kDtTooHardSpeed && shot.reboundDist >= kDtTooHardRebound)
+		{
+			note = std::format(" (hit it too hard: it came {:.0f} off the wall before you got there)", shot.reboundDist);
+			return Grade::Sloppy;
+		}
+		if (ax > 1800.0f) { note = " (too wide: outside the goal)"; return z >= 300.0f && z <= 1700.0f && ax <= 2000.0f ? Grade::Sloppy : Grade::Costly; }
+		if (fromSide && nearX < -1200.0f) { note = " (crossed way over to the far side)"; return Grade::Sloppy; }
+		if (z >= 500.0f && z <= 1300.0f && ax <= 1600.0f && nearX >= -kDtFarSideClean) return Grade::Clean;
+		if (fromSide && nearX < -kDtFarSideClean) note = " (past the middle, toward the far side)";
+		else if (z < 500.0f) note = " (low on the board)";
+		else if (z > 1300.0f) note = " (high on the board)";
+		if (z >= 300.0f && z <= 1700.0f) return Grade::Solid;
 		return Grade::Sloppy;
 	}
 	Grade FromReadTime(float sec)
@@ -266,13 +290,20 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		const char* surface = shot.tapSurface == 2 ? "the ceiling" : shot.tapSurface == 3 ? "the top of the wall" : "the backboard";
 		float ax = std::fabs(shot.backboardX);
 		if (shot.tapSurface == 1)
-			gradeSeg(setupIdx, FromBackboardSpot(shot.backboardZ, ax),
-				std::format("Sent it to the backboard {:.0f} high, {:.0f} from the middle", shot.backboardZ, ax));
+		{
+			std::string note;
+			Grade sg = FromBackboardSpot(shot, note);
+			const bool fromSide = std::fabs(shot.setupCarX) >= kDtSideCarX;
+			const char* side = !fromSide || ax < 150.0f ? "from the middle"
+				: (shot.backboardX > 0.0f) == (shot.setupCarX > 0.0f) ? "toward your side" : "toward the far side";
+			gradeSeg(setupIdx, sg, std::format("Sent it to the backboard {:.0f} high, {:.0f} {}{}", shot.backboardZ, ax, side, note));
+		}
 		else
 			gradeSeg(setupIdx, Grade::Solid, std::format("Sent it off {} ({:.0f} high)", surface, shot.backboardZ));
 		int readIdx = findSeg(SegKind::Read, shotTouch);
 		float readSec = (shot.touchTick - shot.backboardTick) / 120.0f;
-		gradeSeg(readIdx, FromReadTime(readSec), std::format("Hit it {:.2f}s after it came off {}", readSec, surface));
+		gradeSeg(readIdx, FromReadTime(readSec), std::format("Hit it {:.2f}s after it came off {} (you were {:.0f} from where you met it when it bounced)",
+			readSec, surface, shot.meetDist));
 	}
 
 	// ---- Dribble: the carry, then the flick ----
@@ -301,6 +332,23 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 	// ---- Air dribble: how well you carried it ----
 	if (shot.type == ShotType::AirDribble)
 	{
+		// The setup (Oct 24, coaching research): pop it off the wall low (roughly a third to under half way up;
+		// past 60% coaches say take the ceiling shot instead) and jump right after the pop so you don't fall behind.
+		// Off the ground: hit it and jump together.
+		if (shot.popTick >= 0)
+		{
+			const float wallFrac = shot.popZ / 2044.0f;
+			Grade hg = !shot.popOnWall || shot.popZ <= kAdPopClean ? Grade::Clean : shot.popZ <= kAdPopLate ? Grade::Solid : Grade::Sloppy;
+			const float jClean = 0.15f, jSolid = shot.popOnWall ? 0.25f : 0.30f;
+			Grade jg = shot.popJumpSec <= jClean ? Grade::Clean : shot.popJumpSec <= jSolid ? Grade::Solid : Grade::Sloppy;
+			Grade pg = Worse(hg, jg);
+			std::string why = shot.popOnWall
+				? std::format("Popped it off the wall {:.0f} high ({:.0f}% up), left the wall {:.2f}s later", shot.popZ, wallFrac * 100.0f, shot.popJumpSec)
+				: std::format("Popped it off the ground, jumped {:.2f}s after the touch", shot.popJumpSec);
+			if (hg == Grade::Sloppy) why += " (too high up the wall: you're behind it, a ceiling shot fits better)";
+			else if (jg == Grade::Sloppy) why += " (jumped late: jump right after the pop)";
+			gradeSeg(findSeg(SegKind::Approach, 0), pg, why);
+		}
 		int before = shot.airTouches - 1;
 		std::string why = std::format("{} touch{} in the air before the shot, {} of push each on average, ball close to your car {:.0f}% of the time",
 			before, before == 1 ? "" : "es", Units::Speed(shot.airImpulse), shot.airCloseFrac * 100.0f);
@@ -314,8 +362,13 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 	if (shot.type == ShotType::FlipReset)
 	{
 		float toReset = (shot.resetTick - shot.resetTakeoff) / 120.0f;
-		gradeSeg(findSeg(SegKind::Reset, 0), Grade::Solid,
-			std::format("Got the reset {:.2f}s after leaving the {}{}", toReset, shot.resetAfterAirDribble ? "wall or ground, off an air dribble" : "wall or ground",
+		// The reset (Oct 24, coaching research): fly into the ball, don't let it fall onto you. When in its arc you
+		// get it isn't graded: guides disagree, and Coop's best resets came off a falling ball.
+		Grade rg = shot.resetClosing >= kFrClosingClean ? Grade::Clean : shot.resetClosing >= 0.0f ? Grade::Solid : Grade::Sloppy;
+		gradeSeg(findSeg(SegKind::Reset, 0), rg,
+			std::format("Got the reset {:.2f}s after leaving the {}, moving into the ball at {}{}{}", toReset,
+				shot.resetAfterAirDribble ? "wall or ground, off an air dribble" : "wall or ground", Units::Speed(std::max(0.0f, shot.resetClosing)),
+				shot.resetClosing < 0.0f ? " (it fell onto you: fly into it)" : shot.resetClosing < kFrClosingClean ? " (barely: fly into it more)" : "",
 				shot.resets > 1 ? std::format(" ({} resets this play)", shot.resets) : std::string()));
 		float held = shot.resetDodge >= 0 ? (shot.resetDodge - shot.resetTick) / 120.0f : 0.0f;
 		Grade fg = shot.flipShot ? Grade::Clean : shot.resetDodge >= 0 ? Grade::Sloppy : Grade::Costly;
@@ -323,6 +376,8 @@ RepGrade Grader::GradeRep(const std::vector<Frame>& fr, const RepSegments& segs,
 		std::string why = shot.flipShot ? std::format("Held the flip {:.2f}s, then hit the shot with a {}", held, flipName)
 			: shot.resetDodge >= 0 ? std::format("Used a {} {:.2f}s after the reset, but not into the shot", flipName, held)
 			: "Never used the flip you got back";
+		why += shot.resetKeptMax > kFrLostBall ? std::format(" (the ball got {:.0f} away from you after the reset)", shot.resetKeptMax)
+			: std::format(" (kept the ball within {:.0f} after the reset)", shot.resetKeptMax);
 		gradeSeg(findSeg(SegKind::Flip, 0), fg, why);
 	}
 

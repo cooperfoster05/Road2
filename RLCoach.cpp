@@ -426,7 +426,7 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 			// (up to 6 s more), so late goals aren't saved as misses
 			const Frame& lf = frames.back();
 			float dirY = lf.ballVY >= 0.0f ? 1.0f : -1.0f;
-			float toLine = 5120.0f - lf.ballY * dirY;
+			float toLine = 5215.0f - lf.ballY * dirY;   // a goal counts once the whole ball is over the line (center past ~5,213)
 			float tLine = std::fabs(lf.ballVY) > 1.0f ? toLine / std::fabs(lf.ballVY) : 1e9f;
 			bool rollingIn = std::fabs(lf.ballVY) > 300.0f && toLine > 0.0f && tLine < 6.0f
 				&& std::fabs(lf.ballX + lf.ballVX * tLine) < 950.0f;

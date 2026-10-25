@@ -8,6 +8,7 @@
 #include "ShotBook.h"
 #include "Segmenter.h"
 #include <atomic>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,11 @@ struct WhatIfResult
 
 	std::string fixes;        // CleanerWayIn: what it fixes, in words ("Closing on the ball at 34 km/h -> 12 km/h")
 	std::string note;         // how the search went (for the hover)
+
+	// The engine's line only (Oct 24): shown as the simplified, copyable version when that holds up
+	bool  simplified = false;
+	int   inputChanges = 0, inputChangesPerfect = 0;
+	std::vector<std::pair<int, int>> fineSpans;   // where the engine's fine inputs had to stay ("fine aim here")
 	int   depth = 1;
 	int   tries = 0;
 	float ms = 0;

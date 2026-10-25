@@ -119,8 +119,10 @@ const char* ControllerOverlay::ButtonName(int b, PadStyle st)
 }
 
 void ControllerOverlay::Draw(CanvasWrapper& c, const PadInput& in, PadStyle st, PadTheme theme, const PadLayout& lay,
-	float x, float y, float s)
+	float x, float y, float s, const PadInput* ghost, float ghostAlpha, bool fineAim)
 {
+	const Rgba kGhost{ 56, 189, 248, static_cast<unsigned char>(std::clamp(ghostAlpha, 0.0f, 1.0f) * 255.0f) };
+	const bool showGhost = ghost && kGhost.a > 8;
 	const bool ps = st == PadStyle::PS4;
 	const Theme& T = theme == PadTheme::Light ? kLightTheme : kDarkTheme;
 	auto X = [&](float u) { return x + u * s; };
@@ -137,6 +139,16 @@ void ControllerOverlay::Draw(CanvasWrapper& c, const PadInput& in, PadStyle st, 
 	press(lay.slide, in.handbrake);
 	press(lay.rollLeft, !in.handbrake && in.roll < -0.5f);
 	press(lay.rollRight, !in.handbrake && in.roll > 0.5f);
+	bool ghostDown[PB_Count] = {};
+	if (showGhost)
+	{
+		auto gpress = [&](int b, bool on) { if (on && b > PB_None && b < PB_Count) ghostDown[b] = true; };
+		gpress(lay.jump, ghost->jump);
+		gpress(lay.boost, ghost->boost);
+		gpress(lay.slide, ghost->handbrake);
+		gpress(lay.rollLeft, !ghost->handbrake && ghost->roll < -0.5f);
+		gpress(lay.rollRight, !ghost->handbrake && ghost->roll > 0.5f);
+	}
 
 	// Triggers behind the body, filling from the bottom: reverse (L2/LT) and throttle (R2/RT)
 	for (int side = 0; side < 2; side++)
@@ -152,6 +164,12 @@ void ControllerOverlay::Draw(CanvasWrapper& c, const PadInput& in, PadStyle st, 
 			float fh = th * val;
 			RBox(tx, ty + th - fh, tw, fh, std::min(10.0f, fh * 0.5f), left ? Rgba{ 255, 150, 90, 255 } : Rgba{ 90, 220, 140, 255 });
 		}
+		if (showGhost)
+		{
+			// The line's trigger: a cyan bar at its level
+			float g = std::max(0.0f, std::min(1.0f, left ? -ghost->throttle : ghost->throttle));
+			if (g > 0.02f) RBox(tx - 2.0f, ty + th - th * g - 1.5f, tw + 4.0f, 3.0f, 1.5f, kGhost);
+		}
 		const char* lbl = ps ? (left ? "L2" : "R2") : (left ? "LT" : "RT");
 		TextCentered(c, X(tx + tw * 0.5f), Y(ty + 11.0f), lbl, 0.7f * s, val > 0.5f ? kInk : T.label);
 	}
@@ -160,6 +178,8 @@ void ControllerOverlay::Draw(CanvasWrapper& c, const PadInput& in, PadStyle st, 
 	float bumpY = ps ? 30.0f : 32.0f;
 	RBox(34, bumpY, 56, 10, 5, down[PB_L1] ? kAccent : T.part);
 	RBox(150, bumpY, 56, 10, 5, down[PB_R1] ? kAccent : T.part);
+	if (ghostDown[PB_L1]) { RingU(62, bumpY + 5, 9, 2.0f, kGhost); }
+	if (ghostDown[PB_R1]) { RingU(178, bumpY + 5, 9, 2.0f, kGhost); }
 
 	// Body: dark rim, bevel, face
 	if (ps)
@@ -216,6 +236,20 @@ void ControllerOverlay::Draw(CanvasWrapper& c, const PadInput& in, PadStyle st, 
 	};
 	stick(lsx, lsy, stickX, in.pitch, down[PB_L3]);
 	stick(rsx, rsy, 0, 0, down[PB_R3]);
+	if (showGhost)
+	{
+		// The line's left stick: a hollow ring where its cap would be, joined to yours when they differ
+		float gx = std::fabs(ghost->steer) >= std::fabs(ghost->yaw) ? ghost->steer : ghost->yaw, gy = ghost->pitch;
+		float gm = std::sqrt(gx * gx + gy * gy);
+		if (gm > 1.0f) { gx /= gm; gy /= gm; }
+		float ix = stickX, iy = in.pitch, im = std::sqrt(ix * ix + iy * iy);
+		if (im > 1.0f) { ix /= im; iy /= im; }
+		// (it travels further than your cap and is smaller, so the two stay apart when they disagree)
+		const float gkx = lsx + gx * 10, gky = lsy + gy * 10, ykx = lsx + ix * 7, yky = lsy + iy * 7;
+		if (std::hypot(gkx - ykx, gky - yky) > 3.0f) Line(c, X(ykx), Y(yky), X(gkx), Y(gky), 1.5f * s, Rgba{ kGhost.r, kGhost.g, kGhost.b, static_cast<unsigned char>(kGhost.a / 2) });
+		RingU(gkx, gky, 9, 2.2f, kGhost);
+		if (gm > 0.08f) Line(c, X(lsx), Y(lsy), X(lsx + gx * 16), Y(lsy + gy * 16), 1.5f * s, kGhost);
+	}
 
 	// Face buttons
 	DiscU(fx, fy, 24, T.face);
@@ -237,6 +271,7 @@ void ControllerOverlay::Draw(CanvasWrapper& c, const PadInput& in, PadStyle st, 
 			DiscU(bx, by, 8, T.well);
 			FaceSymbol(c, b, st, X(bx), Y(by), s, col);
 		}
+		if (ghostDown[b]) RingU(bx, by, 11.5f, 2.2f, kGhost);   // the line presses this one now
 	}
 
 	// Air roll tag under the pad
@@ -245,4 +280,10 @@ void ControllerOverlay::Draw(CanvasWrapper& c, const PadInput& in, PadStyle st, 
 		const char* tag = in.handbrake ? "FREE AIR ROLL" : (in.roll < 0 ? "AIR ROLL LEFT" : "AIR ROLL RIGHT");
 		TextCentered(c, X(120), Y(170), tag, 0.7f * s, Rgba{ 190, 150, 255, 255 }, true);
 	}
+	if (showGhost && std::fabs(ghost->roll) > 0.3f && (std::fabs(in.roll) <= 0.3f || (ghost->roll < 0) != (in.roll < 0)))
+	{
+		const char* tag = ghost->handbrake ? "LINE: FREE AIR ROLL" : (ghost->roll < 0 ? "LINE: AIR ROLL LEFT" : "LINE: AIR ROLL RIGHT");
+		TextCentered(c, X(120), Y(std::fabs(in.roll) > 0.3f ? 184 : 170), tag, 0.7f * s, kGhost, true);
+	}
+	if (showGhost && fineAim) TextCentered(c, X(120), Y(-8), "FINE AIM", 0.7f * s, kGhost, true);
 }

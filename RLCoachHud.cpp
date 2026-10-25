@@ -95,9 +95,23 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 	{
 		Vector2 screen = canvas.GetSize();
 		PadLayout layout{ *padJump, *padBoost, *padSlide, *padRollLeft, *padRollRight };
+		// Practicing a line: its inputs at this moment are the ghost (where you are in the rep's time)
+		PadInput ghost;
+		bool haveGhost = false, fineAim = false;
+		if (practiceState != PracticeState::Off && practiceGhostLine && *ghostOpacity > 0.01f && !practiceRefFrames.empty())
+		{
+			const int t = practiceStartTick + static_cast<int>(practiceLive.size());
+			if (t >= 0 && t < static_cast<int>(practiceRefFrames.size()))
+			{
+				const Frame& g = practiceRefFrames[t];
+				ghost = PadInput{ g.throttle, g.steer, g.pitch, g.yaw, g.roll, g.jump, g.boost, g.handbrake, -1.0f };
+				haveGhost = true;
+				for (const auto& f : practiceFineSpans) fineAim = fineAim || (t >= f.first && t <= f.second);
+			}
+		}
 		ControllerOverlay::Draw(canvas, pad, *inputDisplay == 3 ? PadStyle::Xbox : PadStyle::PS4,
 			*padTheme == 1 ? PadTheme::Light : PadTheme::Dark, layout,
-			*padX * screen.X, *padY * screen.Y, *padScale * (screen.Y / 1080.0f));
+			*padX * screen.X, *padY * screen.Y, *padScale * (screen.Y / 1080.0f), haveGhost ? &ghost : nullptr, *ghostOpacity, fineAim);
 	}
 
 	if (!*hudEnabled) return;
@@ -419,6 +433,7 @@ void RLCoach::RegisterLookCvars()
 	padRollRight = std::make_shared<int>(PB_None);
 	targetHitbox = std::make_shared<int>(1);
 	padTheme = std::make_shared<int>(0);
+	ghostOpacity = std::make_shared<float>(0.7f);
 
 	cvarManager->registerCvar("rlcoach_hud_compact", "0", "Panel shows only the essentials", true, true, 0, true, 1).bindTo(hudCompact);
 	cvarManager->registerCvar("rlcoach_hud_scale", "1", "Panel size", true, true, 0.6f, true, 2.0f).bindTo(hudScale);
@@ -436,6 +451,7 @@ void RLCoach::RegisterLookCvars()
 	cvarManager->registerCvar("rlcoach_pad_roll_left", "0", "Controller button for air roll left", true, true, 0, true, PB_Count - 1).bindTo(padRollLeft);
 	cvarManager->registerCvar("rlcoach_pad_roll_right", "0", "Controller button for air roll right", true, true, 0, true, PB_Count - 1).bindTo(padRollRight);
 
+	cvarManager->registerCvar("rlcoach_ghost_opacity", "0.7", "Learn: the controller ghost when practicing a line (0 = off, 1 = solid)", true, true, 0, true, 1).bindTo(ghostOpacity);
 	cvarManager->registerCvar("rlcoach_target_hitbox", "1", "Target car outline: 0 off, 1 for your touch, 2 for the earliest intercept", true, true, 0, true, 2).bindTo(targetHitbox);
 
 	showUngraded = std::make_shared<bool>(false);
@@ -495,6 +511,12 @@ void RLCoach::RenderPadSettings()
 	float px = *padX * 100.0f, py = *padY * 100.0f;
 	if (ImGui::SliderFloat("Controller left/right", &px, 0.0f, 95.0f, "%.0f%%")) setCvar("rlcoach_pad_x", px / 100.0f);
 	if (ImGui::SliderFloat("Controller up/down", &py, 0.0f, 95.0f, "%.0f%%")) setCvar("rlcoach_pad_y", py / 100.0f);
+
+	// Learn: the line you're practicing, shown on the controller (a cyan ring where its stick is, rings on its buttons)
+	ImGui::Spacing();
+	ImGui::TextDisabled("Learn: when you practice a line from the rep viewer, its inputs show on the controller");
+	int ghost = static_cast<int>(std::lround(*ghostOpacity * 100.0f));
+	if (ImGui::SliderInt("Controller ghost", &ghost, 0, 100, ghost == 0 ? "off" : "%d%%")) setCvar("rlcoach_ghost_opacity", ghost / 100.0f);
 
 	ImGui::Spacing();
 	ImGui::TextDisabled("Your button layout: match your in-game binds (Settings > Controls)");

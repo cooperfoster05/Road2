@@ -169,6 +169,7 @@ void RLCoach::PracticePickReference()
 {
 	practiceRefFrames.clear();
 	practiceRefLabel.clear();
+	practiceGhostLine = false;   // your own best rep: drawn faintly, no controller ghost
 	if (!writer || practiceItem.shotKey.empty()) return;
 
 	std::unordered_map<std::string, int> autos;
@@ -464,6 +465,7 @@ void RLCoach::PracticeExit()
 	uiPracticeTarget = -1;
 	practiceLive.clear();
 	practiceRefFrames.clear();
+	practiceGhostLine = false;
 
 	ServerWrapper server = gameWrapper->GetGameEventAsServer();
 	if (!server.IsNull()) server.SetGameSpeed(practiceSavedGameSpeed);

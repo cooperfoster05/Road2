@@ -89,6 +89,10 @@ struct ShotAnalysis
 	float reboundDist = 0;        // how far the ball had come off the wall when you hit it again (a pinch against the wall is ~0)
 	float tapAngle = 0;           // where you hit it from: 0 = straight out in front of the goal, 90 = right beside it (tight)
 	float tapPlaySec = 0;         // how fast the whole play was: leaving the ground (or wall) to the final touch
+	// Coaching-research checks (Oct 24): where you came from, how hard it went in, and where you were when it came off
+	float setupCarX = 0;          // your car's sideways position at the setup touch (the side you came from)
+	float intoBoardSpeed = 0;     // ball speed just before it hit the backboard
+	float meetDist = 0;           // when it came off the wall: your distance to where you then met it
 
 	// Dribbles: the ball rode on your roof into the final touch (the flick). Shot numbers above are measured
 	// once the ball has left your car.
@@ -107,6 +111,11 @@ struct ShotAnalysis
 	float airSec = 0;             // from leaving the ground/wall to the final touch
 	float airImpulse = 0;         // average push per touch before the final one (small = carried, big = hit)
 	float airCloseFrac = 0;       // share of the air time the ball stayed within 230 of your car
+	// The setup (Oct 24): the touch that popped it off the wall or ground, before you left the surface
+	int   popTick = -1;           // -1 = no pop found (caught it already in the air)
+	float popZ = 0;               // ball height at the pop
+	bool  popOnWall = false;      // popped off the wall (else the ground)
+	float popJumpSec = 0;         // from the pop to leaving the surface
 
 	// Flip resets: your wheels touched the ball in the air and gave you your flip back before the final touch
 	bool  flipReset = false;
@@ -116,6 +125,8 @@ struct ShotAnalysis
 	int   resetDodge = -1;        // the flip you used after the reset (-1 = never flipped)
 	bool  flipShot = false;       // the final touch came off that flip (within 1/3 s of starting it)
 	bool  resetAfterAirDribble = false;   // air dribble touches before the reset
+	float resetClosing = 0;       // how fast you were moving into the ball just before the reset (- = it fell onto you)
+	float resetKeptMax = 0;       // farthest the ball got from your car between the reset and the shot
 
 	// The flip that made the shot: the flick on a dribble, the flip off the reset on a flip reset
 	int   flipTick = -1;

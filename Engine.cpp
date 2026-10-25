@@ -3211,6 +3211,202 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 		return Run(A, C, fr, s, none, maxTick, ref, nudge, &c);
 	};
 	static const int kShift[kNudges] = { -2, 2, -1, 1, 0, 0 };
+
+	// ---- The simplifier (Oct 24, Phase 3 item 8): the winning line as inputs a person could copy ----
+	// The engine nudges the sticks every tick. This turns its inputs into holds (the stick held in one place for at
+	// least 0.1 s, snapped to a few positions), cleans up boost and powerslide taps, and keeps jumps exactly. Then it
+	// re-plays them: the simplified line has to score at the same grade and hold up from the nudged starts, like any
+	// line. Where it drifts from the engine's line, the engine's own fine inputs go back in just before the drift
+	// ("fine aim here"), and it tries again; after a few patches it also starts from a finer snap. If nothing works,
+	// the perfect line is shown, as before. It never changes a grade.
+	struct Simple
+	{
+		bool ok = false, reproduced = false;
+		SimRun run;
+		std::vector<CarControls> ctl;
+		int held = 0, changes = 0, changesBefore = 0, fineSpots = 0, rounds = 0, level = 0;
+		std::vector<std::pair<int, int>> fineSpans;   // stretches (first and last tick) where the engine's fine inputs stay
+	};
+	auto simplify = [&](const SimRun& w, const Pick& pk) -> Simple {
+		Simple res;
+		const int n = static_cast<int>(w.frames.size());
+		const int end = std::min(n - 1, w.eventTick >= 0 ? w.eventTick : n - 1);
+		if (end - s < 12 || (pk.cemIdx >= 0 && cemBest[pk.cemIdx].rerun)) return res;   // step-search lines re-aim as they replay
+		std::vector<CarControls> orig(end + 1);
+		for (int i = s; i <= end; i++)
+		{
+			const Frame& f = w.frames[i];
+			CarControls& c = orig[i];
+			c.throttle = f.throttle; c.steer = f.steer; c.pitch = f.pitch; c.yaw = f.yaw; c.roll = f.roll;
+			c.jump = f.jump; c.boost = f.boost; c.handbrake = f.handbrake;
+		}
+		const std::vector<int>* resets = (pk.cemIdx >= 0 && !cemBest[pk.cemIdx].bounds.empty()) ? &cemBest[pk.cemIdx].bounds : nullptr;
+		Bot::Plan none;
+		none.arriveTick = (real.valid ? real.touchTick : s) + 120;
+		if (pk.botIdx >= 0) none.arriveTick = tried[pk.botIdx].o.plan.arriveTick;
+		auto play = [&](const std::vector<CarControls>& c, int nudge, int shift) {
+			if (shift == 0) return Run(arena.get(), car, fr, s, none, maxTick, ref, nudge, &c, resets);
+			std::vector<CarControls> sh = c;
+			for (int i = s; i < static_cast<int>(sh.size()); i++) sh[i] = c[std::clamp(i - shift, s, static_cast<int>(c.size()) - 1)];
+			return Run(arena.get(), car, fr, s, none, maxTick, ref, nudge, &sh);
+		};
+		auto good = [&](const SimRun& r) { return r.wentIn && r.grade.overall >= w.grade.overall && styleOk(r); };
+		// The perfect inputs have to replay as the line first (otherwise there's nothing to compare against)
+		{
+			SimRun base = play(orig, 0, 0);
+			res.rounds++;
+			if (!good(base)) return res;
+			res.reproduced = true;
+		}
+		// How many times the inputs change: the stick (as one), throttle, roll, boost and powerslide toggles, jump presses
+		auto countChanges = [&](const std::vector<CarControls>& c, float eps) {
+			int k = 0;
+			for (int i = s + 1; i <= end; i++)
+			{
+				const CarControls& a = c[i - 1], &b = c[i];
+				k += std::fabs(a.steer - b.steer) > eps || std::fabs(a.pitch - b.pitch) > eps || std::fabs(a.yaw - b.yaw) > eps;
+				k += std::fabs(a.throttle - b.throttle) > eps;
+				k += std::fabs(a.roll - b.roll) > eps;
+				k += a.boost != b.boost;
+				k += a.handbrake != b.handbrake;
+				k += b.jump && !a.jump;
+			}
+			return k;
+		};
+		res.changesBefore = countChanges(orig, 0.02f);
+
+		static const float kTol[4] = { 0.30f, 0.18f, 0.10f, 0.05f };       // how far a hold may stray from the engine's stick
+		static const float kGrid[4] = { 1.0f / 3.0f, 0.25f, 1.0f / 6.0f, 0.0f };   // the positions a hold snaps to (0 = no snap)
+		constexpr int kMinHold = 12;   // 0.1 s
+		std::vector<char> fine(end + 1, 0);
+		auto build = [&](int level) {
+			std::vector<CarControls> c = orig;
+			auto fit = [&](std::initializer_list<float CarControls::*> axes) {
+				int i = s;
+				bool havePrev = false;
+				while (i <= end)
+				{
+					if (fine[i] == 2) { i++; havePrev = false; continue; }   // the engine's own inputs, exactly
+					// Fine stretches: short, precise holds (no snapping); everywhere else the level's holds
+					const bool precise = fine[i] == 1;
+					const float tol = precise ? 0.04f : kTol[level], grid = precise ? 0.0f : kGrid[level];
+					const int minHold = precise ? 3 : kMinHold;
+					auto snap = [&](float v) { return grid > 0.0f ? std::clamp(std::round(v / grid) * grid, -1.0f, 1.0f) : v; };
+					// Extend the hold while every axis stays within the tolerance
+					std::vector<float> lo, hi;
+					for (auto ax : axes) { lo.push_back(orig[i].*ax); hi.push_back(orig[i].*ax); }
+					int j = i;
+					while (j + 1 <= end && fine[j + 1] == fine[i])
+					{
+						bool fits = true;
+						size_t a = 0;
+						for (auto ax : axes)
+						{
+							const float v = orig[j + 1].*ax;
+							if (std::max(hi[a], v) - std::min(lo[a], v) > 2.0f * tol) { fits = false; break; }
+							a++;
+						}
+						if (!fits) break;
+						a = 0;
+						for (auto ax : axes) { lo[a] = std::min(lo[a], orig[j + 1].*ax); hi[a] = std::max(hi[a], orig[j + 1].*ax); a++; }
+						j++;
+					}
+					if (j - i + 1 < minHold && havePrev)
+						for (int k = i; k <= j; k++) for (auto ax : axes) c[k].*ax = c[i - 1].*ax;   // too short to do by hand: keep holding
+					else
+					{
+						size_t a = 0;
+						for (auto ax : axes)
+						{
+							float mean = 0.0f;
+							for (int k = i; k <= j; k++) mean += orig[k].*ax;
+							mean = snap(mean / (j - i + 1));
+							for (int k = i; k <= j; k++) c[k].*ax = mean;
+							a++;
+						}
+					}
+					havePrev = true;
+					i = j + 1;
+				}
+			};
+			fit({ &CarControls::steer, &CarControls::yaw, &CarControls::pitch });   // the left stick
+			fit({ &CarControls::throttle });
+			fit({ &CarControls::roll });
+			// Boost and powerslide: fill gaps under 8 ticks, drop taps under 5 (jumps stay exactly as the engine did them)
+			auto clean = [&](bool CarControls::* b) {
+				for (int pass = 0; pass < 2; pass++)
+					for (int i = s; i <= end;)
+					{
+						if (fine[i] == 2 || (c[i].*b) != (pass == 0 ? false : true)) { i++; continue; }
+						int j = i;
+						while (j + 1 <= end && fine[j + 1] != 2 && (c[j + 1].*b) == (c[i].*b)) j++;
+						const bool inside = i > s && j < end && (c[i - 1].*b) != (c[i].*b) && (c[j + 1].*b) != (c[i].*b);
+						if (inside && (pass == 0 ? j - i + 1 < 8 : j - i + 1 < 5))
+							for (int k = i; k <= j; k++) c[k].*b = !(c[k].*b);
+						i = j + 1;
+					}
+			};
+			clean(&CarControls::boost);
+			clean(&CarControls::handbrake);
+			return c;
+		};
+		// The first moment a run drifts from the engine's line (car 30 uu or 8 degrees off, or the ball 30 uu off)
+		auto drift = [&](const SimRun& r) {
+			const int m = std::min({ static_cast<int>(r.frames.size()), n, end + 1 });
+			auto ang = [](int a, int b) { int d = std::abs(a - b) % 65536; return std::min(d, 65536 - d); };
+			for (int i = s + 1; i < m; i++)
+			{
+				const Frame& a = r.frames[i], &b = w.frames[i];
+				const float dc = std::hypot(a.carX - b.carX, a.carY - b.carY, a.carZ - b.carZ);
+				const float db = std::hypot(a.ballX - b.ballX, a.ballY - b.ballY, a.ballZ - b.ballZ);
+				if (dc > 30.0f || db > 30.0f || ang(a.carYaw, b.carYaw) > 1456 || ang(a.carPitch, b.carPitch) > 1456 || ang(a.carRoll, b.carRoll) > 1456) return i;
+			}
+			return m - 1;
+		};
+		int level = 0, patches = 0;
+		for (int round = 0; round < 16 && !cancelled(); round++)
+		{
+			std::vector<CarControls> c = build(level);
+			SimRun r = play(c, 0, 0);
+			res.rounds++;
+			if (good(r))
+			{
+				int held = 0;
+				for (int j = 1; j <= kNudges; j++)
+				{
+					SimRun r2 = play(c, 300 + j, kShift[j - 1]);
+					res.rounds++;
+					held += r2.wentIn && r2.grade.overall >= w.grade.overall - 1;
+					if (j - held > 2) break;
+				}
+				if (held >= 4)
+				{
+					res.ok = true; res.run = std::move(r); res.ctl = std::move(c); res.held = held; res.level = level;
+					break;
+				}
+				if (level < 3) { level++; continue; }   // it scores but it's fragile: a finer snap
+				break;
+			}
+			// Fine inputs for the 0.25 s before it drifted: precise holds first, the engine's exact inputs if it drifts there again
+			const int d = drift(r);
+			const char mark = fine[std::min(end, d)] >= 1 ? 2 : 1;
+			for (int k = std::max(s, d - 30); k <= std::min(end, d); k++) fine[k] = std::max(fine[k], mark);
+			if (++patches % 4 == 0 && level < 3) level++;
+		}
+		if (res.ok)
+		{
+			res.changes = countChanges(res.ctl, 0.001f);
+			for (int i = s; i <= end; i++)
+				if (fine[i] && (i == s || !fine[i - 1]))
+				{
+					int j = i;
+					while (j + 1 <= end && fine[j + 1]) j++;
+					res.fineSpots++;
+					res.fineSpans.push_back({ i, j });
+				}
+		}
+		return res;
+	};
 	// Your takeoff (only if you started on the ground) and boost (from the button, since free play refills it)
 	const bool startedGrounded = ShotGeometry::OnSurface(fr[s]);
 	int yourTakeoff = -1;
@@ -3301,6 +3497,22 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 		const bool sameGrade = win.grade.overall == out.realGrade;
 		if (kStepDebug) { for (size_t q = pi2 + 1; q < picks.size(); q++) { const Pick& p2 = picks[q]; int g = p2.botIdx >= 0 ? tried[p2.botIdx].run.grade.overall : cemBest[p2.cemIdx].run.grade.overall; dbgUnreached += g >= 4; } }
 		if (kStepDebug) fprintf(stderr, "PICKSTAT shipped grade %d expect %d | 4-5 candidates %d: wrong kind %d, fragile %d, replay/style %d, after the pick or unchecked %d | checked %d\n", win.grade.overall, expect, dbgCand, dbgKind, dbgFragile, dbgWin, dbgUnreached, checked);
+		// The same line as inputs a person could copy, if it still holds up (the shown line, then; the perfect one is kept)
+		Simple simp = simplify(win, pk);
+		if (std::getenv("ENG_SIMPDBG"))
+			fprintf(stderr, "SIMP ok %d reproduced %d grade %d level %d rounds %d changes %d -> %d fine %d held %d (perfect held %d) src %s\n", (int)simp.ok, (int)simp.reproduced,
+				win.grade.overall, simp.level, simp.rounds, simp.changesBefore, simp.changes, simp.fineSpots, simp.held, held,
+				pk.botIdx >= 0 ? "bot" : (cemBest[pk.cemIdx].rerun ? "step" : "cem"));
+		out.inputChangesPerfect = simp.changesBefore;
+		if (simp.ok && simp.changes < simp.changesBefore)
+		{
+			out.simplified = true;
+			out.inputChanges = simp.changes;
+			out.fineSpans = simp.fineSpans;
+			out.perfectFrames = win.frames;
+			win.frames = std::move(simp.run.frames);
+			held = simp.held;
+		}
 		out.status = EngineStatus::Found;
 		out.grade = win.grade.overall;
 		out.wentIn = win.wentIn;

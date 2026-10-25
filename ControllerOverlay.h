@@ -32,7 +32,10 @@ namespace ControllerOverlay
 	constexpr float kWidth = 240.0f;    // size at scale 1
 	constexpr float kHeight = 178.0f;
 
+	// ghost (Oct 24, Learn): what the line you're practicing presses right now, drawn in cyan over your pad at
+	// ghostAlpha (0-1): a hollow ring where its stick is, rings around the buttons it holds, a mark on the trigger.
+	// fineAim: the line's inputs are precise here ("FINE AIM" over the pad).
 	void Draw(CanvasWrapper& canvas, const PadInput& in, PadStyle style, PadTheme theme, const PadLayout& layout,
-		float x, float y, float scale);
+		float x, float y, float scale, const PadInput* ghost = nullptr, float ghostAlpha = 0.7f, bool fineAim = false);
 	const char* ButtonName(int button, PadStyle style);
 }

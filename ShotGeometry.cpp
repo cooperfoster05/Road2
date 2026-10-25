@@ -317,6 +317,12 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 			int left = -1;
 			for (int i = setup; i > 0; i--) if (OnSurface(fr[i])) { left = i; break; }
 			s.tapPlaySec = (k - (left >= 0 ? left : s.startTick)) / 120.0f;
+			s.setupCarX = fr[setup].carX;
+			const Frame& pre = fr[std::max(0, bb - 2)];
+			s.intoBoardSpeed = std::sqrt(pre.ballVX * pre.ballVX + pre.ballVY * pre.ballVY + pre.ballVZ * pre.ballVZ);
+			const Frame& meet = fr[std::min(k, n - 1)];
+			s.meetDist = std::sqrt((meet.ballX - b0.carX) * (meet.ballX - b0.carX) + (meet.ballY - b0.carY) * (meet.ballY - b0.carY)
+				+ (meet.ballZ - b0.carZ) * (meet.ballZ - b0.carZ));
 		}
 	}
 	if (s.dribble && !s.doubleTap) s.type = ShotType::Dribble;
@@ -340,6 +346,15 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 		s.flipShot = s.resetDodge >= 0 && k - s.resetDodge >= 0 && k - s.resetDodge <= 40;
 		AirDribbleSpan before = FindAirDribble(fr, s.resetTick - 1);
 		s.resetAfterAirDribble = before.valid;
+		const Frame& a0 = fr[std::max(0, s.resetTick - 3)];
+		float dx = a0.ballX - a0.carX, dy = a0.ballY - a0.carY, dz = a0.ballZ - a0.carZ;
+		float d = std::max(1.0f, std::sqrt(dx * dx + dy * dy + dz * dz));
+		s.resetClosing = ((a0.carVX - a0.ballVX) * dx + (a0.carVY - a0.ballVY) * dy + (a0.carVZ - a0.ballVZ) * dz) / d;
+		for (int i = s.resetTick; i < k && i < n; i++)
+		{
+			float ex = fr[i].ballX - fr[i].carX, ey = fr[i].ballY - fr[i].carY, ez = fr[i].ballZ - fr[i].carZ;
+			s.resetKeptMax = std::max(s.resetKeptMax, std::sqrt(ex * ex + ey * ey + ez * ez));
+		}
 	}
 
 	// Air dribble: a chain of touches in the air into the final one. A wall bounce before the chain started is
@@ -359,6 +374,16 @@ ShotAnalysis ShotGeometry::Analyze(const std::vector<Frame>& fr)
 			s.airSec = (k - a.start) / 120.0f;
 			s.airImpulse = a.avgImpulse;
 			s.airCloseFrac = a.closeFrac;
+			// The pop: your last touch from up to a second before leaving the surface
+			for (int i = std::min(n - 1, a.start + 3); i >= std::max(1, a.start - 120); i--)
+				if (fr[i].touch) { s.popTick = i; break; }
+			if (s.popTick >= 0 && s.popTick < a.firstTouch)
+			{
+				s.popZ = fr[s.popTick].ballZ;
+				s.popOnWall = fr[s.popTick - 1].onWall;
+				s.popJumpSec = (a.start - s.popTick) / 120.0f;
+			}
+			else s.popTick = -1;
 		}
 	}
 	if (s.flipReset && !s.dribble)
