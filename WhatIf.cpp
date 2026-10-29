@@ -1134,3 +1134,202 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 	out.ms = elapsed() * 1000.0f;
 	return out;
 }
+
+// ---- Timing windows (Oct 28) ----
+
+int WhatIf::TimingMs(int ticks)
+{
+	const float ms = ticks * 1000.0f / 120.0f;
+	return static_cast<int>(std::lround(ms / 5.0f)) * 5;
+}
+
+std::vector<TimingWindow> WhatIf::Timing(const std::vector<Frame>& fr, bool realIn, bool floorBeforeGoal, int eventTick,
+	const ShotReference& ref, int carBody, const std::atomic<bool>* cancel)
+{
+	std::vector<TimingWindow> out;
+	const int n = static_cast<int>(fr.size());
+	ShotAnalysis real = ShotGeometry::Analyze(fr);
+	if (!real.valid || real.touchTick < 32 || real.touchTick >= n) return out;
+	const int k = real.touchTick;
+	auto cancelled = [&]() { return cancel && cancel->load(); };
+
+	// The presses: the jump that left the surface for this shot (no landing between it and the touch), and the flip
+	struct Press { std::string what; int tick; int lowest; };
+	std::vector<Press> presses;
+	int J = -1;
+	for (int i = k; i >= 2; i--)
+	{
+		if (fr[i].jump && !fr[i - 1].jump && ShotGeometry::OnSurface(fr[i - 1]) && fr[i - 1].onGround) { J = i; break; }
+		if (i < k - 1 && fr[i].onGround && ShotGeometry::OnSurface(fr[i]) && !fr[i + 1].onGround && !fr[i + 1].jump) break;   // left a surface without jumping
+		if (k - i > 480) break;
+	}
+	if (J >= 0)
+	{
+		// The wheels stay on the surface for a few ticks after the press; a landing is only after you've left it
+		int left = J;
+		while (left < k && fr[left].onGround) left++;
+		bool landed = left >= k - 2;
+		for (int i = left + 2; i < k - 2 && !landed; i++) if (fr[i].onGround && ShotGeometry::OnSurface(fr[i])) landed = true;
+		if (landed) J = -1;
+	}
+	if (J >= 0)
+	{
+		const Frame& b = fr[J - 1];
+		std::string w = real.dribble ? "the flick jump" : b.carZ > 1900.0f ? "the jump off the ceiling" : b.onWall || b.carZ > 120.0f ? "the jump off the wall" : "the jump";
+		presses.push_back({ w, J, 2 });
+	}
+	int F = real.flipTick >= 0 ? real.flipTick : FindFlip(fr, k - 60, k);
+	if (F >= 0 && F <= k && (J < 0 || F > J + 3))
+	{
+		std::string w = real.dribble ? "the flick" : real.type == ShotType::FlipReset ? "the flip after the reset" : "the flip into the shot";
+		int lowest = real.type == ShotType::FlipReset && real.resetTick >= 0 ? real.resetTick + 3 : 2;
+		presses.push_back({ w, F, lowest });
+	}
+	if (presses.empty()) return out;
+
+	RepSegments realSegs = Segmenter::Split(fr, eventTick >= 0 ? eventTick : n - 1);
+	RepGrade realGrade = Grader::GradeRep(fr, realSegs, real, realIn, floorBeforeGoal, ref);
+
+	std::unique_ptr<Arena> arena(Arena::Create(GameMode::SOCCAR));
+	{
+		int held = 0;
+		float low = 1000.0f;
+		for (const Frame& f : fr) { held += f.boost ? 1 : 0; low = std::min(low, f.boostAmount); }
+		MutatorConfig mc = arena->GetMutatorConfig();
+		mc.boostUsedPerSecond = held > 30 && low >= 99.0f ? 0.0f : RLConst::BOOST_USED_PER_SECOND;
+		arena->SetMutatorConfig(mc);
+	}
+	Car* car = arena->AddCar(Team::BLUE, Body(carBody));
+	std::vector<CarControls> realCtl(n);
+	for (int i = 0; i < n; i++) realCtl[i] = ControlsOf(fr[i]);
+	const int maxTick = std::min(n + 600, k + 720);
+	auto matches = [&](const SimRun& r) { return r.wentIn == realIn && std::abs(r.grade.overall - realGrade.overall) <= 1; };
+	constexpr int kRange = 18;
+
+	for (const Press& p : presses)
+	{
+		if (cancelled()) break;
+		auto t0 = std::chrono::steady_clock::now();
+		TimingWindow w;
+		w.what = p.what;
+		w.tick = p.tick;
+		const int s = std::max(p.lowest, p.tick - 30);
+		if (p.tick - s < 6) continue;
+
+		// Gate, as in the what-if: your own inputs have to give your result at least 3 times in 7
+		int m = 0;
+		for (int j = 0; j <= kNudges && !cancelled(); j++) m += matches(Run(arena.get(), car, fr, s, realCtl, maxTick, ref, j)) ? 1 : 0;
+		w.testedLo = std::max(-kRange, s + 2 - p.tick);
+		w.testedHi = kRange;
+		if (m < 3) { w.ms = std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count() * 1000.0f; out.push_back(w); continue; }
+		w.checked = true;
+
+		const int P = p.tick;
+		w.result.assign(w.testedHi - w.testedLo + 1, -1);
+		std::vector<CarControls> c;
+		for (int d = w.testedLo; d <= w.testedHi && !cancelled(); d++)
+		{
+			const int at = P + d;
+			if (at <= s + 1 || at >= n - 1) continue;
+			c = realCtl;
+			if (d != 0)
+				for (int i = std::min(P, at); i < n; i++)
+				{
+					if (i >= at) { int src = i - d; c[i] = src < n ? realCtl[src] : CarControls(); }
+					else c[i] = realCtl[P - 1];
+				}
+			if (c[at - 1].jump) continue;   // still holding a jump there: no new press
+			int ok = 0, clean = 0;
+			for (int j = 0; j < 3; j++)
+			{
+				SimRun r = Run(arena.get(), car, fr, s, c, maxTick, ref, j);
+				const bool same = r.wentIn && Mechanics::SameMechanic(real, fr, r.shot, r.frames, s);
+				ok += same ? 1 : 0;
+				clean += same && r.grade.overall >= 4 ? 1 : 0;
+			}
+			w.result[d - w.testedLo] = static_cast<signed char>(clean >= 2 ? 2 : ok >= 2 ? 1 : 0);
+		}
+
+		// Your real press scored (you were there), whatever a replay of it says
+		if (realIn && 0 >= w.testedLo && 0 <= w.testedHi)
+			w.result[-w.testedLo] = static_cast<signed char>(std::max<int>(w.result[-w.testedLo], realGrade.overall >= 4 ? 2 : 1));
+
+		// The window: the run of shifts that work around your timing, or the nearest one. A lone miss between two
+		// that score counts as sim noise here (the strip still shows it).
+		auto raw = [&](int d) { return d >= w.testedLo && d <= w.testedHi && w.result[d - w.testedLo] >= 1; };
+		auto works = [&](int d) { return raw(d) || (d > w.testedLo && d < w.testedHi && w.result[d - w.testedLo] == 0 && raw(d - 1) && raw(d + 1)); };
+		int bestLo = 1, bestHi = 0, bestDist = 1 << 30;
+		for (int d = w.testedLo; d <= w.testedHi; d++)
+		{
+			if (!works(d) || works(d - 1)) continue;
+			int e = d;
+			while (works(e + 1)) e++;
+			int dist = d > 0 ? d : e < 0 ? -e : 0;
+			if (dist < bestDist) { bestDist = dist; bestLo = d; bestHi = e; }
+		}
+		w.lo = bestLo; w.hi = bestHi;
+		w.youIn = bestLo <= 0 && 0 <= bestHi;
+		w.loOpen = bestLo <= bestHi && bestLo == w.testedLo;
+		w.hiOpen = bestLo <= bestHi && bestHi == w.testedHi;
+		// The 4-5 part of it: the run nearest your timing
+		bestDist = 1 << 30;
+		for (int d = bestLo; d <= bestHi; d++)
+		{
+			auto clean = [&](int x) {
+				auto c2 = [&](int y) { return y >= bestLo && y <= bestHi && w.result[y - w.testedLo] == 2; };
+				return c2(x) || (x > bestLo && x < bestHi && c2(x - 1) && c2(x + 1));
+			};
+			if (!clean(d) || clean(d - 1)) continue;
+			int e = d;
+			while (clean(e + 1)) e++;
+			int dist = d > 0 ? d : e < 0 ? -e : 0;
+			if (dist < bestDist) { bestDist = dist; w.cleanLo = d; w.cleanHi = e; }
+		}
+		w.ms = std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count() * 1000.0f;
+		out.push_back(w);
+	}
+	return out;
+}
+
+std::string WhatIf::TimingText(const TimingWindow& w)
+{
+	if (!w.checked || w.lo > w.hi) return "";
+	std::string what = w.what;
+	if (!what.empty()) what[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(what[0])));
+	auto ms = [](int t) { return TimingMs(std::abs(t)); };
+	std::string line;
+	if (w.youIn && w.lo == 0 && w.hi == 0)
+		line = std::format("{}: only your exact timing scored; a tick (8 ms) either way missed.", what);
+	else if (w.youIn)
+	{
+		const int width = TimingMs(w.hi - w.lo + 1);
+		std::string earlier = w.lo == 0 ? "none" : std::format("{}{} ms", ms(w.lo), w.loOpen ? "+" : "");
+		std::string later = w.hi == 0 ? "none" : std::format("{}{} ms", ms(w.hi), w.hiOpen ? "+" : "");
+		line = std::format("{}: a {}{} ms window. Room to be earlier: {}; later: {}.", what, width, w.loOpen || w.hiOpen ? "+" : "", earlier, later);
+	}
+	else if (w.hi < 0)
+		line = std::format("{}: it goes in {}{} ms earlier.", what, w.hi == w.lo ? "" : std::format("{} to ", ms(w.hi)), std::format("{}{}", ms(w.lo), w.loOpen ? "+" : ""));
+	else
+		line = std::format("{}: it goes in {}{} ms later.", what, w.hi == w.lo ? "" : std::format("{} to ", ms(w.lo)), std::format("{}{}", ms(w.hi), w.hiOpen ? "+" : ""));
+	// Where the 4-5 is, when you're not already in it
+	if (w.cleanLo <= w.cleanHi && !(w.cleanLo <= 0 && 0 <= w.cleanHi))
+	{
+		if (w.cleanHi < 0) line += std::format(" A 4-5 at {} ms earlier.", w.cleanHi == w.cleanLo ? std::to_string(ms(w.cleanHi)) : std::format("{} to {}", ms(w.cleanHi), ms(w.cleanLo)));
+		else line += std::format(" A 4-5 at {} ms later.", w.cleanHi == w.cleanLo ? std::to_string(ms(w.cleanLo)) : std::format("{} to {}", ms(w.cleanLo), ms(w.cleanHi)));
+	}
+	return line;
+}
+
+std::string WhatIf::TimingShort(const TimingWindow& w)
+{
+	if (!w.checked || w.lo > w.hi) return "";
+	std::string what = w.what.rfind("the ", 0) == 0 ? w.what.substr(4) : w.what;
+	if (!what.empty()) what[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(what[0])));
+	auto ms = [](int t) { return TimingMs(std::abs(t)); };
+	if (w.youIn && w.lo == 0 && w.hi == 0) return what + ": only your exact timing scored";
+	if (w.youIn)
+		return std::format("{}: room {}{} ms early, {}{} ms late", what, ms(w.lo), w.loOpen ? "+" : "", ms(w.hi), w.hiOpen ? "+" : "");
+	if (w.hi < 0)
+		return std::format("{}: goes in {}{}{} ms earlier", what, w.hi == w.lo ? "" : std::format("{}-", ms(w.hi)), ms(w.lo), w.loOpen ? "+" : "");
+	return std::format("{}: goes in {}{}{} ms later", what, w.hi == w.lo ? "" : std::format("{}-", ms(w.lo)), ms(w.hi), w.hiOpen ? "+" : "");
+}

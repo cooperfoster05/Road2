@@ -19,6 +19,8 @@
 #include "Coach.h"
 #include "WhatIf.h"
 #include "ControllerOverlay.h"
+#include "Lesson.h"
+#include "Combine.h"
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -26,6 +28,7 @@
 #include <algorithm>
 #include <atomic>
 #include <map>
+#include <set>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -252,6 +255,8 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::mutex whatIfMutex;
 	WhatIfResult lineResult[2];           // latest result per slot (whatIfMutex)
 	std::string lineFile[2];              // the rep each slot is for (whatIfMutex)
+	std::vector<TimingWindow> timingResult;   // timing windows for the rep being watched (whatIfMutex)
+	std::string timingFile;               // the rep they are for (whatIfMutex)
 	std::atomic<int> uiWhatIfStart{ -1 }; // where the what-if would start in the rep being watched (-1 = no shot)
 	int viewerShowing = -1;               // game thread: -1 your rep, or the slot whose line is playing instead
 	std::vector<Frame> viewerRealFrames;  // your rep, kept while a line plays
@@ -265,7 +270,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::atomic<int> uiWhatIfKeyKind{ -1 };     // stage 2: the breakdown line (SegKind) of the key moment, -1 = none
 	std::string uiWhatIfKeyWhat;                // "the reset", "the setup touch"... (uiSegMutex)
 	std::atomic<bool> uiReviewPending{ false }; // the rep just opened and its searches haven't started yet
-	struct ReviewCacheEntry { std::string file; WhatIfResult line[2]; };
+	struct ReviewCacheEntry { std::string file; WhatIfResult line[2]; std::vector<TimingWindow> timing; };
 	std::vector<ReviewCacheEntry> reviewCache;  // the last few reps' results, so reopening one is instant (whatIfMutex)
 	// game thread: both searches for the rep being watched (or its cached results)
 	void StartReview();
@@ -352,8 +357,91 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void PracticeExit();
 	void PracticeSetSpeed(float speed);
 	void PracticePickReference();
+	// Free play's own goals are switched off while practicing (Oct 27: a goal's explosion and replay kept going after
+	// you reset the attempt and pulled you into it). Practice spots goals itself from where the ball is.
+	int  practiceGoalCvarSaved = -1;         // sv_soccar_enablegoal before practice (-1 = not changed)
+	void PracticeGoalsOff();
+	void PracticeGoalsRestore();
 	void DrawPracticeOverlay(CanvasWrapper& canvas);
 	Frame CaptureAt(CarWrapper& car, BallWrapper& ball, const ControllerInput& in, int tick, float wallMs);
+
+	// ---- Learn mode (RLCoachLearn.cpp, Oct 26): a lesson drives practice mode from its model rep ----
+	Lesson learnLesson;                  // game thread
+	LessonProgress learnProgress;
+	bool  learnActive = false;           // a lesson is open
+	int   learnStage = 0;
+	bool  learnAutoRamp = true;
+	bool  learnGhost = true;
+	float learnSpeed = 0.5f;
+	float learnSavedSpeed = 1.0f;        // game speed before the lesson opened
+	bool  learnWatching = false;         // the viewer is playing a lesson clip
+	int   learnWatchEnd = -1;            // ...and stops here
+	bool  learnWarmup = false;           // this attempt is the session's warm-up check
+	int   learnWarmupReturn = 0;
+	bool  learnWarmupOffered = false, learnWarmupDone = false;
+	std::vector<Frame> learnFull;        // the attempt in progress in model time: the model up to the stage start, then you
+	StageScore learnLast;
+	int   learnLastStage = -1;
+	float learnLastSpeed = 1.0f;
+	std::vector<std::string> learnEvents;   // "Speeding up to 75%", "Unlocked: ..."
+	std::string learnStatus;
+
+	// The lesson list (the skill tree)
+	struct UiLessonEntry
+	{
+		std::string id, name, blurb;
+		bool built = false, locked = false, completed = false;
+		int cleared = 0, stages = 0;
+		std::vector<std::string> missing;   // prerequisites not complete yet (names)
+	};
+	std::vector<UiLessonEntry> learnList;
+	bool learnInList = false;            // Learn is showing the lesson list
+	bool learnInListOpen = false;        // Learn is open at all (list or lesson)
+	std::set<std::string> learnWarmupSeen;   // lessons whose warm-up was offered this session
+	std::shared_ptr<bool> learnUnlockAll;    // rlcoach_learn_unlock_all
+
+	// What the window shows (copied under the lock by LearnPublish)
+	struct UiLearn
+	{
+		bool inList = true, unlockAll = false;
+		std::vector<UiLessonEntry> lessons;
+		bool loaded = false, practicing = false, watching = false, autoRamp = true, ghost = true;
+		bool warmupOffered = false, warmup = false, completed = false;
+		std::string name, status;
+		std::vector<std::string> stageNames;
+		std::vector<int> stageFirst, stageLast, best, passed;
+		std::vector<std::vector<int>> recent;
+		std::vector<LessonStep> steps;
+		int unlocked = 0, stage = 0, lastStage = -1;
+		float speed = 1.0f, lastSpeed = 1.0f;
+		StageScore last;
+		std::vector<std::string> events;
+	};
+	std::mutex uiLearnMutex;
+	UiLearn uiLearn;
+	std::atomic<bool> uiLearnMode{ false };   // the window shows the lesson instead of the rep list
+
+	void LearnOpen();                    // game thread, all of these: opens Learn on the lesson list
+	void LearnOpenLesson(const std::string& id);
+	void LearnSetUnlockAll(bool on);
+	void LearnClose();
+	void LearnSelectStage(int stage);
+	void LearnTry();
+	void LearnWatch(bool whole);
+	void LearnStopWatch();
+	void LearnSetSpeed(float speed);     // by hand: turns auto ramp off
+	void LearnSetAutoRamp(bool on);
+	void LearnSetGhost(bool on);
+	void LearnStartWarmup();
+	void LearnSkipWarmup();
+	void LearnBeginLive();               // practice just went live: start the model-time copy
+	bool LearnStageDone(const Frame& f); // practice tick: the stage is over (stages that end before the finish)
+	void LearnOnAttempt(const std::string& reason);   // from PracticeFinishAttempt
+	void LearnSaveProgress();
+	void LearnLogAttempt(const StageScore& sc);
+	void LearnPublish();
+	void RenderLearn();                  // render thread
+	void RenderLearnList();
 
 	// ---- Timing readout ----
 	std::shared_ptr<bool> showTiming;         // rlcoach_show_timing
@@ -377,6 +465,75 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void RegisterLookCvars();
 	void RenderLookSettings();
 	void RenderPadSettings();
+
+	// ---- The Combine (Oct 28, RLCoachCombine.cpp): short scored events run as seeded sets. First event: saves. ----
+	enum class CombinePhase { Off, Building, Countdown, Live, Result, Done };
+	CombinePhase combinePhase = CombinePhase::Off;
+	std::string combineEvent;                // "SV" saves, "RC" recovery
+	int combineLevel = 1;
+	uint32_t combineSeed = 0;
+	std::vector<Combine::SaveShot> combineShots;
+	std::vector<Combine::RecoveryThrow> combineThrows;
+	// Recovery, during a throw: first contact, whether the body hit first, when you were settled on your wheels
+	int combineRecContact = -1, combineRecSettle = -1, combineRecGround = 0;
+	bool combineRecBodyHit = false;
+	Vector combineRecPrevVel;
+	int CombineCount() const { return static_cast<int>(combineEvent == "RC" ? combineThrows.size() : combineShots.size()); }
+	int combineIndex = 0, combinePhaseTicks = 0, combineLiveTicks = 0, combineLastTouch = -1;
+	bool combineTouched = false;
+	std::vector<int> combinePoints;          // per shot (-1 = didn't count: the shot missed by itself)
+	std::vector<std::string> combineOutcomes;
+	std::string combineStatus;
+	std::map<std::string, int> combineBest;  // best score per level ("SV3") and per set code
+	std::thread combineGenThread;
+	std::atomic<bool> combineGenBusy{ false };
+	struct UiCombine
+	{
+		bool running = false, building = false, done = false;
+		std::string code, levelName, status, medal, event, item;   // event: "SAVES", item: "Shot" / "Throw"
+		int level = 1, shot = 0, shots = 0, points = 0, maxPoints = 0, best = -1;
+		std::vector<std::string> outcomes;
+		std::vector<int> pointsEach;           // per item (-1 = didn't count)
+		std::map<std::string, int> bests;
+	};
+	std::mutex uiCombineMutex;
+	UiCombine uiCombine;
+	std::atomic<bool> uiCombineMode{ false };   // the window shows the Combine page
+	int uiCombineLevel = 1;                     // render thread: the level picked on the page
+	std::string uiCombineCode;                  // render thread: the code box
+	void CombineOpen();
+	void CombineClose();
+	void CombineStart(const std::string& event, int level, uint32_t seed);   // any thread
+	void CombineBegin(std::vector<Combine::SaveShot> shots, std::vector<Combine::RecoveryThrow> throws);   // game thread, once built
+	void CombineExit();
+	void CombineTick(CarWrapper& car);
+	void CombinePlace(CarWrapper& car, BallWrapper& ball, bool frozen);
+	void CombineEndShot(int points, const std::string& what);
+	void CombinePublish();
+	void CombineLoadBests();
+	void CombineSaveBests();
+	void RenderCombine();
+	void DrawCombineHud(CanvasWrapper& canvas);
+	static int CombineMedal(int points, int maxPoints);   // 0 none, 1 bronze, 2 silver, 3 gold
+
+	// ---- Bot test (Oct 28, RLCoachBotTest.cpp): can a bot be spawned in free play and driven by the plugin? The
+	// groundwork for 50s, shadow defense and kickoff battles in the Combine. Console: rlcoach_bot_spawn,
+	// rlcoach_bot_mode 0-3, rlcoach_bot_remove. ----
+	uintptr_t botCarAddr = 0;            // the spawned bot's car (0 = none)
+	int botMode = 0;                     // 0 the game's AI drives, 1 held still, 2 plays back a rep's path, 3 plays back a rep's inputs
+	int botTick = 0;                     // where the playback is
+	int botTicksSeen = 0, botInputsSeen = 0;   // per-tick hooks seen for the bot (do they fire for it at all?)
+	std::vector<Frame> botFrames;        // the rep it plays back
+	std::string botStatus;
+	void RegisterBotTest();
+	void BotSpawn();
+	void BotFind();
+	void BotRemove();
+	void BotSetMode(int mode);
+	bool IsBotCar(CarWrapper& car);
+	void BotInput(CarWrapper& car, void* params);   // pre-input hook, any car
+	void BotTick(CarWrapper& car);                  // post-input hook, any car
+	void DrawBotStatus(CanvasWrapper& canvas);
 
 public:
 	void RenderSettings() override;

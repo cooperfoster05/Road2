@@ -67,6 +67,9 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 	if (!IsOfflinePractice()) return;
 	CarWrapper car = gameWrapper->GetLocalCar();
 	if (car.IsNull()) return;
+	DrawBotStatus(canvas);
+	DrawCombineHud(canvas);
+	if (combinePhase != CombinePhase::Off) return;   // the Combine shows its own line only
 
 	// World overlays first, so the panel draws on top of them
 	if (practiceState != PracticeState::Off) DrawPracticeOverlay(canvas);
@@ -181,10 +184,23 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 		add(std::format("{}% speed   {:.2f}s lead-in{}", pct, practiceLeadIn, practiceAutoRamp ? "   auto-ramp" : ""), 150, 160, 178, true);
 		if (practiceState == PracticeState::Frozen) add("Move to start the attempt", 255, 204, 77);
 		else add("GO", 115, 230, 115);
-		std::string bySpeed;
-		for (const auto& [p, h] : practiceHitsByPct) bySpeed += std::format("{}{}%: {}", bySpeed.empty() ? "" : "   ", p, h);
-		add(std::format("Hits {}/{}   streak {}", practiceHitsTotal, practiceAttempts, practiceStreak));
-		if (!bySpeed.empty()) add(bySpeed, 150, 160, 178, true);
+		if (learnActive)
+		{
+			tag = "LEARN";
+			const bool lastStage = learnStage + 1 >= static_cast<int>(learnLesson.stages.size());
+			if (lastStage && learnProgress.completed) add("Lesson complete", 74, 222, 128);
+			else if (!learnWarmup && learnStage == learnProgress.unlocked)
+				add(std::format("{}: {}/3 of your last 5 at 100% scored 4-5", lastStage ? "To complete the lesson" : "Next stage",
+					std::min(3, learnProgress.PassedRecent(learnStage))), 150, 160, 178);
+			if (learnAutoRamp && practiceSpeed < 0.999f) add(std::format("Auto ramp: {} of 2 at 4-5 to speed up", learnProgress.rampStreak), 150, 160, 178, true);
+		}
+		else
+		{
+			std::string bySpeed;
+			for (const auto& [p, h] : practiceHitsByPct) bySpeed += std::format("{}{}%: {}", bySpeed.empty() ? "" : "   ", p, h);
+			add(std::format("Hits {}/{}   streak {}", practiceHitsTotal, practiceAttempts, practiceStreak));
+			if (!bySpeed.empty()) add(bySpeed, 150, 160, 178, true);
+		}
 		inputText();
 		if (!practiceResultLines.empty())
 		{

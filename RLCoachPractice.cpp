@@ -96,6 +96,7 @@ void RLCoach::PracticeBegin(int targetTick, SegKind kind, int segStart, const st
 	{
 		// Keep the viewer's rep and grades on screen; just stop it from driving the car
 		practiceSavedGameSpeed = viewerActive ? savedGameSpeed : server.GetGameSpeed();
+		PracticeGoalsOff();
 	}
 	else
 	{
@@ -152,6 +153,16 @@ void RLCoach::PracticeSetLeadIn(float sec)
 	{
 		for (int j = practiceStartTick; j >= 1; j--)
 		{
+			// Back on a surface without jumping off it (you drove or fell off the ceiling or a wall): the flip has no
+			// timer, the game keeps it until you use it (Oct 28, ceiling shots)
+			if (practiceRep[j].onGround)
+			{
+				bool jumpedHere = false;
+				// (the wheels leave a few ticks after the jump press, so look back a little)
+				for (int k = std::max(1, j - 10); k <= std::min(practiceStartTick, j + 3); k++)
+					if (practiceRep[k].jump && !practiceRep[k - 1].jump) jumpedHere = true;
+				if (!jumpedHere) break;
+			}
 			if (practiceRep[j].jump && !practiceRep[j - 1].jump && (practiceRep[j].onGround || practiceRep[j - 1].onGround))
 			{
 				int jumpEnd = j + 24;
@@ -290,6 +301,7 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 		}
 		practiceState = PracticeState::Live;
 		repStartTime = std::chrono::steady_clock::now();
+		if (learnActive) LearnBeginLive();
 		return;
 	}
 
@@ -320,6 +332,8 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 	}
 	practiceLive.push_back(f);
 	int liveTicks = static_cast<int>(practiceLive.size());
+	// A lesson stage that ends before the finish (the pop, the first touch, the carry) is over when it's over
+	if (learnActive && LearnStageDone(f)) { practiceEventTick = tick; PracticeFinishAttempt("step"); return; }
 
 	if (practiceFlipHeld)
 	{
@@ -368,6 +382,19 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 
 void RLCoach::PracticeFinishAttempt(const std::string& reason)
 {
+	if (learnActive)
+	{
+		// A lesson scores its own stages (and may switch stage, e.g. after the warm-up)
+		const bool wasWarmup = learnWarmup;
+		LearnOnAttempt(reason);
+		if (wasWarmup) return;   // LearnTry already set up the next attempt
+		practiceLive.clear();
+		practiceState = PracticeState::Frozen;
+		practiceFrozenTicks = 0;
+		CarWrapper car = gameWrapper->GetLocalCar();
+		if (!car.IsNull()) PracticeReleaseFlip(car);
+		return;
+	}
 	practiceResultLines.clear();
 	bool counted = reason != "reset" && practiceLive.size() > 10;
 
@@ -469,6 +496,7 @@ void RLCoach::PracticeExit()
 
 	ServerWrapper server = gameWrapper->GetGameEventAsServer();
 	if (!server.IsNull()) server.SetGameSpeed(practiceSavedGameSpeed);
+	PracticeGoalsRestore();
 	CarWrapper car = gameWrapper->GetLocalCar();
 	if (!car.IsNull())
 	{
@@ -478,7 +506,7 @@ void RLCoach::PracticeExit()
 	}
 	havePrev = false;
 	// If a rep is open in the viewer it picks back up (paused); otherwise the recorder re-arms
-	state = (*recordingEnabled && !viewerActive) ? RepState::WaitReset : RepState::Idle;
+	state = (*recordingEnabled && !viewerActive && !learnActive) ? RepState::WaitReset : RepState::Idle;
 }
 
 // Faint reference: your best rep on this shot, from the practice start on
@@ -490,7 +518,7 @@ void RLCoach::DrawPracticeOverlay(CanvasWrapper& canvas)
 	Vector camFwd = RotatorToVector(cam.GetRotation());
 
 	// Yellow ring on the ball: where to hit it. Rides with the ball until you touch it this attempt.
-	if (practiceShot.valid && practiceTargetTick <= practiceShot.touchTick)
+	if (practiceShot.valid && practiceTargetTick <= practiceShot.touchTick && (!learnActive || learnLesson.StageHasFinish(learnStage)))
 	{
 		bool touched = false;
 		for (const Frame& f : practiceLive) if (f.touch) { touched = true; break; }
@@ -526,4 +554,21 @@ void RLCoach::DrawPracticeOverlay(CanvasWrapper& canvas)
 	};
 	draw([](const Frame& f) { return Vector(f.carX, f.carY, f.carZ); }, 120, 230, 255);
 	draw([](const Frame& f) { return Vector(f.ballX, f.ballY, f.ballZ); }, 255, 190, 90);
+}
+
+void RLCoach::PracticeGoalsOff()
+{
+	if (practiceGoalCvarSaved >= 0) return;
+	CVarWrapper cv = cvarManager->getCvar("sv_soccar_enablegoal");
+	if (cv.IsNull()) return;
+	practiceGoalCvarSaved = cv.getBoolValue() ? 1 : 0;
+	cv.setValue(0);
+}
+
+void RLCoach::PracticeGoalsRestore()
+{
+	if (practiceGoalCvarSaved < 0) return;
+	CVarWrapper cv = cvarManager->getCvar("sv_soccar_enablegoal");
+	if (!cv.IsNull()) cv.setValue(practiceGoalCvarSaved);
+	practiceGoalCvarSaved = -1;
 }

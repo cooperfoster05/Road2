@@ -60,6 +60,9 @@ void RLCoach::onLoad()
 	// Recording is never saved to config, so it starts OFF every session
 	CVarWrapper rec = cvarManager->registerCvar("rlcoach_recording", "0", "Record reps (data farming)", true, true, 0, true, 1, false);
 	rec.bindTo(recordingEnabled);
+	learnUnlockAll = std::make_shared<bool>(false);
+	cvarManager->registerCvar("rlcoach_learn_unlock_all", "0", "Learn: open every lesson and stage without the prerequisites (for practicing, not learning)", true, true, 0, true, 1)
+		.bindTo(learnUnlockAll);
 	rec.addOnValueChanged([this](std::string, CVarWrapper cvar) { SetRecording(cvar.getBoolValue()); });
 
 	cvarManager->registerCvar("rlcoach_max_rep_seconds", "10", "Longest a rep runs before it ends as a timeout", true, true, 2, true, 60)
@@ -130,17 +133,19 @@ void RLCoach::onLoad()
 		TestSetState();
 	}, "Test: move the car and ball to a fixed spot", PERMISSION_ALL);
 
+	RegisterBotTest();
+
 	menuTitle_ = "RL Coach - Rep Viewer";
 
 	writer = std::make_unique<RepWriter>(std::filesystem::path(gameWrapper->GetDataFolderW()) / "RLCoach");
 
 	// Every physics tick, before the game reads the car's input (the viewer replaces it)
 	gameWrapper->HookEventWithCaller<CarWrapper>("Function TAGame.Car_TA.SetVehicleInput",
-		[this](CarWrapper car, void* params, std::string) { PerfTimer t(perfInput); OverrideViewerInput(car, params); });
+		[this](CarWrapper car, void* params, std::string) { PerfTimer t(perfInput); BotInput(car, params); OverrideViewerInput(car, params); });
 
 	// Every physics tick, after the car's input for that tick is set
 	gameWrapper->HookEventWithCallerPost<CarWrapper>("Function TAGame.Car_TA.SetVehicleInput",
-		[this](CarWrapper car, void*, std::string) { PerfTimer t(perfTick); OnVehicleInput(car); });
+		[this](CarWrapper car, void*, std::string) { PerfTimer t(perfTick); BotTick(car); OnVehicleInput(car); });
 
 	gameWrapper->HookEventWithCaller<CarWrapper>("Function TAGame.Car_TA.OnHitBall",
 		[this](CarWrapper car, void* params, std::string) { OnBallTouch(car, params); });
@@ -183,6 +188,9 @@ void RLCoach::onUnload()
 {
 	whatIfCancel = true;
 	if (whatIfThread.joinable()) whatIfThread.join();
+	if (combineGenThread.joinable()) combineGenThread.join();
+	CombineExit();
+	BotRemove();
 	PracticeExit();
 	ViewerExit();
 	housekeepStop = true;
@@ -244,6 +252,13 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 
 	ControllerInput in = car.GetInput();
 	lastInput = in;
+
+	// The Combine runs the car and ball itself; the recorder sits out
+	if (combinePhase != CombinePhase::Off)
+	{
+		CombineTick(car);
+		return;
+	}
 
 	// Practice mode runs the car and ball itself; the recorder sits out
 	if (practiceState != PracticeState::Off)
@@ -501,6 +516,12 @@ Frame RLCoach::CaptureAt(CarWrapper& car, BallWrapper& ball, const ControllerInp
 
 void RLCoach::OnBallTouch(CarWrapper car, void* params)
 {
+	if (combinePhase == CombinePhase::Live && !car.IsNull())
+	{
+		CarWrapper me = gameWrapper->GetLocalCar();
+		if (!me.IsNull() && me.memory_address == car.memory_address) { combineTouched = true; combineLastTouch = combineLiveTicks; }
+		return;
+	}
 	if (practiceState == PracticeState::Live && !car.IsNull())
 	{
 		CarWrapper me = gameWrapper->GetLocalCar();

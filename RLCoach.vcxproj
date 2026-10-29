@@ -121,6 +121,8 @@
     <ClCompile Include="RLCoachPractice.cpp" />
     <ClCompile Include="RLCoachStorage.cpp" />
     <ClCompile Include="RLCoachHud.cpp" />
+    <ClCompile Include="RLCoachLearn.cpp" />
+    <ClCompile Include="RLCoachBotTest.cpp" />
     <ClCompile Include="ControllerOverlay.cpp" />
     <ClCompile Include="RepStore.cpp" />
     <!-- miniz (third_party/miniz, MIT license): compresses rep recordings -->
@@ -141,6 +143,13 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PreprocessorDefinitions>RS_DONT_LOG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
+    <ClCompile Include="Lesson.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="Combine.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="RLCoachCombine.cpp" />
     <ClCompile Include="Mechanics.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -173,6 +182,8 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="GuiBase.h" />
     <ClInclude Include="RLCoach.h" />
+    <ClInclude Include="Lesson.h" />
+    <ClInclude Include="Combine.h" />
     <ClInclude Include="RepData.h" />
     <ClInclude Include="RepWriter.h" />
     <ClInclude Include="RepLibrary.h" />

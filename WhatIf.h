@@ -60,8 +60,37 @@ struct WhatIfResult
 	float ms = 0;
 };
 
+// Timing windows (Oct 28): how much earlier or later a key press could have come and still worked. Info only:
+// never part of a grade. The press and everything after it move together (you did the same thing, just sooner or
+// later), one tick (8.3 ms) at a time, up to 18 ticks (150 ms) either way.
+struct TimingWindow
+{
+	std::string what;          // "the jump off the wall", "the flip into the shot"
+	int  tick = -1;            // your press
+	bool checked = false;      // false: the sim couldn't follow your own inputs from here, so there's no window to show
+	int  lo = 1, hi = 0;       // shifts (ticks, - = earlier) that still score as the same mechanic; lo > hi = none found
+	bool loOpen = false, hiOpen = false;   // it still worked at the edge of what was tried (the window is at least this wide)
+	int  cleanLo = 1, cleanHi = 0;         // the part of it that's a 4-5 (lo > hi = none)
+	bool youIn = false;        // your timing is inside the window
+	int  testedLo = 0, testedHi = 0;
+	std::vector<signed char> result;       // per tested shift: -1 couldn't press there, 0 no, 1 scores, 2 scores as a 4-5
+	float ms = 0;
+};
+
 namespace WhatIf
 {
+	// The key presses of the shot (the jump that left the surface, the flip into the shot) and their windows.
+	// About 120 sim runs per press; a second or two on one core. Stops early if cancel is set.
+	std::vector<TimingWindow> Timing(const std::vector<Frame>& frames, bool wentIn, bool floorBeforeGoal, int eventTick,
+		const ShotReference& ref, int carBody, const std::atomic<bool>* cancel);
+
+	// One plain sentence for a window, for the hover ("" when there's nothing worth showing)
+	std::string TimingText(const TimingWindow& w);
+	// The short version for the line beside the strip ("Flip into the shot: room 140 ms early, 85 ms late")
+	std::string TimingShort(const TimingWindow& w);
+	// Ticks as milliseconds, rounded to 5
+	int TimingMs(int ticks);
+
 	// The moment the search starts from: just before the flip that made the shot, or 0.3 s before the touch
 	// (stage 2: up to half a second before the key moment). -1 if there's nothing to work from.
 	int StartTick(const std::vector<Frame>& frames, WhatIfPoint point = WhatIfPoint::Shot);

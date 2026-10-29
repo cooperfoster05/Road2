@@ -134,6 +134,8 @@ void RLCoach::ViewerLoad(const RepListItem& item)
 	// Remember the game speed so it can be put back when you stop watching
 	ServerWrapper server = gameWrapper->GetGameEventAsServer();
 	if (!viewerActive) savedGameSpeed = server.IsNull() ? 1.0f : server.GetGameSpeed();
+	// Play at the speed the buttons show (a lesson clip plays at the lesson's speed and can leave it lower)
+	viewerSpeed = uiViewerSpeed.load();
 
 	viewerFrames = std::move(loaded);
 	viewerRep = item;
@@ -284,7 +286,9 @@ void RLCoach::ViewerTick(CarWrapper& car)
 	if (std::fabs(server.GetGameSpeed() - viewerSpeed) > 0.001f) server.SetGameSpeed(viewerSpeed);
 
 	const float last = static_cast<float>(viewerFrames.size() - 1);
-	if (viewerPlaying)
+	if (viewerPlaying && learnWatching && learnWatchEnd >= 0 && viewerPlayhead >= learnWatchEnd)
+		viewerPlaying = false;   // a lesson clip stops at the end of its stage
+	else if (viewerPlaying)
 	{
 		viewerPlayhead += 1.0f;
 		if (viewerPlayhead > last)
@@ -536,6 +540,8 @@ void RLCoach::CancelWhatIf()
 	whatIfCancel = true;
 	std::lock_guard<std::mutex> lock(whatIfMutex);
 	for (int s = 0; s < 2; s++) { lineResult[s] = WhatIfResult{}; lineFile[s].clear(); }
+	timingResult.clear();
+	timingFile.clear();
 }
 
 namespace
@@ -587,19 +593,21 @@ void RLCoach::StartReview()
 			if (c.file == file)
 			{
 				for (int s = 0; s < 2; s++) { lineResult[s] = c.line[s]; lineFile[s] = file; }
+				timingResult = c.timing;
+				timingFile = file;
 				uiReviewPending = false;
 				return;
 			}
 	}
-	if (viewerGrade.overall >= 5)
+	if (whatIfBusy || !predictor.Ready()) return;   // the viewer window asks again once it can
+	if (whatIfThread.joinable()) whatIfThread.join();
+	// A 5 needs no searches, but still gets its timing windows
+	const bool five = viewerGrade.overall >= 5;
+	if (five)
 	{
 		std::lock_guard<std::mutex> lock(whatIfMutex);
 		for (int s = 0; s < 2; s++) { lineResult[s] = WhatIfResult{}; lineResult[s].status = WhatIfStatus::NotNeeded; lineFile[s] = file; }
-		uiReviewPending = false;
-		return;
 	}
-	if (whatIfBusy || !predictor.Ready()) return;   // the viewer window asks again once it can
-	if (whatIfThread.joinable()) whatIfThread.join();
 
 	std::vector<Frame> fr = viewerFrames;
 	RepListItem item = viewerRep;
@@ -614,22 +622,49 @@ void RLCoach::StartReview()
 			if (Coach::SegOf(c) == keySeg) keyFix.push_back(c);
 	{
 		std::lock_guard<std::mutex> lock(whatIfMutex);
-		for (int s = 0; s < 2; s++) { lineResult[s] = WhatIfResult{}; lineFile[s] = file; }
+		if (!five) for (int s = 0; s < 2; s++) { lineResult[s] = WhatIfResult{}; lineFile[s] = file; }
+		timingResult.clear();
+		timingFile = file;
 	}
 	uiReviewPending = false;
 	whatIfCancel = false;
 	whatIfBusy = true;
 	whatIfDepth = 1;
 	whatIfEngineStart = -1;
-	whatIfRunningSlot = kFixLine;
+	whatIfRunningSlot = five ? -1 : kFixLine;
 	whatIfRunningPoint = static_cast<int>(WhatIfPoint::Shot);
-	whatIfThread = std::thread([this, fr = std::move(fr), item, ref, hasKey, keyFix]() {
+	whatIfThread = std::thread([this, fr = std::move(fr), item, ref, hasKey, keyFix, five]() {
 		// Below normal priority and capped, so the game never waits on it
 		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 		auto publish = [&](int slot, WhatIfResult&& r) {
 			std::lock_guard<std::mutex> lock(whatIfMutex);
 			if (lineFile[slot] == item.file && !whatIfCancel) lineResult[slot] = std::move(r);
 		};
+		// Timing windows (Oct 28): quick (a second or two), info only
+		auto timing = [&]() {
+			std::vector<TimingWindow> tw;
+			try { tw = WhatIf::Timing(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel); }
+			catch (...) { tw.clear(); }
+			std::lock_guard<std::mutex> lock(whatIfMutex);
+			if (timingFile == item.file && !whatIfCancel) timingResult = tw;
+			return tw;
+		};
+		if (five)
+		{
+			std::vector<TimingWindow> tw = timing();
+			if (!whatIfCancel)
+			{
+				std::lock_guard<std::mutex> lock(whatIfMutex);
+				std::erase_if(reviewCache, [&](const ReviewCacheEntry& c) { return c.file == item.file; });
+				ReviewCacheEntry e{ item.file, {}, std::move(tw) };
+				for (int s = 0; s < 2; s++) e.line[s].status = WhatIfStatus::NotNeeded;
+				reviewCache.push_back(std::move(e));
+				if (reviewCache.size() > 12) reviewCache.erase(reviewCache.begin());
+			}
+			whatIfRunningSlot = -1;
+			whatIfBusy = false;
+			return;
+		}
 		WhatIfResult fix, best;
 		try
 		{
@@ -643,6 +678,8 @@ void RLCoach::StartReview()
 		}
 		catch (...) { fix = WhatIfResult{}; fix.status = WhatIfStatus::CantSimulate; }
 		publish(kFixLine, WhatIfResult(fix));
+		std::vector<TimingWindow> tw;
+		if (!whatIfCancel) { whatIfRunningSlot = kBestLine; tw = timing(); }
 		if (!whatIfCancel)
 		{
 			whatIfRunningSlot = kBestLine;
@@ -655,7 +692,7 @@ void RLCoach::StartReview()
 		{
 			std::lock_guard<std::mutex> lock(whatIfMutex);
 			std::erase_if(reviewCache, [&](const ReviewCacheEntry& c) { return c.file == item.file; });
-			reviewCache.push_back(ReviewCacheEntry{ item.file, { std::move(fix), std::move(best) } });
+			reviewCache.push_back(ReviewCacheEntry{ item.file, { std::move(fix), std::move(best) }, std::move(tw) });
 			if (reviewCache.size() > 12) reviewCache.erase(reviewCache.begin());
 		}
 		whatIfRunningSlot = -1;
@@ -960,6 +997,16 @@ void RLCoach::RenderWindow()
 	if (!repListLoaded || repListStale.exchange(false)) RefreshRepList();
 	FetchUiFonts();
 	FontScope bodyFont(uiFonts[UiFonts::Body]);
+	if (uiLearnMode)
+	{
+		RenderLearn();
+		return;
+	}
+	if (uiCombineMode)
+	{
+		RenderCombine();
+		return;
+	}
 	ImFont* fLabel = uiFonts[UiFonts::Label];
 	ImFont* fBold = uiFonts[UiFonts::Bold];
 	ImFont* fHead = uiFonts[UiFonts::Head];
@@ -986,11 +1033,27 @@ void RLCoach::RenderWindow()
 	}
 	{
 		std::string info = std::format("{} reps", repList.size());
-		float w = ImGui::CalcTextSize(info.c_str()).x + ImGui::CalcTextSize("Refresh").x + 40.0f * S;
+		float w = ImGui::CalcTextSize(info.c_str()).x + ImGui::CalcTextSize("Refresh").x + ImGui::CalcTextSize("Learn").x + ImGui::CalcTextSize("Combine").x + 76.0f * S;
 		ImGui::SameLine(std::max(200.0f * S, ImGui::GetWindowContentRegionMax().x - w));
 		ImGui::TextDisabled("%s", info.c_str());
 		ImGui::SameLine();
 		if (LinkButton("Refresh")) RefreshRepList();
+		ImGui::SameLine();
+		if (LinkButton("Learn"))
+		{
+			uiLearnMode = true;
+			{
+				std::lock_guard<std::mutex> lock(uiLearnMutex);
+				uiLearn = UiLearn{};
+			}
+			onGame([this]() { LearnOpen(); });
+		}
+		ImGui::SameLine();
+		if (LinkButton("Combine"))
+		{
+			uiCombineMode = true;
+			onGame([this]() { CombineOpen(); });
+		}
 	}
 
 	gradeBook.TryCopy(uiAutoGrades);   // keeps the last copy if a refresh is busy
@@ -1064,8 +1127,10 @@ void RLCoach::RenderWindow()
 		for (const RepListItem& it : repList) if (it.file == watching) { cur = &it; break; }
 
 		LineView line[2];
+		std::vector<TimingWindow> timing;
 		{
 			std::lock_guard<std::mutex> lock(whatIfMutex);
+			if (timingFile == watching) timing = timingResult;
 			for (int s = 0; s < 2; s++)
 			{
 				const WhatIfResult& r = lineResult[s];
@@ -1726,6 +1791,49 @@ void RLCoach::RenderWindow()
 					onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
 				}
 				ImGui::PopID();
+			}
+			// Timing windows (Oct 28): how much earlier or later each key press could have come and still worked.
+			// Info only. One quiet line per press, and nothing at all when no timing change would have scored it.
+			for (const TimingWindow& w : timing)
+			{
+				const std::string text = WhatIf::TimingShort(w);
+				if (text.empty()) continue;
+				const std::string full = WhatIf::TimingText(w);
+				// The strip: one mark per tick tried (8 ms), lit where it still scores, brighter where it's a 4-5;
+				// the white line is when you pressed
+				const float cell = 3.5f * S, hgt = 12.0f * S;
+				const int span = 37;   // -18..+18
+				ImGui::AlignTextToFramePadding();
+				const ImVec2 p0 = ImGui::GetCursorScreenPos();
+				const float y0 = p0.y + (ImGui::GetFrameHeight() - hgt) * 0.5f;
+				ImDrawList* tdl = ImGui::GetWindowDrawList();
+				for (int d = -18; d <= 18; d++)
+				{
+					const int idx = d - w.testedLo;
+					const int r = idx >= 0 && idx < static_cast<int>(w.result.size()) ? w.result[idx] : -1;
+					const float x = p0.x + (d + 18) * cell;
+					const ImU32 col = r == 2 ? U32(kGood) : r == 1 ? U32(ImVec4(kGood.x, kGood.y, kGood.z, 0.45f)) : r == 0 ? U32(kLineSoft) : U32(ImVec4(0, 0, 0, 0));
+					tdl->AddRectFilled(ImVec2(x, y0), ImVec2(x + cell - 1.0f, y0 + hgt), col);
+				}
+				const float xYou = p0.x + 18 * cell + cell * 0.5f - 0.5f;
+				tdl->AddLine(ImVec2(xYou, y0 - 3.0f * S), ImVec2(xYou, y0 + hgt + 3.0f * S), U32(kText), 1.5f * S);
+				ImGui::Dummy(ImVec2(span * cell, ImGui::GetFrameHeight()));
+				const bool barHover = ImGui::IsItemHovered();
+				ImGui::SameLine(0, 10 * S);
+				ImGui::PushID(w.tick + 3000);
+				ImGui::PushStyleColor(ImGuiCol_Text, kSub);
+				if (ImGui::Selectable(text.c_str(), false))
+				{
+					const float target = static_cast<float>(std::max(0, w.tick - 30));
+					onGame([this, target]() { viewerPlaying = false; ViewerSeek(target); });
+				}
+				ImGui::PopStyleColor();
+				ImGui::PopID();
+				if (barHover || ImGui::IsItemHovered())
+					ImGui::SetTooltip("%s\n\nHow much earlier or later %s could have come and still scored as the same shot.\n"
+						"Each mark is one tick (8 ms), up to 150 ms either way; the white line is when you pressed.\n"
+						"Green: still scores. Bright green: scores as a 4-5. Grey: doesn't.\n"
+						"Everything after the press moves with it. Info only: it never changes a grade. Click to jump there.", full.c_str(), w.what.c_str());
 			}
 			ImGui::Spacing();
 			if (OutlineButton(std::format("Practice from here ({:.2f}s)", head / 120.0f).c_str()))
