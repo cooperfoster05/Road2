@@ -50,6 +50,10 @@ void RLCoach::BotFind()
 		CarWrapper c = cars.Get(i);
 		if (c.IsNull() || (!local.IsNull() && c.memory_address == local.memory_address)) continue;
 		botCarAddr = c.memory_address;
+		{
+			AIControllerWrapper ai = c.GetAIController();
+			if (!ai.IsNull() && botMode != 0) ai.DoNothing();
+		}
 		PriWrapper pri = c.GetPRI();
 		const bool flagged = !pri.IsNull() && pri.GetbBot();
 		botStatus = std::format("Bot test: found a second car ({} cars in all; marked as a bot: {}). Mode {}.", cars.Count(), flagged ? "yes" : "no", botMode);
@@ -70,12 +74,22 @@ void RLCoach::BotRemove()
 		CarWrapper c = cars.Get(i);
 		if (c.IsNull() || c.memory_address != botCarAddr) continue;
 		AIControllerWrapper ai = c.GetAIController();
+		if (!ai.IsNull()) ai.DoNothing();
+		server.RemoveCar(c);
 		if (!ai.IsNull()) server.RemovePlayer(ai);
-		else c.Demolish();
 	}
 	botCarAddr = 0;
 	botMode = 0;
-	botStatus = "Bot test: removed";
+	botFrames.clear();
+	// Check it's really gone
+	gameWrapper->SetTimeout([this](GameWrapper*) {
+		ServerWrapper sv = gameWrapper->GetGameEventAsServer();
+		if (sv.IsNull()) return;
+		const int n = sv.GetCars().Count();
+		botStatus = n <= 1 ? "Bot test: removed" : std::format("Bot test: tried to remove it, but there are still {} cars (reset free play to clear it)", n);
+		LOG("{}", botStatus);
+	}, 0.5f);
+	botStatus = "Bot test: removing...";
 	LOG("{}", botStatus);
 }
 
@@ -84,6 +98,14 @@ void RLCoach::BotSetMode(int mode)
 	botMode = std::clamp(mode, 0, 3);
 	botTick = 0;
 	botFrames.clear();
+	botDriven = 0;
+	botHoldSet = false;
+	// Our modes need the game's own bot AI switched off, or it fights us for the controls
+	if (botMode != 0)
+	{
+		CarWrapper bot = BotCar();
+		if (!bot.IsNull()) { AIControllerWrapper ai = bot.GetAIController(); if (!ai.IsNull()) ai.DoNothing(); }
+	}
 	if (botMode >= 2 && writer)
 	{
 		// Your newest rep that has a recording
@@ -145,9 +167,7 @@ void RLCoach::BotTick(CarWrapper& car)
 		car.SetVelocity(Vector(f.carVX, f.carVY, f.carVZ));
 		car.SetAngularVelocity(Vector(f.carAVX, f.carAVY, f.carAVZ), false);
 	};
-	if (botMode == 2) place(botFrames[botTick]);              // the path, every tick
-	else if (botTick == 0) place(botFrames[0]);              // inputs: placed once at the start, then it drives
-	if (++botTick >= n) botTick = 0;                         // loop
+	(void)n; (void)place;   // driving happens in BotDrive (from your car's tick); this only counts that the bot's own tick arrives
 }
 
 void RLCoach::DrawBotStatus(CanvasWrapper& canvas)
@@ -159,6 +179,64 @@ void RLCoach::DrawBotStatus(CanvasWrapper& canvas)
 	if (botCarAddr)
 	{
 		canvas.SetPosition(Vector2{ 24, 184 });
-		canvas.DrawString(std::format("Bot hooks seen: {} input, {} tick. Playback tick {} of {}.", botInputsSeen, botTicksSeen, botTick, botFrames.size()), 1.2f, 1.2f);
+		canvas.DrawString(std::format("Driven {} ticks (the bot's own updates seen: {} input, {} tick). Playback tick {} of {}.", botDriven, botInputsSeen, botTicksSeen, botTick, botFrames.size()), 1.2f, 1.2f);
 	}
+}
+
+// The bot's car, found by address among the game's cars (null if it's gone)
+CarWrapper RLCoach::BotCar()
+{
+	if (!botCarAddr) return CarWrapper(0);
+	ServerWrapper server = gameWrapper->GetGameEventAsServer();
+	if (server.IsNull()) return CarWrapper(0);
+	ArrayWrapper<CarWrapper> cars = server.GetCars();
+	for (int i = 0; i < cars.Count(); i++)
+	{
+		CarWrapper c = cars.Get(i);
+		if (!c.IsNull() && c.memory_address == botCarAddr) return c;
+	}
+	return CarWrapper(0);
+}
+
+// Every tick, from YOUR car's update (which we know fires): drive the bot in our modes. Its own per-tick update
+// may not reach the plugin, so this doesn't rely on it.
+void RLCoach::BotDrive()
+{
+	if (!botCarAddr || botMode == 0) return;
+	CarWrapper bot = BotCar();
+	if (bot.IsNull()) { botStatus = "Bot test: the bot's car is gone"; botCarAddr = 0; return; }
+	botDriven++;
+	if (botMode == 1)
+	{
+		// Held still where it was when you picked mode 1
+		if (!botHoldSet) { botHold = bot.GetLocation(); botHoldRot = bot.GetRotation(); botHoldSet = true; }
+		bot.SetInput(ControllerInput{});
+		bot.SetLocation(botHold);
+		bot.SetRotation(botHoldRot);
+		bot.SetVelocity(Vector(0, 0, 0));
+		bot.SetAngularVelocity(Vector(0, 0, 0), false);
+		return;
+	}
+	if (botFrames.empty()) return;
+	const int n = static_cast<int>(botFrames.size());
+	const Frame& f = botFrames[std::min(botTick, n - 1)];
+	auto place = [&](const Frame& g) {
+		bot.SetLocation(Vector(g.carX, g.carY, g.carZ));
+		bot.SetRotation(Rotator(g.carPitch, g.carYaw, g.carRoll));
+		bot.SetVelocity(Vector(g.carVX, g.carVY, g.carVZ));
+		bot.SetAngularVelocity(Vector(g.carAVX, g.carAVY, g.carAVZ), false);
+	};
+	if (botMode == 2) { bot.SetInput(ControllerInput{}); place(f); }
+	else
+	{
+		if (botTick == 0) place(botFrames[0]);
+		ControllerInput in{};
+		in.Throttle = f.throttle; in.Steer = f.steer; in.Pitch = f.pitch; in.Yaw = f.yaw; in.Roll = f.roll;
+		in.Handbrake = f.handbrake ? 1 : 0;
+		in.Jump = f.jump ? 1 : 0;
+		in.ActivateBoost = f.boost ? 1 : 0;
+		in.HoldingBoost = in.ActivateBoost;
+		bot.SetInput(in);
+	}
+	if (++botTick >= n) botTick = 0;
 }

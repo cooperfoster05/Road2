@@ -474,6 +474,10 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	uint32_t combineSeed = 0;
 	std::vector<Combine::SaveShot> combineShots;
 	std::vector<Combine::RecoveryThrow> combineThrows;
+	std::vector<Combine::SaveSituation> combineSituations;   // real saves (data/RLCoach/combine/save_situations.csv)
+	bool combineSituationsLoaded = false;
+	std::shared_ptr<bool> combineMomentumCam = std::make_shared<bool>(true);   // rlcoach_combine_momentum_cam
+	int combineSavedUnlimited = -1;          // free play's unlimited boost, put back when the Combine ends
 	// Recovery, during a throw: first contact, whether the body hit first, when you were settled on your wheels
 	int combineRecContact = -1, combineRecSettle = -1, combineRecGround = 0;
 	bool combineRecBodyHit = false;
@@ -534,6 +538,12 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void BotInput(CarWrapper& car, void* params);   // pre-input hook, any car
 	void BotTick(CarWrapper& car);                  // post-input hook, any car
 	void DrawBotStatus(CanvasWrapper& canvas);
+	CarWrapper BotCar();
+	void BotDrive();                                // from your car's tick: drives the bot in modes 1-3
+	int botDriven = 0;
+	bool botHoldSet = false;
+	Vector botHold;
+	Rotator botHoldRot;
 
 public:
 	void RenderSettings() override;

@@ -134,6 +134,8 @@ void RLCoach::onLoad()
 	}, "Test: move the car and ball to a fixed spot", PERMISSION_ALL);
 
 	RegisterBotTest();
+	cvarManager->registerCvar("rlcoach_combine_momentum_cam", "1", "Combine Recovery: point the camera the way you're travelling until you land", true, true, 0, true, 1)
+		.bindTo(combineMomentumCam);
 
 	menuTitle_ = "RL Coach - Rep Viewer";
 
@@ -252,6 +254,7 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 
 	ControllerInput in = car.GetInput();
 	lastInput = in;
+	BotDrive();
 
 	// The Combine runs the car and ball itself; the recorder sits out
 	if (combinePhase != CombinePhase::Off)

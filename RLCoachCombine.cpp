@@ -6,6 +6,7 @@
 #include "RLCoach.h"
 #include "UiStyle.h"
 #include "UiFonts.h"
+#include "Overlay3D.h"
 #include <fstream>
 #include <random>
 #include <sstream>
@@ -41,6 +42,12 @@ namespace
 		~FontPush() { if (pushed) ImGui::PopFont(); }
 		bool pushed = false;
 	};
+
+	// Where the ball waits during a recovery throw: in the middle of the ring, so ball cam points you at it
+	Vector ParkFor(const Combine::RecoveryThrow& t)
+	{
+		return Vector(t.target.x, t.target.y, 93.0f);
+	}
 
 	std::string ReadAllText(const std::filesystem::path& p)
 	{
@@ -117,6 +124,12 @@ void RLCoach::CombineOpen()
 	PracticeExit();
 	if (learnActive || learnInListOpen) LearnClose();
 	CombineLoadBests();
+	if (!combineSituationsLoaded && writer)
+	{
+		combineSituations = Combine::LoadSaveSituations(ReadAllText(writer->Folder() / "combine" / "save_situations.csv"));
+		combineSituationsLoaded = true;
+		LOG("Combine: {} real save situations loaded", combineSituations.size());
+	}
 	frames.clear();
 	state = RepState::Idle;
 	CombinePublish();
@@ -151,13 +164,14 @@ void RLCoach::CombineStart(const std::string& event, int level, uint32_t seed)
 	const uint32_t sd = combineSeed;
 	const int lv = combineLevel;
 	const bool rec = event == "RC";
-	combineGenThread = std::thread([this, sd, lv, rec]() {
+	const std::vector<Combine::SaveSituation>* sits = combineSituations.empty() ? nullptr : &combineSituations;
+	combineGenThread = std::thread([this, sd, lv, rec, sits]() {
 		std::vector<Combine::SaveShot> shots;
 		std::vector<Combine::RecoveryThrow> throws;
 		try
 		{
 			if (rec) throws = Combine::MakeRecoverySet(sd, lv, 10);
-			else shots = Combine::MakeSaveSet(sd, lv, 10);
+			else shots = Combine::MakeSaveSet(sd, lv, 10, sits);
 		}
 		catch (...) { shots.clear(); throws.clear(); }
 		combineGenBusy = false;
@@ -186,6 +200,12 @@ void RLCoach::CombineBegin(std::vector<Combine::SaveShot> shots, std::vector<Com
 	frames.clear();
 	state = RepState::Idle;
 	PracticeGoalsOff();
+	// No unlimited boost in the Combine: you play with the boost you're given (the real defender's, on saves)
+	{
+		CarWrapper me = gameWrapper->GetLocalCar();
+		BoostWrapper bc = me.IsNull() ? BoostWrapper(0) : me.GetBoostComponent();
+		if (!bc.IsNull() && combineSavedUnlimited < 0) combineSavedUnlimited = bc.GetUnlimitedBoostRefCount();
+	}
 	CombinePublish();
 }
 
@@ -196,6 +216,13 @@ void RLCoach::CombineExit()
 	combineShots.clear();
 	combineThrows.clear();
 	PracticeGoalsRestore();
+	if (combineSavedUnlimited >= 0)
+	{
+		CarWrapper me = gameWrapper->GetLocalCar();
+		BoostWrapper bc = me.IsNull() ? BoostWrapper(0) : me.GetBoostComponent();
+		if (!bc.IsNull()) bc.SetUnlimitedBoostRefCount(combineSavedUnlimited);
+		combineSavedUnlimited = -1;
+	}
 	CombinePublish();
 }
 
@@ -210,19 +237,20 @@ void RLCoach::CombinePlace(CarWrapper& car, BallWrapper& ball, bool frozen)
 		car.SetVelocity(frozen ? Vector(0, 0, 0) : Vector(t.vel.x, t.vel.y, t.vel.z));
 		car.SetAngularVelocity(frozen ? Vector(0, 0, 0) : Vector(t.angVel.x, t.angVel.y, t.angVel.z), false);
 		BoostWrapper bc = car.GetBoostComponent();
-		if (!bc.IsNull()) bc.SetCurrentBoostAmount(1.0f);
-		ball.SetLocation(Vector(t.pos.x > 0 ? -3800.0f : 3800.0f, t.pos.y > 0 ? -4700.0f : 4700.0f, 93.0f));
+		if (!bc.IsNull()) { bc.SetUnlimitedBoostRefCount(0); bc.SetCurrentBoostAmount(1.0f); }
+		ball.SetLocation(ParkFor(t));
 		ball.SetVelocity(Vector(0, 0, 0));
 		ball.SetAngularVelocity(Vector(0, 0, 0), false);
 		return;
 	}
+	// You start where the defender was (a real save: their speed, facing, spin and boost; made-up shots: nearly still)
 	const Combine::SaveShot& s = combineShots[combineIndex];
 	car.SetLocation(Vector(s.car.pos.x, s.car.pos.y, s.car.pos.z));
-	car.SetRotation(Rotator(0, static_cast<int>(s.carYaw / kU2R), 0));
+	car.SetRotation(Rotator(static_cast<int>(s.car.pitch / kU2R), static_cast<int>(s.car.yaw / kU2R), static_cast<int>(s.car.roll / kU2R)));
 	car.SetVelocity(frozen ? Vector(0, 0, 0) : Vector(s.car.vel.x, s.car.vel.y, s.car.vel.z));
-	car.SetAngularVelocity(Vector(0, 0, 0), false);
+	car.SetAngularVelocity(frozen ? Vector(0, 0, 0) : Vector(s.carAngVel.x, s.carAngVel.y, s.carAngVel.z), false);
 	BoostWrapper bc = car.GetBoostComponent();
-	if (!bc.IsNull()) bc.SetCurrentBoostAmount(1.0f);
+	if (!bc.IsNull()) { bc.SetUnlimitedBoostRefCount(0); bc.SetCurrentBoostAmount(std::clamp(s.boost, 0.0f, 100.0f) / 100.0f); }
 	ball.SetLocation(Vector(s.ball.pos.x, s.ball.pos.y, s.ball.pos.z));
 	ball.SetVelocity(frozen ? Vector(0, 0, 0) : Vector(s.ball.vel.x, s.ball.vel.y, s.ball.vel.z));
 	ball.SetAngularVelocity(frozen ? Vector(0, 0, 0) : Vector(s.ball.angVel.x, s.ball.angVel.y, s.ball.angVel.z), false);
@@ -294,37 +322,30 @@ void RLCoach::CombineTick(CarWrapper& car)
 	combineLiveTicks++;
 	if (combineEvent == "RC")
 	{
-		// Recovery. 1 point each: your wheels touched first (not your roof or side), you were settled on them
-		// quickly (within 0.3 s of when you could first have landed), and you kept your speed (1100+ just after).
+		// Recovery: the race back into the play. Land however you like and get to the ring (by your back post) as
+		// fast as you can: flip, wavedash, powerslide out of it, anything. Points by time against the throw's par
+		// (a good player landing well and driving there): 3 within 15%, 2 within 35%, 1 within 60%.
 		const Combine::RecoveryThrow& t = combineThrows[combineIndex];
 		{
 			const Vector bp = ball.GetLocation();
-			const Vector park(t.pos.x > 0 ? -3800.0f : 3800.0f, t.pos.y > 0 ? -4700.0f : 4700.0f, 93.0f);
+			const Vector park = ParkFor(t);
 			if (std::fabs(bp.X - park.X) + std::fabs(bp.Y - park.Y) > 50.0f) { ball.SetLocation(park); ball.SetVelocity(Vector(0, 0, 0)); }
 		}
-		const Vector cv = car.GetVelocity();
+		const Vector cl = car.GetLocation();
 		const bool wheels = car.IsOnGround();
-		const Vector dv(cv.X - combineRecPrevVel.X, cv.Y - combineRecPrevVel.Y, cv.Z - combineRecPrevVel.Z);
-		combineRecPrevVel = cv;
-		if (combineRecContact < 0)
+		if (combineRecContact < 0 && wheels) combineRecContact = combineLiveTicks;   // for the camera
+		const float dx = cl.X - t.target.x, dy = cl.Y - t.target.y;
+		const float secs = combineLiveTicks / 120.0f;
+		if (dx * dx + dy * dy < Combine::kRecoveryTargetRadius * Combine::kRecoveryTargetRadius && cl.Z < 250.0f)
 		{
-			if (wheels) combineRecContact = combineLiveTicks;
-			else if (combineLiveTicks > 3 && std::sqrt(dv.X * dv.X + dv.Y * dv.Y + dv.Z * dv.Z) > 300.0f) { combineRecContact = combineLiveTicks; combineRecBodyHit = true; }
-		}
-		combineRecGround = wheels ? combineRecGround + 1 : 0;
-		if (combineRecGround >= 6 && combineRecSettle < 0) combineRecSettle = combineLiveTicks - 5;
-		const int par = static_cast<int>(t.tHit * 120.0f) + 36;
-		if (combineRecSettle >= 0 && combineLiveTicks >= combineRecSettle + 48)
-		{
-			const float speed = std::sqrt(cv.X * cv.X + cv.Y * cv.Y + cv.Z * cv.Z);
-			const bool clean = !combineRecBodyHit, quick = combineRecSettle <= par, kept = speed >= 1100.0f;
-			std::string what = clean ? "Wheels first" : "Body hit first";
-			what += quick ? ", quick" : std::format(", slow (+{:.2f} s)", (combineRecSettle - par) / 120.0f + 0.30f);
-			what += kept ? std::format(", kept speed ({:.0f})", speed) : std::format(", lost speed ({:.0f})", speed);
-			CombineEndShot((clean ? 1 : 0) + (quick ? 1 : 0) + (kept ? 1 : 0), what);
+			const float r = secs / std::max(0.5f, t.par);
+			float c3, c2, c1;
+			Combine::RecoveryPointCuts(combineLevel, c3, c2, c1);
+			const int pts = r <= c3 ? 3 : r <= c2 ? 2 : r <= c1 ? 1 : 0;
+			CombineEndShot(pts, std::format("Back in play in {:.2f} s (par {:.2f})", secs, t.par));
 			return;
 		}
-		if (combineLiveTicks >= 540) { CombineEndShot(0, "Never got settled on your wheels"); return; }
+		if (secs > t.par * 2.5f + 1.0f) { CombineEndShot(0, std::format("Too slow (over {:.1f} s, par {:.2f})", secs, t.par)); return; }
 		return;
 	}
 	const Vector p = ball.GetLocation(), v = ball.GetVelocity();
@@ -344,6 +365,49 @@ void RLCoach::DrawCombineHud(CanvasWrapper& canvas)
 {
 	if (combinePhase == CombinePhase::Off) return;
 	const Vector2 sz = canvas.GetSize();
+	if (combineEvent == "RC" && combineIndex < static_cast<int>(combineThrows.size()) &&
+		(combinePhase == CombinePhase::Countdown || combinePhase == CombinePhase::Live))
+	{
+		const Combine::RecoveryThrow& t = combineThrows[combineIndex];
+		CameraWrapper cam = gameWrapper->GetCamera();
+		CarWrapper me = gameWrapper->GetLocalCar();
+		// The momentum camera (try-out, rlcoach_combine_momentum_cam): until you land, look the way you're travelling,
+		// not the way the car faces
+		if (*combineMomentumCam && !cam.IsNull() && !me.IsNull() &&
+			(combinePhase == CombinePhase::Countdown || combineRecContact < 0 || combineLiveTicks - combineRecContact < 18))
+		{
+			const Vector v = combinePhase == CombinePhase::Countdown ? Vector(t.vel.x, t.vel.y, t.vel.z) : me.GetVelocity();
+			const float sp = v.magnitude();
+			if (sp > 300.0f)
+			{
+				const Vector dir = v * (1.0f / sp);
+				const Vector carLoc = me.GetLocation();
+				const Vector camLoc = carLoc - dir * 330.0f + Vector(0, 0, 110.0f);
+				const Vector look = carLoc + dir * 250.0f - camLoc;
+				const float hz = std::sqrt(look.X * look.X + look.Y * look.Y);
+				cam.SetLocation(camLoc);
+				cam.SetRotation(Rotator(static_cast<int>(std::atan2(look.Z, hz) / kU2R), static_cast<int>(std::atan2(look.Y, look.X) / kU2R), 0));
+			}
+		}
+		// The ring to get to
+		if (!cam.IsNull())
+		{
+			const Vector camLoc = cam.GetLocation();
+			const Vector camFwd = RotatorToVector(cam.GetRotation());
+			Vector2F prev{};
+			bool prevOk = false;
+			for (int i = 0; i <= 40; i++)
+			{
+				const float a = i * 6.2831853f / 40.0f;
+				const Vector p(t.target.x + Combine::kRecoveryTargetRadius * std::cos(a), t.target.y + Combine::kRecoveryTargetRadius * std::sin(a), 20.0f);
+				Vector2F s;
+				const bool ok = Overlay3D::ToScreen(canvas, camLoc, camFwd, p, s);
+				if (ok && prevOk) Overlay3D::OutlinedLine(canvas, prev, s, 6.0f, 56, 189, 248, 255);
+				prev = s;
+				prevOk = ok;
+			}
+		}
+	}
 	int pts = 0, maxPts = 0;
 	for (int i = 0; i < static_cast<int>(combinePoints.size()) && i <= combineIndex; i++)
 		if (combinePoints[i] >= 0 && (i < combineIndex || combinePhase == CombinePhase::Result || combinePhase == CombinePhase::Done)) { pts += combinePoints[i]; maxPts += 3; }
@@ -488,12 +552,14 @@ void RLCoach::RenderCombine()
 	float slo, shi, rlo, rhi;
 	Combine::SaveLevelBand(pick, slo, shi);
 	Combine::RecoveryLevelBand(pick, rlo, rhi);
-	eventCard("SV", "SAVES", "10 shots at your net. Every one is on target and was checked in the simulator: a perfect car could reach it "
-		"in time. The level sets how much time that is. A save is 2 points, a save that clears it out of danger is 3.",
-		std::format("{}: a perfect car has {:.2f}-{:.2f} s to spare", Combine::SaveLevelName(pick), slo, shi));
-	eventCard("RC", "RECOVERY", "10 throws: you're launched into the air, tilted and spinning, toward the floor, a wall or the ceiling. "
-		"1 point each for landing wheels first, being settled quickly, and keeping your speed (1100+). Every throw was checked: "
-		"a perfect car can get its wheels round in time.",
+	eventCard("SV", "SAVES", "10 real saves from match replays: the shot comes in as it really did, and you start where the defender "
+		"was, with their speed, facing and boost (mirrored and nudged a little, so you can't learn them). A save is 2 points, a save "
+		"that clears it out of danger is 3.",
+		std::format("{}: a good player has {:.2f}-{:.2f} s to spare", Combine::SaveLevelName(pick), slo, shi));
+	eventCard("RC", "RECOVERY", "10 throws: you're launched into the air, tilted and spinning, toward the floor or a wall. Land and get "
+		"to the blue ring by your back post (the ball sits in it, so ball cam points you there) as fast as you can, any way you like. Points by time against the throw's par (a good "
+		"player landing well and driving there); the higher the level, the closer to par you need to be. The camera follows your momentum until "
+		"you land (rlcoach_combine_momentum_cam 0 turns that off).",
 		std::format("{}: {:.2f}-{:.2f} s to spare after the turn", Combine::SaveLevelName(pick), rlo, std::min(rhi, 2.5f)));
 
 	ImGui::Spacing();

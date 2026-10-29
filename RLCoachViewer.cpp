@@ -1152,6 +1152,7 @@ void RLCoach::RenderWindow()
 
 		// A new rep opens on Your shot
 		if (uiTabFile != watching) { uiTabFile = watching; uiTab = 0; }
+		if (uiTab == 1) uiTab = 0;   // Oct 29: the smallest fix is a line on Your shot now, not a tab
 
 		// The root cause (the coach's), else the grades' biggest fix: the part of the rep to practice
 		int rootSeg = -1, fixSeg = -1;
@@ -1444,12 +1445,14 @@ void RLCoach::RenderWindow()
 			}
 		};
 		{
+			// Two tabs (Oct 29): Your shot and the best line. The smallest fix shows as a line on Your shot when it finds one.
 			const char* names[3] = { "YOUR SHOT", "SMALLEST FIX", "BEST LINE" };
-			const float gap = 8.0f * S, tabW = (W - 2 * gap) / 3.0f, tabH = 60.0f * S;
+			const float gap = 8.0f * S, tabW = (W - gap) / 2.0f, tabH = 60.0f * S;
 			const ImVec2 p0 = ImGui::GetCursorScreenPos();
-			for (int t = 0; t < 3; t++)
+			for (int t : { 0, 2 })
 			{
-				const ImVec2 a(p0.x + t * (tabW + gap), p0.y), b(a.x + tabW, a.y + tabH);
+				const int col = t == 0 ? 0 : 1;
+				const ImVec2 a(p0.x + col * (tabW + gap), p0.y), b(a.x + tabW, a.y + tabH);
 				ImGui::SetCursorScreenPos(a);
 				ImGui::PushID(t + 8000);
 				if (ImGui::InvisibleButton("tab", ImVec2(tabW, tabH))) uiTab = t;
@@ -1575,6 +1578,27 @@ void RLCoach::RenderWindow()
 					if (notes.size() > 1) why += "  Also: " + notes[1].cue;
 					subline(why);
 					if (ImGui::IsItemHovered() && !notes[0].detail.empty()) ImGui::SetTooltip("%s", notes[0].detail.c_str());
+				}
+				// The smallest fix (Oct 29): one line when it found the least you could have changed, with a way to watch it
+				{
+					const LineView& fx = line[kFixLine];
+					if (fx.mine && (fx.status == WhatIfStatus::Found || fx.status == WhatIfStatus::CleanerWayIn) && !fx.cue.empty())
+					{
+						std::string cue = fx.cue;
+						cue[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(cue[0])));
+						const std::string text = fx.status == WhatIfStatus::Found
+							? std::format("One change would have made it a {}: {}.", fx.grade, cue)
+							: std::format("A cleaner way into {}: {}.", fx.what, cue);
+						ImGui::PushStyleColor(ImGuiCol_Text, kAccentText);
+						ImGui::TextWrapped("%s", text.c_str());
+						ImGui::PopStyleColor();
+						if (ImGui::IsItemHovered())
+							ImGui::SetTooltip("%s%s", fx.status == WhatIfStatus::Found ? std::format("{}. It held up from {} of {} slightly different starts.", fx.gradeWhy, fx.held, fx.heldOf).c_str() : fx.fixes.c_str(),
+								fx.detail.empty() ? "" : ("\n\n" + fx.detail).c_str());
+						if (LinkButton("Watch that change")) onGame([this]() { ViewerShowLine(kFixLine, false); });
+						ImGui::SameLine();
+						if (LinkButton("Practice it")) onGame([this]() { PracticeLine(kFixLine); });
+					}
 				}
 				ImGui::Dummy(ImVec2(0, 4));
 				tiles(stats);
@@ -1713,7 +1737,7 @@ void RLCoach::RenderWindow()
 			dl->AddRect(p0, ImVec2(p0.x + W, bottom), U32(kLine), 12.0f * S, ImDrawCornerFlags_Bot);
 			{
 				// the open tab's top edge carries the accent
-				const float tabW = (W - 16.0f * S) / 3.0f, ax = p0.x + uiTab * (tabW + 8.0f * S);
+				const float tabW = (W - 8.0f * S) / 2.0f, ax = p0.x + (uiTab == 0 ? 0 : 1) * (tabW + 8.0f * S);
 				dl->AddLine(ImVec2(p0.x + 1, p0.y), ImVec2(p0.x + W - 1, p0.y), U32(kLine));
 				dl->AddRectFilled(ImVec2(ax + 1, p0.y - 1), ImVec2(ax + tabW - 1, p0.y + 1), U32(kPanel));
 				dl->AddLine(ImVec2(ax + 12 * S, p0.y - 60.0f * S + 1), ImVec2(ax + tabW - 12 * S, p0.y - 60.0f * S + 1), U32(kAccent), 2.0f);
