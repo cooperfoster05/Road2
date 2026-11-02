@@ -1080,6 +1080,356 @@ static StageScore FrScore(const Lesson& L, int stage, const std::vector<Frame>& 
 // Dispatch by lesson kind, and the skill tree
 // ============================================================
 
+// ============================================================
+// Kickoffs (Nov 1). The model rep is made in RocketSim (tools/combine/kickoff_model.cpp): the fastest clean kickoff
+// from each spawn with the inputs good players use (an SSL speedflip's jump and dodge timing), checked against 2,600+
+// replay kickoffs. Nov 2 (Coop: the model looked like a side flip): it now cancels the way pros do, the nose dipping
+// 16-18 degrees before the cancel catches it (pros: 17-24) and wheels down about 1.08 s after the dodge (pros: 1.09);
+// the diagonal speedflip gets there in 1.86 s (the SSL median is 1.92, the fastest pros about 1.87), off-centre 2.12
+// (2.17), back centre 2.44 (2.48). The right spawn's kickoff comes first (x < 0 on blue is the right side from the driver's seat;
+// the labels were swapped until Coop caught it, Nov 2), then the same one mirrored from the left spawn.
+// Steps: boost and line up (to the jump), the speedflip (jump, diagonal dodge, cancel, wheels down), the flip into the
+// ball; then the whole kickoff from each side, scored by time to the ball against stars from the replays.
+// ============================================================
+
+namespace
+{
+	int RisingJump(const std::vector<Frame>& fr, int from, int to)
+	{
+		for (int t = std::max(1, from); t <= to && t < static_cast<int>(fr.size()); t++)
+			if (fr[t].jump && !fr[t - 1].jump) return t;
+		return -1;
+	}
+	float Speed(const Frame& f) { return Len(f.carVX, f.carVY, f.carVZ); }
+	float Deg(int unreal) { return unreal * (360.0f / 65536.0f); }
+	float HeadingDeg(const Frame& f) { float d = Deg(f.carYaw); while (d > 180) d -= 360; while (d < -180) d += 360; return d; }
+	float AngleDiff(float a, float b) { float d = a - b; while (d > 180) d -= 360; while (d < -180) d += 360; return std::fabs(d); }
+	bool StickDiagonal(const Frame& f) { return f.pitch <= -0.3f && std::max(std::fabs(f.yaw), std::fabs(f.steer)) >= 0.4f; }
+
+	// What happened in one kickoff (live or the model), found by the inputs and the car: the first jump, the dodge after
+	// it, landing, the flip into the ball, the hit and the arrival
+	KickoffSide FindKo(const std::vector<Frame>& fr, int start, int end, bool speedflip)
+	{
+		KickoffSide k;
+		k.start = start;
+		k.end = end = std::min(end, static_cast<int>(fr.size()) - 1);
+		for (int t = start; t <= end; t++)
+		{
+			if (k.arrive < 0 && CarBall(fr[t]) < 200.0f) k.arrive = t;
+			if (k.touch < 0 && t > start && fr[t].touch && !fr[t - 1].touch) k.touch = t;
+		}
+		const int hit = k.touch >= 0 ? k.touch : end;
+		const int j = RisingJump(fr, start + 1, hit);
+		// A speedflip's jump comes well before the ball; a first jump in the last half second is a plain flip-in
+		if (speedflip && j >= 0 && (k.touch < 0 || j < k.touch - 60))
+		{
+			k.jump = j;
+			const int d = RisingJump(fr, k.jump + 1, std::min(hit, k.jump + 60));
+			if (d >= 0) k.dodge = d;   // (a second press soon after the jump: the car can still read as on the ground the tick it flips)
+			const int from = k.dodge >= 0 ? k.dodge + 4 : k.jump + 4;
+			for (int t = from; t <= hit; t++) if (fr[t].onGround) { k.land = t; break; }
+			if (k.land >= 0) k.flipIn = RisingJump(fr, k.land, hit);
+		}
+		else k.flipIn = j;
+		return k;
+	}
+
+	// Which kickoff in the model a stage belongs to (by its start tick)
+	const KickoffSide& KoSideFor(const Lesson& L, int tick)
+	{
+		for (const KickoffSide& s : L.koSides) if (tick >= s.start && tick <= s.end) return s;
+		return L.koSides.front();
+	}
+
+	int StarScore(const Lesson& L, float secs, std::string& why)
+	{
+		const float* st = L.koStars;
+		const int stars = secs <= st[2] ? 3 : secs <= st[1] ? 2 : secs <= st[0] ? 1 : 0;
+		if (stars == 3) why = std::format("{:.2f} s to the ball: three stars", secs);
+		else why = std::format("{:.2f} s to the ball: {} (the next star at {:.2f} s)", secs, stars == 2 ? "two stars" : stars == 1 ? "one star" : "no stars yet",
+			st[std::min(2, stars)]);
+		return stars == 3 ? 5 : stars == 2 ? 4 : stars == 1 ? 3 : secs <= st[0] + 0.15f ? 2 : 1;
+	}
+
+	// The step (0 the start, 1 the speedflip, 2 the flip in) of a kickoff lesson's step index; flip-in lessons have
+	// steps 0 the drive, 1 the flip in
+	int KoStepKind(const Lesson& L, int step)
+	{
+		const int per = L.koSpeedflip ? 3 : 2;
+		const int k = step % per;
+		return L.koSpeedflip ? k : (k == 0 ? 0 : 2);
+	}
+}
+
+Lesson Lessons::Kickoff(const std::string& id, const std::vector<Frame>& model)
+{
+	Lesson L;
+	L.kind = LessonKind::Kickoff;
+	L.id = id;
+	L.model = model;
+	L.koSpeedflip = id != "kickoff_flipin";
+	const bool back = id == "kickoff_back";
+	L.koSpawn = id == "kickoff_offcentre" ? "off-centre" : back ? "back centre" : "diagonal";
+	L.name = L.koSpeedflip ? std::format("Kickoff: {} speedflip", L.koSpawn) : "Kickoff: boost and flip in";
+	if (model.size() < 120) return Lesson{};
+	// Stars from the openings book (ranked and pro replays, time to within 200 of the ball): one star is a typical
+	// Gold-Plat kickoff, two a typical Champ one, three about the SSL median (diagonal 1.92; three stars at 1.94; the
+	// model gets there in 1.86). Flip-ins: about 2.20 (slow Gold), 2.11 (the Gold-Plat median), 2.09 (Diamond-Champ).
+	L.koStarsWho = L.koSpeedflip ? "One star is a typical Gold-Plat kickoff, two a typical Champ one, three about the SSL median."
+		: "Two stars is the typical Gold-Plat flip-in, three a Diamond-Champ one.";
+	if (!L.koSpeedflip) { L.koStars[0] = 2.20f; L.koStars[1] = 2.11f; L.koStars[2] = 2.09f; }
+	else if (id == "kickoff_offcentre") { L.koStars[0] = 2.40f; L.koStars[1] = 2.24f; L.koStars[2] = 2.17f; }
+	else if (back) { L.koStars[0] = 2.77f; L.koStars[1] = 2.64f; L.koStars[2] = 2.51f; }
+	else { L.koStars[0] = 2.11f; L.koStars[1] = 1.98f; L.koStars[2] = 1.94f; }
+
+	// The kickoffs in the model: a new one starts where the car jumps back to a spawn
+	std::vector<int> starts = { 0 };
+	for (int t = 1; t < static_cast<int>(model.size()); t++)
+		if (Len(model[t].carX - model[t - 1].carX, model[t].carY - model[t - 1].carY, 0) > 500.0f) starts.push_back(t);
+	for (size_t i = 0; i < starts.size() && i < 2; i++)
+	{
+		const int end = i + 1 < starts.size() ? starts[i + 1] - 1 : static_cast<int>(model.size()) - 1;
+		KickoffSide k = FindKo(model, starts[i], end, L.koSpeedflip);
+		if (k.touch < 0 || k.arrive < 0 || k.flipIn < 0 || (L.koSpeedflip && (k.dodge < 0 || k.land < 0))) return Lesson{};
+		L.koSides.push_back(k);
+	}
+	const KickoffSide& a = L.koSides.front();
+	const float jumpS = (a.jump - a.start) / 120.0f, dodgeS = (a.dodge - a.start) / 120.0f, landS = (a.land - a.start) / 120.0f;
+	const float arriveS = (a.arrive - a.start) / 120.0f;
+	const float landSpeed = a.land >= 0 ? Speed(model[a.land]) : 0.0f;
+
+	LessonStep lineUp;
+	lineUp.name = "Boost and line up";
+	lineUp.what = L.koSpeedflip ? "Boost from the very first moment, angle the car a touch off the ball, and jump." : "Boost from the very first moment and drive straight at the ball.";
+	lineUp.why = L.koSpeedflip ? "Every tick without boost is speed you never get back, and the angle is what points the diagonal flip at the ball." : "A kickoff is a race: the first half second of boost is most of your speed at the ball.";
+	if (L.koSpeedflip)
+		lineUp.tips = { "Boost and throttle on the countdown's go, not a beat after.",
+			std::format("Steer a little so the car points just off the ball (the model is {:.0f} degrees off when it jumps).", AngleDiff(HeadingDeg(model[a.jump]),
+				std::atan2(model[a.jump].ballY - model[a.jump].carY, model[a.jump].ballX - model[a.jump].carX) * 57.29578f)),
+			std::format("Jump at about {:.2f} s, with boost still held (good players jump at 0.37-0.47 s from {}).", jumpS, L.koSpawn == "diagonal" ? "the diagonal" : L.koSpawn) };
+	else
+		lineUp.tips = { "Boost and throttle on the countdown's go.", "Keep the car pointed at the ball: no swerving, it costs speed.", "Hold boost the whole way." };
+	lineUp.cue = L.koSpeedflip ? "Boost on go, jump on time." : "Boost on go, straight at it.";
+	lineUp.start = a.start;
+
+	LessonStep sf;
+	sf.name = "The speedflip";
+	sf.what = "A quick jump, a diagonal flip, then pull the stick straight back to cancel it and hold air roll, so you land on your wheels already going fast.";
+	sf.why = "The flip's push without the flip's spin: you keep boosting the whole time and land supersonic, instead of tumbling.";
+	sf.tips = { std::format("Tap jump, then flip diagonally almost at once (the model flips {:.2f} s after the jump).", dodgeS - jumpS),
+		"Straight away pull the stick back to stop the front flip, and hold air roll to stop the side spin. Keep boosting.",
+		std::format("Land flat on your wheels (the model lands at {:.2f} s going {:.0f}).", landS, landSpeed) };
+	sf.cue = "Flip, cancel, wheels down.";
+	sf.start = std::max(a.start, a.jump - 8);
+
+	LessonStep in;
+	in.name = "Flip into the ball";
+	in.what = "Keep boosting straight at the ball and flip into it just before you reach it.";
+	in.why = "The flip is extra power at the moment that counts: it decides who wins the hit when you both arrive together.";
+	in.tips = { std::format("Flip when you're about {:.0f} away (the model starts its jump {:.2f} s before it gets there).",
+		CarBall(model[a.flipIn]) - 92.75f, (a.arrive - a.flipIn) / 120.0f),
+		"Flip forward through the middle of the ball.",
+		std::format("Get there fast: the model is at the ball in {:.2f} s.", arriveS) };
+	in.cue = "Flip right into it.";
+	in.start = L.koSpeedflip ? std::max(a.land + 6, a.flipIn - 40) : std::max(a.start, a.flipIn - 40);
+
+	if (L.koSpeedflip) L.steps = { lineUp, sf, in };
+	else { lineUp.name = "Boost at the ball"; L.steps = { lineUp, in }; }
+	const int per = static_cast<int>(L.steps.size());
+	const std::string side0 = back ? "" : " (right)";
+	if (L.koSpeedflip)
+		L.stages = { { 0, 0, "Step 1: Boost and line up" }, { 1, 1, "Step 2: The speedflip" }, { 0, 1, "Steps 1-2 together" },
+			{ 2, 2, "Step 3: Flip into the ball" }, { 0, 2, "The whole kickoff" + side0, true } };
+	else
+		L.stages = { { 0, 0, "Step 1: Boost at the ball" }, { 1, 1, "Step 2: Flip into it" }, { 0, 1, "The whole kickoff" + side0, true } };
+	if (L.koSides.size() > 1)
+	{
+		// The left spawn: the same steps from the mirrored kickoff (practiced whole)
+		const KickoffSide& b = L.koSides[1];
+		for (int i = 0; i < per; i++)
+		{
+			LessonStep st = L.steps[i];
+			st.name += back ? " (mirrored)" : " (left)";
+			st.start = L.steps[i].start - a.start + b.start;
+			L.steps.push_back(st);
+		}
+		L.stages.push_back({ per, 2 * per - 1, back ? "The whole kickoff (mirrored)" : "The whole kickoff (left)", true });
+	}
+	L.notes = {
+		"Who wins a kickoff isn't only who gets there first: in the replays, getting there 0.15 s+ first sent the ball up field 61% of the time, but your team only won the next touch 21% (40% even, 40% lost). Hit it clean and be ready for the next touch.",
+		"Variations: at SSL a delayed kickoff (arrive a beat late, let them hit it into you) and a hook (curve in from the side) win the ball more often than a straight speedflip. A fake (sit still and wait) beats a flip-in more than it loses.",
+		"Teammates: sitting back in the middle beat cheating up at SSL. Grab corner boost only when your taker is sure to get there first.",
+		"Test it against real kickoffs: the Combine's Kickoffs event plays a real taker's kickoff from ranked and pro games against you.",
+	};
+	return L;
+}
+
+static int KoWatchEnd(const Lesson& L, int stage)
+{
+	const LessonStage& st = L.stages[stage];
+	const KickoffSide& k = KoSideFor(L, L.steps[st.first].start);
+	switch (KoStepKind(L, st.last))
+	{
+	case 0: return L.koSpeedflip ? k.jump + 14 : k.flipIn - 2;
+	case 1: return k.land + 14;
+	default: return std::min(k.end, k.touch + 90);
+	}
+}
+
+static bool KoStageDone(const Lesson& L, int stage, const std::vector<Frame>& full, int startTick)
+{
+	const int t = static_cast<int>(full.size()) - 1;
+	if (t <= startTick + 4) return false;
+	const LessonStage& st = L.stages[stage];
+	const KickoffSide& m = KoSideFor(L, startTick);
+	const int lastKind = KoStepKind(L, st.last);
+	if (t > startTick + 720) return true;   // 6 s: something went wrong
+	KickoffSide k = FindKo(full, m.start, t, L.koSpeedflip);
+	if (lastKind == 0)
+	{
+		if (L.koSpeedflip) return (k.jump >= startTick && t >= k.jump + 10) || t > m.jump + 40;
+		return (k.flipIn >= startTick) || t >= m.flipIn + 6;   // the drive is over once you go for the flip
+	}
+	if (lastKind == 1) return (k.dodge >= 0 && k.land >= 0 && t >= k.land + 8) || t > m.land + 48;
+	// up to the hit: a second after it (where the ball's going is part of the score), or a second past the model's
+	return (k.touch >= 0 && t >= k.touch + 120) || t > m.touch + 180;
+}
+
+static StageScore KoScore(const Lesson& L, int stage, const std::vector<Frame>& full, int startTick)
+{
+	StageScore out;
+	const int n = static_cast<int>(full.size());
+	if (n <= startTick + 10) return out;
+	const LessonStage& st = L.stages[stage];
+	const KickoffSide& m = KoSideFor(L, startTick);
+	const KickoffSide k = FindKo(full, m.start, n - 1, L.koSpeedflip);
+	struct Why { int score; std::string text; };
+	std::vector<Why> whys;
+	const int firstKind = KoStepKind(L, st.first), lastKind = KoStepKind(L, st.last);
+
+	// The start: boost from go, the angle, the jump's timing
+	if (firstKind == 0 && L.koSpeedflip)
+	{
+		int sc = 5;
+		const int to = k.jump >= 0 ? k.jump : std::min(n - 1, m.jump);
+		int on = 0, all = 0;
+		for (int t = startTick; t < to; t++) { all++; on += full[t].boost; }
+		if (all > 0 && on < all * 0.9f) { sc = std::min(sc, 3); whys.push_back({ 3, std::format("Boost from the very first moment (on for {:.0f}% of the start)", 100.0f * on / all) }); }
+		if (k.jump < 0 && k.flipIn >= 0) { sc = 2; whys.push_back({ 2, "Went straight for the flip-in: no speedflip" }); }
+		else if (k.jump < 0) { sc = 1; whys.push_back({ 1, "No jump: the speedflip starts with one" }); }
+		else
+		{
+			const float d = (k.jump - m.jump) / 120.0f;
+			const float ad = std::fabs(d);
+			const int js = ad <= 0.05f ? 5 : ad <= 0.10f ? 4 : ad <= 0.20f ? 3 : 2;
+			if (js < 5) whys.push_back({ js, std::format("Jumped {:.2f} s {} than the model", ad, d > 0 ? "later" : "earlier") });
+			sc = std::min(sc, js);
+			const float ah = AngleDiff(HeadingDeg(full[k.jump]), HeadingDeg(full[m.jump]));
+			if (ah > 6.0f)
+			{
+				const int hs = ah <= 12.0f ? 4 : ah <= 20.0f ? 3 : 2;
+				sc = std::min(sc, hs);
+				whys.push_back({ hs, std::format("Pointed {:.0f} degrees off the model's angle when you jumped", ah) });
+			}
+		}
+		out.stepScores.push_back(sc);
+	}
+	else if (firstKind == 0)
+	{
+		// flip-in lesson: the drive
+		int sc = 5;
+		const int to = k.flipIn >= 0 ? k.flipIn : std::min(n - 1, m.flipIn);
+		int on = 0, all = 0;
+		for (int t = startTick; t < to; t++) { all++; on += full[t].boost; }
+		if (all > 0 && on < all * 0.9f) { sc = 3; whys.push_back({ 3, std::format("Hold boost the whole way (on for {:.0f}%)", 100.0f * on / all) }); }
+		const float sp = Speed(full[to]), msp = Speed(full[std::min(static_cast<int>(full.size()) - 1, m.flipIn)]);
+		if (sp < msp - 150.0f) { sc = std::min(sc, sp < msp - 400.0f ? 2 : 4); whys.push_back({ sc, std::format("{:.0f} uu/s going into the flip (the model: {:.0f})", sp, msp) }); }
+		out.stepScores.push_back(sc);
+	}
+
+	// The speedflip itself
+	if (L.koSpeedflip && firstKind <= 1 && lastKind >= 1)
+	{
+		int sc = 5;
+		if (k.dodge < 0)
+		{
+			sc = k.jump < 0 && k.flipIn >= 0 ? 2 : 1;   // went straight for the flip-in: a kickoff, just not this one
+			if (!(firstKind == 0 && k.jump < 0)) whys.push_back({ sc, k.jump < 0 ? "No speedflip: you went straight for the flip-in" : "No flip after the jump" });
+		}
+		else
+		{
+			const Frame& d = full[k.dodge];
+			if (!StickDiagonal(d)) { sc = std::min(sc, 3); whys.push_back({ 3, "Flip diagonally (stick forward and to the side), not straight" }); }
+			const float gap = (k.dodge - k.jump) / 120.0f, mgap = (m.dodge - m.jump) / 120.0f;
+			if (gap > mgap + 0.08f) { sc = std::min(sc, gap > mgap + 0.2f ? 3 : 4); whys.push_back({ sc, std::format("Flip sooner after the jump ({:.2f} s; the model: {:.2f})", gap, mgap) }); }
+			// the cancel: stick back within 10 ticks, and held for most of the flip
+			int firstBack = -1, back = 0, span = 0;
+			const int until = std::min({ n - 1, k.dodge + 50, k.land >= 0 ? k.land : n - 1 });
+			for (int t = k.dodge + 1; t <= until; t++) { span++; if (full[t].pitch >= 0.5f) { back++; if (firstBack < 0) firstBack = t; } }
+			if (firstBack < 0 || firstBack > k.dodge + 10 || back < span * 0.7f)
+			{
+				sc = std::min(sc, 2);
+				whys.push_back({ 2, firstBack < 0 ? "Pull the stick back right after the flip: that's the cancel" : "Pull the stick back sooner and hold it there (the cancel)" });
+			}
+			if (k.land < 0) { sc = std::min(sc, 2); whys.push_back({ 2, "Never landed before the ball" }); }
+			else
+			{
+				const Frame& l = full[k.land];
+				if (std::fabs(Deg(l.carPitch)) > 25.0f || std::fabs(Deg(l.carRoll)) > 25.0f) { sc = std::min(sc, 2); whys.push_back({ 2, "Landed tilted: hold air roll to keep the wheels flat" }); }
+				const float ls = Speed(l), mls = Speed(full[std::min(n - 1, m.land)]);
+				if (ls < mls - 120.0f) { const int s2 = ls < mls - 300.0f ? 3 : 4; sc = std::min(sc, s2); whys.push_back({ s2, std::format("Landed going {:.0f} (the model: {:.0f})", ls, mls) }); }
+			}
+		}
+		out.stepScores.push_back(sc);
+	}
+
+	// Into the ball, or the whole kickoff: time to the ball, the flip into it, where the ball went
+	if (lastKind == 2)
+	{
+		int sc;
+		const bool whole = st.whole;
+		if (k.arrive < 0 || k.touch < 0) { sc = 1; whys.push_back({ 1, k.arrive >= 0 ? "Got there but never touched it" : "Never got to the ball" }); }
+		else
+		{
+			std::string why;
+			if (whole) sc = StarScore(L, (k.arrive - startTick) / 120.0f, why);
+			else
+			{
+				const float d = (k.arrive - m.arrive) / 120.0f;
+				sc = d <= 0.05f ? 5 : d <= 0.10f ? 4 : d <= 0.20f ? 3 : d <= 0.35f ? 2 : 1;
+				why = std::fabs(d) < 0.01f ? "At the ball with the model" : std::format("At the ball {:.2f} s {} the model", std::fabs(d), d > 0 ? "after" : "before");
+			}
+			whys.push_back({ sc, why });
+			// flipped into it: a jump started within 0.5 s before the hit
+			const int fj = RisingJump(full, std::max(startTick, k.touch - 60), k.touch);
+			if (fj < 0) { sc = std::min(sc, 3); whys.push_back({ 3, "Flip into the ball for a stronger hit" }); }
+			const int after = std::min(n - 1, k.touch + 60);
+			if (full[after].ballVY < -300.0f) { sc = std::min(sc, 2); whys.push_back({ 2, "The ball went back toward your goal: hit through the middle of it" }); }
+			if (whole && L.koSpeedflip && k.dodge >= 0 && !StickDiagonal(full[k.dodge])) { sc = std::min(sc, 3); whys.push_back({ 3, "A straight flip, not a speedflip" }); }
+		}
+		out.stepScores.push_back(sc);
+	}
+
+	int score = 5;
+	for (int s : out.stepScores) score = std::min(score, s);
+	out.score = out.stepScores.empty() ? 0 : score;
+	std::stable_sort(whys.begin(), whys.end(), [](const Why& x, const Why& y) { return x.score < y.score; });
+	for (const Why& w : whys) out.lines.push_back(w.text);
+	if (out.lines.empty() || out.score == 5) out.lines.insert(out.lines.begin(), out.score == 5 ? "Clean" : "");
+	return out;
+}
+
+// The running start (Nov 2, Coop): step 3 of a speedflip used to drop you in frozen at full speed, just landed and
+// pointed off the ball, so you sailed past it; step 2 gave you 8 ticks to jump. Now the model drives the half second
+// before the step (never from before the kickoff's own start) and hands over where the step begins.
+int Lesson::StageRideFrom(int stage) const
+{
+	if (kind != LessonKind::Kickoff || koSides.empty() || stage < 0 || stage >= static_cast<int>(stages.size())) return -1;
+	if (KoStepKind(*this, stages[stage].first) == 0) return -1;
+	const int start = StageStart(stage);
+	return std::max(KoSideFor(*this, start).start, start - 60);
+}
+
 int Lesson::StageWatchEnd(int stage) const
 {
 	switch (kind)
@@ -1087,6 +1437,7 @@ int Lesson::StageWatchEnd(int stage) const
 	case LessonKind::DoubleTap:   return DtWatchEnd(*this, stage);
 	case LessonKind::CeilingShot: return CsWatchEnd(*this, stage);
 	case LessonKind::FlipReset:   return FrWatchEnd(*this, stage);
+	case LessonKind::Kickoff:     return KoWatchEnd(*this, stage);
 	default:                      return AdWatchEnd(*this, stage);
 	}
 }
@@ -1098,6 +1449,7 @@ bool Lessons::StageDone(const Lesson& L, int stage, const std::vector<Frame>& fu
 	case LessonKind::DoubleTap:   return DtStageDone(L, stage, full, startTick);
 	case LessonKind::CeilingShot: return CsStageDone(L, stage, full, startTick);
 	case LessonKind::FlipReset:   return FrStageDone(L, stage, full, startTick);
+	case LessonKind::Kickoff:     return KoStageDone(L, stage, full, startTick);
 	default:                      return AdStageDone(L, stage, full, startTick);
 	}
 }
@@ -1110,6 +1462,7 @@ StageScore Lessons::Score(const Lesson& L, int stage, const std::vector<Frame>& 
 	case LessonKind::DoubleTap:   return DtScore(L, stage, full, startTick, wentIn, floorFirst, ref, compareToModel);
 	case LessonKind::CeilingShot: return CsScore(L, stage, full, startTick, wentIn, floorFirst, ref, compareToModel);
 	case LessonKind::FlipReset:   return FrScore(L, stage, full, startTick, wentIn, floorFirst, ref, compareToModel);
+	case LessonKind::Kickoff:     return KoScore(L, stage, full, startTick);
 	default:                      return AdScore(L, stage, full, startTick, wentIn, floorFirst, ref, compareToModel);
 	}
 }
@@ -1120,6 +1473,7 @@ Lesson Lessons::Build(const std::string& id, const std::vector<Frame>& model)
 	if (id == "double_tap") return DoubleTap(model);
 	if (id == "ceiling_shot") return CeilingShot(model);
 	if (id == "flip_reset") return FlipReset(model);
+	if (id.rfind("kickoff_", 0) == 0) return Kickoff(id, model);
 	return Lesson{};
 }
 
@@ -1135,6 +1489,11 @@ const std::vector<LessonInfo>& Lessons::Catalog()
 		{ "ceiling_double_tap", "Ceiling double tap", "Off the ceiling into the backboard, then the second touch.", { "ceiling_shot", "double_tap" }, false },
 		{ "ceiling_flip_reset", "Ceiling flip reset", "Off the ceiling into a reset, then the shot.", { "ceiling_shot", "flip_reset" }, false },
 		{ "flip_reset_double_tap", "Flip reset double tap", "Reset, flip it into the backboard, then the second touch.", { "flip_reset", "double_tap" }, false },
+		// Kickoffs (Nov 1): the flip-in first, then the speedflip from each spawn
+		{ "kickoff_flipin", "Kickoff: boost and flip in", "Boost on go, straight at the ball, flip into it. The kickoff most players start with.", {}, true },
+		{ "kickoff_diagonal", "Kickoff: diagonal speedflip", "The fastest kickoff from the corner spawns: jump, diagonal flip, cancel, flip in. SSL players use it 97% of the time.", { "kickoff_flipin" }, true },
+		{ "kickoff_offcentre", "Kickoff: off-centre speedflip", "The speedflip from the spawns beside the goal.", { "kickoff_diagonal" }, true },
+		{ "kickoff_back", "Kickoff: back centre speedflip", "The speedflip from the spawn in front of your goal: the longest run.", { "kickoff_diagonal" }, true },
 	};
 	return c;
 }

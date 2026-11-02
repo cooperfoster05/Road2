@@ -6,6 +6,8 @@
 
 #include "Grader.h"
 #include "ShotBook.h"
+#include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -34,7 +36,8 @@ public:
 		const std::string& shotKey, const std::string& refFile, bool bailed);
 
 	// Grades any rep that's new or whose benchmark changed, then saves. Slow the first time; run it on a worker thread.
-	void Refresh(const std::filesystem::path& rlcoachFolder, ShotBook& book);
+	// stop (Nov 1): set it to end early (unloading the plugin mid-regrade); what's graded so far is still saved.
+	void Refresh(const std::filesystem::path& rlcoachFolder, ShotBook& book, const std::atomic<bool>* stop = nullptr);
 
 	void Load(const std::filesystem::path& rlcoachFolder);   // once; later calls do nothing
 	void Save(const std::filesystem::path& rlcoachFolder);   // only writes if something changed
@@ -44,7 +47,9 @@ public:
 	// Makes the next Refresh redo every rep of this shot (e.g. after it's marked as a double-tap drill)
 	void Invalidate(const std::string& shotKey);
 	struct Brief { int overall = 0; int shotType = 0; };
-	bool TryCopy(std::unordered_map<std::string, Brief>& out);
+	// seen (Nov 1): the change count of the last copy; nothing is copied when no grade changed since (the viewer
+	// calls this every frame, and rebuilding 1,500+ entries each frame was wasted work)
+	bool TryCopy(std::unordered_map<std::string, Brief>& out, uint64_t* seen = nullptr);
 	void Copy(std::unordered_map<std::string, int>& out);   // waits briefly if a refresh is storing a grade
 
 private:
@@ -54,4 +59,5 @@ private:
 	std::unordered_map<std::string, GradeRecord> grades;
 	bool loaded = false;
 	bool dirty = false;
+	std::atomic<uint64_t> changes{ 1 };   // bumped whenever a grade is added or replaced
 };

@@ -123,7 +123,9 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	CoachBook coachBook;               // v2: the coaching playbook, and which checks your reps back up
 	std::thread gradeThread;
 	std::atomic<bool> gradeThreadBusy{ false };
+	std::atomic<bool> gradeStop{ false };     // set on unload: a regrade in progress ends early (Nov 1)
 	std::unordered_map<std::string, GradeBook::Brief> uiAutoGrades;   // render thread copy
+	uint64_t uiAutoGradesSeen = 0;        // render thread: GradeBook's change count at that copy
 	void StartGradeRefresh();
 
 	// Copy of the segments for the viewer window (render thread)
@@ -232,6 +234,9 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	bool  uiLoop = true;
 	std::shared_ptr<bool> showUngraded;   // rlcoach_viewer_show_ungraded
 	std::shared_ptr<int>  viewerRange;    // rlcoach_viewer_range: 0 today, 1 last 7 days, 2 starred, 3 all
+	std::shared_ptr<int>  viewerGradeFrom;// rlcoach_viewer_grade_from: whose grade the grade filter reads: 0 either, 1 yours, 2 auto
+	std::shared_ptr<int>  viewerGrades;   // rlcoach_viewer_grades: which grades show, bit g-1 for grade g (31 = all)
+	std::shared_ptr<int>  viewerShotFilter; // rlcoach_viewer_shot: 0 all shots, else the auto grade's shot type + 1
 
 	void ViewerLoad(const RepListItem& item);  // game thread
 	void ViewerExit();                         // game thread
@@ -305,6 +310,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	SegKind practiceKind = SegKind::Approach;
 	int   practiceSegStart = 0;              // start tick of the practiced segment (for grading)
 	int   practiceTargetTick = 0;            // the moment you picked (segment start, or the viewer's playhead)
+	int   practiceRideUntil = -1;            // lessons: the model drives the car up to this tick (a running start), then it's yours
 	int   practiceStartTick = 0;             // where each attempt starts (target minus lead-in)
 	int   practiceBallStartTick = 0;         // never start before the ball is moving
 	float practiceLeadIn = 0.5f;             // seconds of lead-in before the target
@@ -337,6 +343,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::string practiceRefLabel;
 	bool practiceGhostLine = false;          // practiceRefFrames is a line to follow: its inputs show as the controller ghost
 	std::vector<std::pair<int, int>> practiceFineSpans;   // where that line's inputs are fine aim (ticks)
+	float practiceInputMatch = -1.0f;        // the last attempt's input match with the line it followed, 0-100 (-1 none)
 
 	// Copies for the viewer window
 	std::atomic<bool>  uiPracticeActive{ false };
@@ -350,8 +357,11 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void PracticeBegin(int targetTick, SegKind kind, int segStart, const std::string& label);
 	void PracticeSetLeadIn(float sec);
 	void PracticeReleaseFlip(CarWrapper& car);
+	void PracticeLimitBoost(CarWrapper& car);
 	void PracticeTick(CarWrapper& car, const ControllerInput& in);
 	void PracticeApplyStart(CarWrapper& car, BallWrapper& ball, bool frozen);
+	void PracticeApplyFrame(CarWrapper& car, BallWrapper& ball, const Frame& f, bool frozen, bool holdFlip);
+	int  LearnHandover() const { return practiceRideUntil >= 0 ? practiceRideUntil : practiceStartTick; }
 	void PracticeFinishAttempt(const std::string& reason);
 	void PracticeRetry();
 	void PracticeExit();
@@ -416,6 +426,10 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 		float speed = 1.0f, lastSpeed = 1.0f;
 		StageScore last;
 		std::vector<std::string> events;
+		std::vector<char> stageWhole;          // the stage is a whole run (kickoffs have one per side)
+		std::vector<std::string> notes;        // more about it, under the page (kickoffs)
+		float stars[3] = { 0, 0, 0 };          // kickoffs: time to the ball for 1-3 stars
+		std::string starsWho;
 	};
 	std::mutex uiLearnMutex;
 	UiLearn uiLearn;
@@ -462,6 +476,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::shared_ptr<int>   padJump, padBoost, padSlide, padRollLeft, padRollRight;   // rlcoach_pad_<action>: button index
 	std::shared_ptr<int>   targetHitbox;      // rlcoach_target_hitbox: 0 off, 1 for your touch, 2 for the earliest intercept
 	std::shared_ptr<float> ghostOpacity;      // rlcoach_ghost_opacity: the controller ghost when practicing a line, 0-1 (0 = off)
+	std::shared_ptr<float> windowSize;        // rlcoach_window_size: the Road2 window's size, 0.6-1.6 (Nov 1)
 	void RegisterLookCvars();
 	void RenderLookSettings();
 	void RenderPadSettings();
@@ -469,20 +484,52 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	// ---- The Combine (Oct 28, RLCoachCombine.cpp): short scored events run as seeded sets. First event: saves. ----
 	enum class CombinePhase { Off, Building, Countdown, Live, Result, Done };
 	CombinePhase combinePhase = CombinePhase::Off;
-	std::string combineEvent;                // "SV" saves, "RC" recovery
+	std::string combineEvent;                // "SV" saves, "RC" recovery, "RD" reads, "FT" first touches, "FF" 50s, "SD" shadow defense, "KO" kickoffs
 	int combineLevel = 1;
 	uint32_t combineSeed = 0;
 	std::vector<Combine::SaveShot> combineShots;
 	std::vector<Combine::RecoveryThrow> combineThrows;
+	std::vector<Combine::ReadSetup> combineReads;
+	std::vector<Combine::TouchShot> combineTouches;
+	// The bot events (50s, shadow defense): every real moment, loaded on first use by the set-building thread
+	std::vector<Combine::Challenge> combineChallengesAll;
+	std::atomic<bool> combineChallengesLoaded{ false };
+	std::vector<Combine::Challenge> combineChallenges;
+	bool combineBallFree = false;            // the ball has stopped following its real path
+	bool combineBotTouched = false;
+	int combineBotFirstTouch = -1, combineBotWait = 0;
+	bool CombineUsesBot() const { return combineEvent == "FF" || combineEvent == "SD" || combineEvent == "KO"; }
+	int combineKoYou = -1, combineKoBot = -1;   // kickoffs: the tick each of you got to the ball
+	std::vector<Combine::SaveSituation> combinePasses;   // real passes (data/RLCoach/combine/pass_situations.csv)
+	bool combinePassesLoaded = false;
+	int combineCtrlTicks = 0, combineCtrlTotal = 0;      // first touches: ticks the ball stayed with you after the first touch
+	int combineFirstTouch = -1;              // live tick of your first touch on this item
+	struct CombineBuilt
+	{
+		std::vector<Combine::SaveShot> shots;
+		std::vector<Combine::RecoveryThrow> throws;
+		std::vector<Combine::ReadSetup> reads;
+		std::vector<Combine::TouchShot> touches;
+		std::vector<Combine::Challenge> challenges;
+	};
+	Vector combineCarPrev;                   // the same, for spotting a free play reset (a jump of 400+ in a tick)
+	int combineResets = 0;                   // resets used on this item (2 allowed; the third skips it)
 	std::vector<Combine::SaveSituation> combineSituations;   // real saves (data/RLCoach/combine/save_situations.csv)
 	bool combineSituationsLoaded = false;
 	std::shared_ptr<bool> combineMomentumCam = std::make_shared<bool>(true);   // rlcoach_combine_momentum_cam
 	int combineSavedUnlimited = -1;          // free play's unlimited boost, put back when the Combine ends
+	int practiceSavedUnlimited = -1;         // the same for kickoff lessons (no unlimited boost while practicing them)
 	// Recovery, during a throw: first contact, whether the body hit first, when you were settled on your wheels
 	int combineRecContact = -1, combineRecSettle = -1, combineRecGround = 0;
 	bool combineRecBodyHit = false;
 	Vector combineRecPrevVel;
-	int CombineCount() const { return static_cast<int>(combineEvent == "RC" ? combineThrows.size() : combineShots.size()); }
+	int CombineCount() const
+	{
+		return static_cast<int>(combineEvent == "RC" ? combineThrows.size() : combineEvent == "RD" ? combineReads.size()
+			: combineEvent == "FT" ? combineTouches.size() : CombineUsesBot() ? combineChallenges.size() : combineShots.size());
+	}
+	// The score so far: the sum of the items (the speed course: its best attempt)
+	void CombineScore(int& pts, int& maxPts, bool countCurrent) const;
 	int combineIndex = 0, combinePhaseTicks = 0, combineLiveTicks = 0, combineLastTouch = -1;
 	bool combineTouched = false;
 	std::vector<int> combinePoints;          // per shot (-1 = didn't count: the shot missed by itself)
@@ -494,7 +541,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	struct UiCombine
 	{
 		bool running = false, building = false, done = false;
-		std::string code, levelName, status, medal, event, item;   // event: "SAVES", item: "Shot" / "Throw"
+		std::string code, levelName, status, medal, event, item, eventCode;   // event: "SAVES", item: "Shot" / "Throw", eventCode "SV"
 		int level = 1, shot = 0, shots = 0, points = 0, maxPoints = 0, best = -1;
 		std::vector<std::string> outcomes;
 		std::vector<int> pointsEach;           // per item (-1 = didn't count)
@@ -508,10 +555,11 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void CombineOpen();
 	void CombineClose();
 	void CombineStart(const std::string& event, int level, uint32_t seed);   // any thread
-	void CombineBegin(std::vector<Combine::SaveShot> shots, std::vector<Combine::RecoveryThrow> throws);   // game thread, once built
+	void CombineBegin(CombineBuilt built);   // game thread, once built
 	void CombineExit();
 	void CombineTick(CarWrapper& car);
 	void CombinePlace(CarWrapper& car, BallWrapper& ball, bool frozen);
+	void CombinePlaceBot(float t, bool frozen);
 	void CombineEndShot(int points, const std::string& what);
 	void CombinePublish();
 	void CombineLoadBests();
@@ -524,7 +572,8 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	// groundwork for 50s, shadow defense and kickoff battles in the Combine. Console: rlcoach_bot_spawn,
 	// rlcoach_bot_mode 0-3, rlcoach_bot_remove. ----
 	uintptr_t botCarAddr = 0;            // the spawned bot's car (0 = none)
-	int botMode = 0;                     // 0 the game's AI drives, 1 held still, 2 plays back a rep's path, 3 plays back a rep's inputs
+	bool botTestUsed = false;            // the bot test console commands were used (only then its status lines show)
+	int botMode = 0;                     // 0 the game's AI drives, 1 held still, 2 plays back a rep's path, 3 plays back a rep's inputs, 4 the Combine drives it
 	int botTick = 0;                     // where the playback is
 	int botTicksSeen = 0, botInputsSeen = 0;   // per-tick hooks seen for the bot (do they fire for it at all?)
 	std::vector<Frame> botFrames;        // the rep it plays back

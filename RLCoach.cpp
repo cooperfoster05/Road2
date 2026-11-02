@@ -196,6 +196,7 @@ void RLCoach::onUnload()
 	PracticeExit();
 	ViewerExit();
 	housekeepStop = true;
+	gradeStop = true;
 	if (housekeepThread.joinable()) housekeepThread.join();
 	if (gradeThread.joinable()) gradeThread.join();
 	if (shareThread.joinable()) shareThread.join();
@@ -522,7 +523,17 @@ void RLCoach::OnBallTouch(CarWrapper car, void* params)
 	if (combinePhase == CombinePhase::Live && !car.IsNull())
 	{
 		CarWrapper me = gameWrapper->GetLocalCar();
-		if (!me.IsNull() && me.memory_address == car.memory_address) { combineTouched = true; combineLastTouch = combineLiveTicks; }
+		if (!me.IsNull() && me.memory_address == car.memory_address)
+		{
+			if (!combineTouched) combineFirstTouch = combineLiveTicks;
+			combineTouched = true;
+			combineLastTouch = combineLiveTicks;
+		}
+		else if (IsBotCar(car))
+		{
+			if (!combineBotTouched) combineBotFirstTouch = combineLiveTicks;
+			combineBotTouched = true;
+		}
 		return;
 	}
 	if (practiceState == PracticeState::Live && !car.IsNull())

@@ -108,6 +108,20 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 			{
 				const Frame& g = practiceRefFrames[t];
 				ghost = PadInput{ g.throttle, g.steer, g.pitch, g.yaw, g.roll, g.jump, g.boost, g.handbrake, -1.0f };
+				// Nov 1: the stick and triggers lightly smoothed for display (the average of 4 ticks either side, about 0.07 s), so an
+				// engine line's frame-to-frame stick changes don't make the ghost shake. Buttons stay exact.
+				{
+					const int n = static_cast<int>(practiceRefFrames.size()), a = std::max(0, t - 4), b = std::min(n - 1, t + 4);
+					PadInput avg{};
+					for (int k = a; k <= b; k++)
+					{
+						const Frame& h = practiceRefFrames[k];
+						avg.throttle += h.throttle; avg.steer += h.steer; avg.pitch += h.pitch; avg.yaw += h.yaw;
+					}
+					const float inv = 1.0f / static_cast<float>(b - a + 1);
+					ghost.throttle = avg.throttle * inv; ghost.steer = avg.steer * inv; ghost.pitch = avg.pitch * inv;
+					ghost.yaw = avg.yaw * inv;   // (roll is a button on most pads: left exact)
+				}
 				haveGhost = true;
 				for (const auto& f : practiceFineSpans) fineAim = fineAim || (t >= f.first && t <= f.second);
 			}
@@ -450,6 +464,7 @@ void RLCoach::RegisterLookCvars()
 	targetHitbox = std::make_shared<int>(1);
 	padTheme = std::make_shared<int>(0);
 	ghostOpacity = std::make_shared<float>(0.7f);
+	windowSize = std::make_shared<float>(1.0f);
 
 	cvarManager->registerCvar("rlcoach_hud_compact", "0", "Panel shows only the essentials", true, true, 0, true, 1).bindTo(hudCompact);
 	cvarManager->registerCvar("rlcoach_hud_scale", "1", "Panel size", true, true, 0.6f, true, 2.0f).bindTo(hudScale);
@@ -468,6 +483,7 @@ void RLCoach::RegisterLookCvars()
 	cvarManager->registerCvar("rlcoach_pad_roll_right", "0", "Controller button for air roll right", true, true, 0, true, PB_Count - 1).bindTo(padRollRight);
 
 	cvarManager->registerCvar("rlcoach_ghost_opacity", "0.7", "Learn: the controller ghost when practicing a line (0 = off, 1 = solid)", true, true, 0, true, 1).bindTo(ghostOpacity);
+	cvarManager->registerCvar("rlcoach_window_size", "1", "Size of the Road2 window (rep viewer, Learn, the Combine)", true, true, 0.6f, true, 1.6f).bindTo(windowSize);
 	cvarManager->registerCvar("rlcoach_target_hitbox", "1", "Target car outline: 0 off, 1 for your touch, 2 for the earliest intercept", true, true, 0, true, 2).bindTo(targetHitbox);
 
 	showUngraded = std::make_shared<bool>(false);
@@ -475,6 +491,14 @@ void RLCoach::RegisterLookCvars()
 
 	viewerRange = std::make_shared<int>(0);
 	cvarManager->registerCvar("rlcoach_viewer_range", "0", "Rep viewer list: 0 today, 1 last 7 days, 2 starred, 3 all", true, true, 0, true, 3).bindTo(viewerRange);
+
+	// The rep viewer's Filter button (Nov 1)
+	viewerGradeFrom = std::make_shared<int>(0);
+	cvarManager->registerCvar("rlcoach_viewer_grade_from", "0", "Rep viewer filter: whose grade counts: 0 yours or auto, 1 yours, 2 auto", true, true, 0, true, 2).bindTo(viewerGradeFrom);
+	viewerGrades = std::make_shared<int>(31);
+	cvarManager->registerCvar("rlcoach_viewer_grades", "31", "Rep viewer filter: which grades show (1 = grade 1, 2 = grade 2, 4 = grade 3, 8 = grade 4, 16 = grade 5; add them up)", true, true, 1, true, 31).bindTo(viewerGrades);
+	viewerShotFilter = std::make_shared<int>(0);
+	cvarManager->registerCvar("rlcoach_viewer_shot", "0", "Rep viewer filter: 0 all shots, 1 aerials, 2 ground, 3 double taps, 4 dribbles, 5 air dribbles, 6 flip resets, 7 ceiling shots", true, true, 0, true, 7).bindTo(viewerShotFilter);
 
 	cvarManager->registerNotifier("rlcoach_hud_toggle_compact", [this](std::vector<std::string>) {
 		cvarManager->getCvar("rlcoach_hud_compact").setValue(*hudCompact ? 0 : 1);
@@ -497,6 +521,12 @@ void RLCoach::RenderLookSettings()
 	float px = *hudX * 100.0f, py = *hudY * 100.0f;
 	if (ImGui::SliderFloat("Panel left/right", &px, 0.0f, 90.0f, "%.0f%%")) setCvar("rlcoach_hud_x", px / 100.0f);
 	if (ImGui::SliderFloat("Panel up/down", &py, 0.0f, 90.0f, "%.0f%%")) setCvar("rlcoach_hud_y", py / 100.0f);
+
+	// The Road2 window (Nov 1): its height always fits what it shows; this sets the size of everything in it. Dragging
+	// the window narrower also shrinks it, so you can make it small without losing anything.
+	float ws = *windowSize;
+	if (ImGui::SliderFloat("Road2 window size", &ws, 0.6f, 1.6f, "%.2fx")) setCvar("rlcoach_window_size", std::round(ws * 20.0f) / 20.0f);
+	ImGui::TextDisabled("The window always fits what it shows. Drag it narrower to shrink everything in it too.");
 
 	int units = *speedUnits;
 	const char* unitNames[3] = { "uu/s (game units)", "km/h", "mph" };

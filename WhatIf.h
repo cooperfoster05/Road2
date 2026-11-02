@@ -29,6 +29,15 @@ enum class WhatIfStatus
 // isn't a search here: the plugin shows the engine line through the same result slot.
 enum class WhatIfPoint { Shot, KeyMoment, Engine };
 
+// The engine's line step by step (Nov 1): how you and the line did in each step it played (see EngineResult::StepCue)
+struct WhatIfStep
+{
+	std::string step;
+	int yours = 0, line = 0;      // 0 not graded, 1 Costly or worse, 2 Sloppy, 3 Solid, 4 Clean
+	std::string yourWhy, lineWhy, fix;
+	bool root = false;
+};
+
 struct WhatIfResult
 {
 	WhatIfPoint point = WhatIfPoint::Shot;
@@ -50,11 +59,13 @@ struct WhatIfResult
 
 	std::string fixes;        // CleanerWayIn: what it fixes, in words ("Closing on the ball at 34 km/h -> 12 km/h")
 	std::string note;         // how the search went (for the hover)
+	std::string noneWhy;      // the engine found nothing better: why, in words
 
 	// The engine's line only (Oct 24): shown as the simplified, copyable version when that holds up
 	bool  simplified = false;
 	int   inputChanges = 0, inputChangesPerfect = 0;
 	std::vector<std::pair<int, int>> fineSpans;   // where the engine's fine inputs had to stay ("fine aim here")
+	std::vector<WhatIfStep> steps;   // the engine's line only: step by step against yours
 	int   depth = 1;
 	int   tries = 0;
 	float ms = 0;

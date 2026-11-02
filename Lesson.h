@@ -38,7 +38,18 @@ struct StageScore
 	float lineMatch = -1;                // average distance from the model's path (info only; -1 = not measured)
 };
 
-enum class LessonKind { AirDribble, DoubleTap, CeilingShot, FlipReset };
+enum class LessonKind { AirDribble, DoubleTap, CeilingShot, FlipReset, Kickoff };
+
+// A kickoff in a kickoff lesson's model (Nov 1): the model holds the right spawn's kickoff, then the same one mirrored
+// from the left spawn (back centre: one). Model ticks of what happens in each.
+struct KickoffSide
+{
+	int start = -1, end = -1;      // the spawn (time zero) and the last tick of this kickoff
+	int jump = -1, dodge = -1;     // the speedflip's jump and its diagonal dodge (-1 for a plain flip-in)
+	int land = -1;                 // wheels back down after it
+	int flipIn = -1;               // the jump that starts the flip into the ball
+	int touch = -1, arrive = -1;   // the hit, and when the car got within 200 of the ball (the openings book's measure)
+};
 
 struct Lesson
 {
@@ -52,11 +63,21 @@ struct Lesson
 	int popTick = -1, firstAirTick = -1, carryEndTick = -1, shotTick = -1;
 	int leaveTick = -1, setupTick = -1, boardTick = -1;   // double taps: off the wall, the setup touch, the backboard
 	int landTick = -1, flipTick = -1, resetTick = -1;     // ceiling shots: on the ceiling, the flip; flip resets: the reset
+	// Kickoffs (Nov 1)
+	std::vector<KickoffSide> koSides;
+	bool koSpeedflip = false;
+	float koStars[3] = { 0, 0, 0 };       // time to the ball for 1, 2 and 3 stars (s)
+	std::string koStarsWho;                // who gets there in those times
+	std::string koSpawn;                   // "diagonal", "off-centre", "back centre"
+	std::vector<std::string> notes;        // more about it, under the steps (kickoffs: variations, what decides them, teammates)
 
 	bool valid() const { return !model.empty() && !stages.empty(); }
 	int StageStart(int stage) const { return steps[stages[stage].first].start; }
 	// The tick (model time) the stage's watch clip ends
 	int StageWatchEnd(int stage) const;
+	// Kickoff steps that start mid-kickoff: the model drives you from this tick up to the step's start, so you take over
+	// already moving (a running start); -1 for none
+	int StageRideFrom(int stage) const;
 	// Whether the stage includes the finish (it then ends on a goal or a miss, like any practice attempt)
 	bool StageHasFinish(int stage) const { return stages[stage].last == static_cast<int>(steps.size()) - 1; }
 };
@@ -68,6 +89,8 @@ namespace Lessons
 	Lesson DoubleTap(const std::vector<Frame>& model);
 	Lesson CeilingShot(const std::vector<Frame>& model);
 	Lesson FlipReset(const std::vector<Frame>& model);
+	// Kickoffs (Nov 1): kickoff_flipin, kickoff_diagonal, kickoff_offcentre, kickoff_back
+	Lesson Kickoff(const std::string& id, const std::vector<Frame>& model);
 	Lesson Build(const std::string& id, const std::vector<Frame>& model);
 
 	// During an attempt (full = the model up to the stage start, then what you've done; ticks in model time):

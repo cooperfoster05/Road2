@@ -48,6 +48,65 @@ namespace
 		return true;
 	}
 
+	// Input match (Nov 1): how closely an attempt copied the line it was following, 0-100 (-1 when there's nothing to
+	// compare). Each tick of the attempt is held against the line's inputs at the same moment, forgiving timing within
+	// 6 ticks (0.05 s) either way: the best match in that window counts. Per tick: the stick (steer or yaw, and pitch)
+	// half, jump a fifth, boost and air roll the rest, a button counting only when you or the line press it. The half
+	// second before the line's first touch counts triple (that's where the shot is decided); after the touch nothing
+	// counts. Tested: an exact copy 100%, 0.05 s late 100%, 0.1 s late 72%, 0.2 s late 31%, doing nothing 6%. It
+	// measures copying, not skill: the engine plays with perfect inputs, so 100% isn't the bar.
+	float InputMatch(const std::vector<Frame>& live, const std::vector<Frame>& ref, int startTick)
+	{
+		const int n = static_cast<int>(ref.size());
+		if (live.size() < 10 || startTick < 0 || startTick >= n) return -1.0f;
+		int contact = -1;
+		for (int t = startTick; t < n; t++) if (ref[t].touch) { contact = t; break; }
+		const int end = contact >= 0 ? std::min(n, contact + 1) : n;
+		constexpr int kSlack = 6;
+		auto stick = [](const Frame& f, float& x, float& y) {
+			x = std::fabs(f.steer) >= std::fabs(f.yaw) ? f.steer : f.yaw; y = f.pitch;
+			const float m = std::sqrt(x * x + y * y);
+			if (m > 1.0f) { x /= m; y /= m; }
+		};
+		double sum = 0.0, wsum = 0.0;
+		for (int i = 0; i < static_cast<int>(live.size()); i++)
+		{
+			const int t = startTick + i;
+			if (t >= end) break;
+			const Frame& me = live[i];
+			float mx, my;
+			stick(me, mx, my);
+			float bestStick = 0.0f;
+			bool jumpOk = false, boostOk = false, rollOk = false;
+			for (int k = std::max(startTick, t - kSlack); k <= std::min(end - 1, t + kSlack); k++)
+			{
+				const Frame& r = ref[k];
+				float rx, ry;
+				stick(r, rx, ry);
+				bestStick = std::max(bestStick, 1.0f - std::min(1.0f, std::hypot(mx - rx, my - ry) / 0.75f));
+				jumpOk = jumpOk || me.jump == r.jump;
+				boostOk = boostOk || me.boost == r.boost;
+				rollOk = rollOk || (me.handbrake == r.handbrake && std::fabs(me.roll - r.roll) < 0.5f);
+			}
+			// A button only counts on ticks where you or the line press it (both off isn't a match worth points)
+			const Frame& r0 = ref[t];
+			const bool jumpOn = me.jump || r0.jump, boostOn = me.boost || r0.boost;
+			const bool rollOn = me.handbrake || r0.handbrake || std::fabs(me.roll) > 0.3f || std::fabs(r0.roll) > 0.3f;
+			const double parts = 0.5 + 0.2 * jumpOn + 0.15 * boostOn + 0.15 * rollOn;
+			const double score = (0.5 * bestStick + 0.2 * (jumpOn && jumpOk) + 0.15 * (boostOn && boostOk) + 0.15 * (rollOn && rollOk)) / parts;
+			const double w = (contact >= 0 && t >= contact - 60) ? 3.0 : 1.0;
+			sum += w * score; wsum += w;
+		}
+		return wsum > 0 ? static_cast<float>(100.0 * sum / wsum) : -1.0f;
+	}
+
+	void InputMatchRgb(float pct, unsigned char& r, unsigned char& g, unsigned char& b)
+	{
+		if (pct >= 80) { r = 115; g = 230; b = 115; }
+		else if (pct >= 60) { r = 255; g = 204; b = 77; }
+		else { r = 255; g = 115; b = 102; }
+	}
+
 	void GradeRgbP(Grade gr, unsigned char& r, unsigned char& g, unsigned char& b)
 	{
 		switch (gr)
@@ -111,6 +170,7 @@ void RLCoach::PracticeBegin(int targetTick, SegKind kind, int segStart, const st
 	practiceKind = kind;
 	practiceSegStart = segStart;
 	practiceTargetTick = targetTick;
+	practiceRideUntil = -1;
 	practiceLabel = label;
 	practiceShot = ShotGeometry::Analyze(practiceRep);
 	practiceBallStartTick = practiceShot.startTick;
@@ -220,7 +280,11 @@ void RLCoach::PracticePickReference()
 
 void RLCoach::PracticeApplyStart(CarWrapper& car, BallWrapper& ball, bool frozen)
 {
-	const Frame& f = practiceRep[std::min(practiceStartTick, static_cast<int>(practiceRep.size()) - 1)];
+	PracticeApplyFrame(car, ball, practiceRep[std::min(practiceStartTick, static_cast<int>(practiceRep.size()) - 1)], frozen, true);
+}
+
+void RLCoach::PracticeApplyFrame(CarWrapper& car, BallWrapper& ball, const Frame& f, bool frozen, bool holdFlip)
+{
 	float v = frozen ? 0.0f : 1.0f;
 
 	car.SetLocation(Vector(f.carX, f.carY, f.carZ));
@@ -236,7 +300,7 @@ void RLCoach::PracticeApplyStart(CarWrapper& car, BallWrapper& ball, bool frozen
 	car.SetbDoubleJumped(airborne && !f.hasFlip ? 1 : 0);
 
 	// The game's own flip timer doesn't know when you jumped, so hold it open and expire the flip ourselves
-	if (!frozen && airborne && f.hasFlip)
+	if (holdFlip && !frozen && airborne && f.hasFlip)
 	{
 		if (!practiceFlipHeld) { practiceOrigMaxDodge = car.GetMaxTimeForDodge(); practiceFlipHeld = true; }
 		car.SetMaxTimeForDodge(1000.0f);
@@ -245,6 +309,18 @@ void RLCoach::PracticeApplyStart(CarWrapper& car, BallWrapper& ball, bool frozen
 	ball.SetLocation(Vector(f.ballX, f.ballY, f.ballZ));
 	ball.SetVelocity(Vector(f.ballVX * v, f.ballVY * v, f.ballVZ * v));
 	ball.SetAngularVelocity(Vector(f.ballAVX * v, f.ballAVY * v, f.ballAVZ * v), false);
+}
+
+// No unlimited boost (kickoff lessons: the model starts on 33 and picks up pads). Free play's setting goes back when
+// practice ends.
+void RLCoach::PracticeLimitBoost(CarWrapper& car)
+{
+	BoostWrapper bc = car.GetBoostComponent();
+	if (bc.IsNull()) return;
+	const int now = bc.GetUnlimitedBoostRefCount();
+	if (now == 0) return;
+	if (practiceSavedUnlimited < 0) practiceSavedUnlimited = now;
+	bc.SetUnlimitedBoostRefCount(0);
 }
 
 void RLCoach::PracticeReleaseFlip(CarWrapper& car)
@@ -276,6 +352,12 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 		}
 		// First input: restore the full moment, with real speeds, and go
 		PracticeApplyStart(car, ball, false);
+		// Kickoff lessons: every boost pad back, as at a real kickoff (the model picks up the small pads on the way)
+		if (learnActive && learnLesson.kind == LessonKind::Kickoff)
+		{
+			server.ResetPickups();
+			PracticeLimitBoost(car);
+		}
 		practiceLive.clear();
 		practicePending.clear();
 		practiceEventTick = -1;
@@ -286,10 +368,18 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 		practiceRecoverRun = 0;
 		// Catch the end tracker up on the original rep before this moment (touches, jumps)
 		practiceEndTracker.Reset();
-		for (int i = 0; i < practiceStartTick && i < static_cast<int>(practiceRep.size()); i++)
+		// (Nov 2) Only from the rep's last teleport: a lesson model can hold several runs back to back (a kickoff from
+		// each side), and the earlier run's touch made the right-side kickoff end as a "miss" a second in.
+		int from = 0;
+		for (int i = 1; i < practiceStartTick && i < static_cast<int>(practiceRep.size()); i++)
+		{
+			const Frame& a = practiceRep[i - 1]; const Frame& b = practiceRep[i];
+			if (std::hypot(b.carX - a.carX, b.carY - a.carY) > 500.0f) from = i;
+		}
+		for (int i = from; i < practiceStartTick && i < static_cast<int>(practiceRep.size()); i++)
 		{
 			int ignored = 0;
-			practiceEndTracker.Update(practiceRep[i], i > 0, i > 0 ? practiceRep[i - 1].ballZ : practiceRep[i].ballZ, i + 1, ignored);
+			practiceEndTracker.Update(practiceRep[i], i > from, i > from ? practiceRep[i - 1].ballZ : practiceRep[i].ballZ, i - from + 1, ignored);
 		}
 		// Watch for a reset from the very first live tick: compare against where the attempt starts (before, the
 		// first live tick was taken as the reference, so a reset landing on it went unnoticed)
@@ -306,6 +396,25 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 	}
 
 	// ---- Live attempt ----
+	// Kickoff lessons: free play turns unlimited boost back on after its own resets (a goal, the reset button), so
+	// keep it off for the whole attempt (Coop, Nov 2: it came back on partway through his reps)
+	if (learnActive && learnLesson.kind == LessonKind::Kickoff) PracticeLimitBoost(car);
+	if (learnActive && practiceRideUntil >= 0)
+	{
+		// The running start: the model drives (its frame put back every tick) until the step begins
+		const int rt = practiceStartTick + static_cast<int>(practiceLive.size());
+		if (rt < practiceRideUntil && rt < static_cast<int>(practiceRep.size()))
+		{
+			const Frame& m = practiceRep[rt];
+			PracticeApplyFrame(car, ball, m, false, false);
+			practiceLive.push_back(m);
+			learnFull.push_back(m);
+			practicePrevCar = Vector(m.carX, m.carY, m.carZ);
+			practicePrevBall = Vector(m.ballX, m.ballY, m.ballZ);
+			practiceHavePrev = true;
+			return;
+		}
+	}
 	Vector carLoc = car.GetLocation(), ballLoc = ball.GetLocation();
 	bool teleported = practiceHavePrev && (Dist(carLoc, practicePrevCar) > kTeleportDist || Dist(ballLoc, practicePrevBall) > kTeleportDist);
 	float prevBallZ = practicePrevBall.Z;
@@ -359,7 +468,10 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 	}
 	else if (practicePending.empty())
 	{
-		std::string ended = practiceEndTracker.Update(f, hadPrev, prevBallZ, liveTicks, practiceEventTick);
+		// Kickoff lessons end on their own (a second after the hit); the shot tracker would call the ball sitting at
+		// centre, or knocked sideways, a missed shot
+		const bool ownEnd = learnActive && learnLesson.kind == LessonKind::Kickoff;
+		std::string ended = ownEnd ? std::string() : practiceEndTracker.Update(f, hadPrev, prevBallZ, liveTicks, practiceEventTick);
 		if (!ended.empty()) practicePending = ended;
 		int maxTicks = static_cast<int>(practiceRep.size()) - practiceStartTick + 240;
 		if (liveTicks >= maxTicks) { practiceEventTick = tick; PracticeFinishAttempt("timeout"); return; }
@@ -382,11 +494,31 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 
 void RLCoach::PracticeFinishAttempt(const std::string& reason)
 {
+	// Following a line (an engine line, or a lesson's model): how closely you copied its inputs, shown on the panel
+	practiceInputMatch = -1.0f;
+	if (practiceGhostLine && reason != "reset")
+	{
+		// (the running start is the model's own inputs: only what you did after it counts)
+		const int skip = (learnActive && practiceRideUntil > practiceStartTick) ? std::min(static_cast<int>(practiceLive.size()), practiceRideUntil - practiceStartTick) : 0;
+		if (skip == 0) practiceInputMatch = InputMatch(practiceLive, practiceRefFrames, practiceStartTick);
+		else if (static_cast<int>(practiceLive.size()) > skip)
+			practiceInputMatch = InputMatch(std::vector<Frame>(practiceLive.begin() + skip, practiceLive.end()), practiceRefFrames, practiceStartTick + skip);
+	}
+	auto addMatchLine = [this]() {
+		if (practiceInputMatch < 0) return;
+		PanelGradeLine line;
+		unsigned char r, g, b;
+		InputMatchRgb(practiceInputMatch, r, g, b);
+		line.chunks.push_back({ "Input match  ", 190, 190, 190 });
+		line.chunks.push_back({ std::format("{}%", static_cast<int>(std::lround(practiceInputMatch))), r, g, b });
+		practiceResultLines.push_back(line);
+	};
 	if (learnActive)
 	{
 		// A lesson scores its own stages (and may switch stage, e.g. after the warm-up)
 		const bool wasWarmup = learnWarmup;
 		LearnOnAttempt(reason);
+		if (!practiceResultLines.empty()) addMatchLine();
 		if (wasWarmup) return;   // LearnTry already set up the next attempt
 		practiceLive.clear();
 		practiceState = PracticeState::Frozen;
@@ -446,6 +578,7 @@ void RLCoach::PracticeFinishAttempt(const std::string& reason)
 		head.chunks.push_back({ practiceWentIn ? "   Goal" : "   No goal", static_cast<unsigned char>(practiceWentIn ? 115 : 255), static_cast<unsigned char>(practiceWentIn ? 230 : 115), static_cast<unsigned char>(practiceWentIn ? 115 : 102) });
 		practiceResultLines.push_back(head);
 		if (target && !target->why.empty()) practiceResultLines.push_back({ { { target->why, 200, 200, 200 } } });
+		addMatchLine();
 
 		// Auto-ramp: 3 hits in a row moves you up 10%
 		if (practiceAutoRamp && practiceStreak >= 3 && practiceSpeed < 0.99f)
@@ -503,7 +636,14 @@ void RLCoach::PracticeExit()
 		PracticeReleaseFlip(car);
 		car.SetVelocity(Vector(0.0f, 0.0f, 0.0f));
 		car.SetAngularVelocity(Vector(0.0f, 0.0f, 0.0f), false);
+		if (practiceSavedUnlimited >= 0)
+		{
+			BoostWrapper bc = car.GetBoostComponent();
+			if (!bc.IsNull()) bc.SetUnlimitedBoostRefCount(practiceSavedUnlimited);
+		}
 	}
+	practiceSavedUnlimited = -1;
+	practiceRideUntil = -1;
 	havePrev = false;
 	// If a rep is open in the viewer it picks back up (paused); otherwise the recorder re-arms
 	state = (*recordingEnabled && !viewerActive && !learnActive) ? RepState::WaitReset : RepState::Idle;
@@ -541,6 +681,12 @@ void RLCoach::DrawPracticeOverlay(CanvasWrapper& canvas)
 		bool havePrevPt = false;
 		for (int i = from; i < static_cast<int>(practiceRefFrames.size()); i += 3)
 		{
+			// a jump back to a spawn ends this line (kickoff lessons hold the left and the right kickoff back to back)
+			if (i >= from + 3)
+			{
+				const Frame& a = practiceRefFrames[i - 3], & b = practiceRefFrames[i];
+				if (std::fabs(a.carX - b.carX) + std::fabs(a.carY - b.carY) > 800.0f) break;
+			}
 			Vector2F s;
 			bool ok = ToScreenP(canvas, camLoc, camFwd, getPos(practiceRefFrames[i]), s);
 			if (ok && havePrevPt)

@@ -74,6 +74,7 @@ void GradeBook::Load(const std::filesystem::path& root)
 	}
 	std::lock_guard<std::mutex> lock(mtx);
 	for (auto& [file, r] : fromDisk) grades.emplace(file, r);   // anything graded meanwhile wins
+	changes++;
 	loaded = true;
 }
 
@@ -102,12 +103,13 @@ void GradeBook::Save(const std::filesystem::path& root)
 	if (ec) { std::lock_guard<std::mutex> lock(mtx); dirty = true; }
 }
 
-void GradeBook::Refresh(const std::filesystem::path& root, ShotBook& book)
+void GradeBook::Refresh(const std::filesystem::path& root, ShotBook& book, const std::atomic<bool>* stop)
 {
 	std::lock_guard<std::mutex> refreshLock(refreshMtx);
 	Load(root);
 	for (const RepListItem& item : RepLibrary::ListReps(root))
 	{
+		if (stop && *stop) break;
 		bool bailed = item.endReason == "reset";
 		ShotReference ref = book.Get(item.shotKey);
 		{
@@ -117,7 +119,7 @@ void GradeBook::Refresh(const std::filesystem::path& root, ShotBook& book)
 			if (bailed || !item.hasRecording)
 			{
 				// Bailed reps aren't graded; a cleaned-up rep keeps whatever grade it had
-				if (it == grades.end()) { GradeRecord r; r.shotKey = item.shotKey; grades[item.file] = r; dirty = true; }
+				if (it == grades.end()) { GradeRecord r; r.shotKey = item.shotKey; grades[item.file] = r; dirty = true; changes++; }
 				continue;
 			}
 		}
@@ -133,6 +135,7 @@ void GradeBook::Refresh(const std::filesystem::path& root, ShotBook& book)
 		std::lock_guard<std::mutex> lock(mtx);
 		grades[item.file] = rec;
 		dirty = true;
+		changes++;
 	}
 	Save(root);
 }
@@ -149,6 +152,7 @@ bool GradeBook::TrySet(const std::string& file, const GradeRecord& rec)
 	std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
 	if (!lock.owns_lock()) return false;
 	grades[file] = rec;
+	changes++;
 	dirty = true;
 	return true;
 }
@@ -160,10 +164,12 @@ void GradeBook::Copy(std::unordered_map<std::string, int>& out)
 	for (const auto& [file, e] : grades) out[file] = e.overall;
 }
 
-bool GradeBook::TryCopy(std::unordered_map<std::string, Brief>& out)
+bool GradeBook::TryCopy(std::unordered_map<std::string, Brief>& out, uint64_t* seen)
 {
+	if (seen && *seen == changes) return true;   // nothing new since the last copy
 	std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
 	if (!lock.owns_lock()) return false;
+	if (seen) *seen = changes;
 	out.clear();
 	for (const auto& [file, e] : grades) out[file] = Brief{ e.overall, e.shotType };
 	return true;

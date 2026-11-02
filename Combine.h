@@ -1,6 +1,6 @@
 #pragma once
-// The Combine (Oct 28): short, scored events for skills one shot can't grade (saves, recoveries, rings, a speed
-// course, boost pathing, wall and backboard reads, first touches). Each event runs as a set built from a seed: the
+// The Combine (Oct 28): short, scored events for skills one shot can't grade (saves, recoveries, wall and backboard
+// reads, first touches, and with a bot 50s, shadow defense and kickoffs). Each event runs as a set built from a seed: the
 // same seed always gives the same set, so you can grind it, roll a new one, or share it with a friend.
 // Plain C++ plus RocketSim (already loaded by the ball predictor). No BakkesMod code.
 #include "RepData.h"
@@ -69,7 +69,9 @@ namespace Combine
 		CarStart car;
 		Vec3 carAngVel;
 		float boost = 100;
-		char source = 'C';        // 'P' pro game, 'C' clip, later a rank
+		char source = 'C';        // 'P' pro game, 'C' clip, '1'-'6' ranked (gold to SSL)
+		// passes only (pass_situations.csv): where the receiver got it
+		float recvZ = 0, recvSpeed = 0, recvDt = 0;
 	};
 	std::vector<SaveSituation> LoadSaveSituations(const std::string& csvText);
 	constexpr int kSaveLevels = 5;
@@ -107,6 +109,70 @@ namespace Combine
 	// The time cuts (as a share of par) for 3, 2 and 1 points: tighter at higher levels
 	void RecoveryPointCuts(int level, float& three, float& two, float& one);
 	std::vector<RecoveryThrow> MakeRecoverySet(uint32_t seed, int level, int count = 10);
+
+	// ---- Reads (Oct 29) ----
+	// The ball off a wall or a backboard: get a touch on it after it comes off and before it lands, and do something
+	// with it. Kind 0: a shot off your own backboard (clear it); 1: a ball off the side wall in their half (score it);
+	// 2: a shot off their backboard (score it). Every setup is checked in RocketSim: a good player (the realistic
+	// estimate) can touch it inside that window; how much spare time they'd have sets the level.
+	struct ReadSetup
+	{
+		BallStart ball;
+		CarStart car;
+		float boost = 50;
+		int kind = 0;
+		float tWall = 0, tFloor = 0;   // when it comes off the wall or backboard; when the read window ends (it lands, or drops below the level's height)
+		float tReachReal = 0, slackReal = 0;   // the best moment to meet it, and how early a good player could be there
+	};
+	void ReadLevelBand(int level, float& minSlack, float& maxSlack);
+	// The read has to come before the ball drops below this (ball centre; 0 = before it lands)
+	float ReadMinHeight(int level);
+	std::vector<ReadSetup> MakeReadSet(uint32_t seed, int level, int count = 10);
+
+	// ---- First touches (Oct 29) ----
+	// Real passes from match replays: the ball just after your teammate's touch, you where the receiver was (turned so
+	// you attack the orange goal). Levels by how the ball arrives: on the ground, bouncing, lofted, aerial, high or fast.
+	struct TouchShot
+	{
+		BallStart ball;
+		CarStart car;
+		Vec3 carAngVel;
+		float boost = 50;
+		float recvZ = 0, recvSpeed = 0, recvDt = 0;
+		char source = 'C';
+	};
+	bool TouchLevelFits(int level, float recvZ, float recvSpeed);
+	const char* TouchLevelNote(int level);
+	std::vector<TouchShot> MakeTouchSet(uint32_t seed, int level, int count, const std::vector<SaveSituation>& passes);
+
+	// ---- Bot events (Oct 30): 50s and shadow defense ----
+	// Real moments from match replays. You play one real player; the bot plays back the other one's real path, and the
+	// ball follows its real path until you get close (then it's free). Turned so you defend blue (-y). Levels by the
+	// rank of the game it came from: gold and platinum up to SSL and pros.
+	struct PathFrame { float t = 0; Vec3 pos, vel, angVel; float q[4] = { 1, 0, 0, 0 }; };
+	struct BallFrame { float t = 0; Vec3 pos, vel, angVel; };
+	struct Challenge
+	{
+		char kind = 'F';          // 'F' a 50/50, 'D' shadow defense
+		char source = 'C';        // 'P' pro, 'C' clip, '1'-'6' ranked gold to SSL
+		float boost = 50;
+		float tContact = 0;       // a 50: when the real players met it (s from the start)
+		float ballEnd = 0;        // when the ball stops following its real path
+		float botEnd = 0;         // when the bot's path ends
+		PathFrame you;            // where you start (t = 0)
+		std::vector<PathFrame> bot;
+		std::vector<BallFrame> ball;
+	};
+	std::vector<Challenge> LoadChallenges(const std::string& text);
+	int ChallengeLevel(char source);   // 1-5 by the game's rank; 0 = not used
+	const char* ChallengeLevelNote(int level);
+	std::vector<Challenge> MakeChallengeSet(uint32_t seed, int level, int count, char kind, const std::vector<Challenge>& all);
+	// Unreal pitch / yaw / roll (radians) from a rotation quaternion (w, x, y, z)
+	void QuatToPYR(const float q[4], float& pitch, float& yaw, float& roll);
+	// The bot's pose at time t (positions and speeds blended, rotation slerped); past its end, its last frame
+	PathFrame BotPoseAt(const Challenge& c, float t);
+	// The ball at time t on its real path; false once t is past it
+	bool BallAt(const Challenge& c, float t, BallFrame& out);
 
 	// Share codes: "SV3-1A2B3C4D" = saves, level 3, seed 1A2B3C4D
 	std::string SetCode(const char* event, int level, uint32_t seed);

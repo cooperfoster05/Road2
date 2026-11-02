@@ -9,3 +9,6 @@ x64/
 # Local backups
 _template_originals/
 _to_delete/
+
+# Python caches
+__pycache__/

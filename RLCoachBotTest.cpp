@@ -12,14 +12,15 @@
 
 void RLCoach::RegisterBotTest()
 {
-	cvarManager->registerNotifier("rlcoach_bot_spawn", [this](std::vector<std::string>) { BotSpawn(); },
+	cvarManager->registerNotifier("rlcoach_bot_spawn", [this](std::vector<std::string>) { botTestUsed = true; BotSpawn(); },
 		"Bot test: spawn a bot in free play", PERMISSION_ALL);
 	cvarManager->registerNotifier("rlcoach_bot_mode", [this](std::vector<std::string> args) {
 		int m = 0;
 		if (args.size() >= 2) { try { m = std::stoi(args[1]); } catch (...) {} }
+		botTestUsed = true;
 		BotSetMode(m);
 	}, "Bot test: 0 game AI, 1 held still, 2 plays your newest rep's path, 3 plays your newest rep's inputs", PERMISSION_ALL);
-	cvarManager->registerNotifier("rlcoach_bot_remove", [this](std::vector<std::string>) { BotRemove(); },
+	cvarManager->registerNotifier("rlcoach_bot_remove", [this](std::vector<std::string>) { botTestUsed = true; BotRemove(); },
 		"Bot test: remove the bot", PERMISSION_ALL);
 }
 
@@ -45,43 +46,66 @@ void RLCoach::BotFind()
 	if (server.IsNull()) return;
 	CarWrapper local = gameWrapper->GetLocalCar();
 	ArrayWrapper<CarWrapper> cars = server.GetCars();
-	for (int i = 0; i < cars.Count(); i++)
+	const int total = cars.Count();
+	std::vector<CarWrapper> others;
+	for (int i = 0; i < total; i++)
 	{
 		CarWrapper c = cars.Get(i);
 		if (c.IsNull() || (!local.IsNull() && c.memory_address == local.memory_address)) continue;
-		botCarAddr = c.memory_address;
-		{
-			AIControllerWrapper ai = c.GetAIController();
-			if (!ai.IsNull() && botMode != 0) ai.DoNothing();
-		}
-		PriWrapper pri = c.GetPRI();
-		const bool flagged = !pri.IsNull() && pri.GetbBot();
-		botStatus = std::format("Bot test: found a second car ({} cars in all; marked as a bot: {}). Mode {}.", cars.Count(), flagged ? "yes" : "no", botMode);
+		others.push_back(c);
+	}
+	if (others.empty())
+	{
+		botStatus = std::format("Bot test: no second car showed up ({} car(s) in the game). Spawning bots may not work in free play.", total);
 		LOG("{}", botStatus);
 		return;
 	}
-	botStatus = std::format("Bot test: no second car showed up ({} car(s) in the game). Spawning bots may not work in free play.", cars.Count());
+	// The first is ours; any more (a leftover bot, or one spawned twice) are removed: one bot is all we want (Oct 30)
+	CarWrapper c = others[0];
+	botCarAddr = c.memory_address;
+	{
+		AIControllerWrapper ai = c.GetAIController();
+		if (!ai.IsNull() && botMode != 0) ai.DoNothing();
+	}
+	for (size_t k = 1; k < others.size(); k++)
+	{
+		AIControllerWrapper ai = others[k].GetAIController();
+		if (!ai.IsNull()) ai.DoNothing();
+		server.RemoveCar(others[k]);
+		if (!ai.IsNull()) server.RemovePlayer(ai);
+	}
+	PriWrapper pri = c.GetPRI();
+	const bool flagged = !pri.IsNull() && pri.GetbBot();
+	botStatus = std::format("Bot test: found a second car ({} cars in all; marked as a bot: {}; extras removed: {}). Mode {}.", total, flagged ? "yes" : "no", others.size() - 1, botMode);
 	LOG("{}", botStatus);
 }
 
 void RLCoach::BotRemove()
 {
+	// Every car that isn't yours goes (free play only ever has yours otherwise): a bot from an earlier set that never
+	// got removed, or one spawned twice, can't hang around and get picked up by the next set (Oct 30)
 	ServerWrapper server = gameWrapper->GetGameEventAsServer();
-	if (server.IsNull() || !botCarAddr) { botStatus.clear(); botCarAddr = 0; return; }
+	botCarAddr = 0;
+	botMode = 0;
+	botFrames.clear();
+	if (server.IsNull() || !gameWrapper->IsInFreeplay()) { botStatus.clear(); return; }
+	CarWrapper local = gameWrapper->GetLocalCar();
 	ArrayWrapper<CarWrapper> cars = server.GetCars();
+	std::vector<CarWrapper> extra;
 	for (int i = 0; i < cars.Count(); i++)
 	{
 		CarWrapper c = cars.Get(i);
-		if (c.IsNull() || c.memory_address != botCarAddr) continue;
+		if (c.IsNull() || (!local.IsNull() && c.memory_address == local.memory_address)) continue;
+		extra.push_back(c);
+	}
+	for (CarWrapper& c : extra)
+	{
 		AIControllerWrapper ai = c.GetAIController();
 		if (!ai.IsNull()) ai.DoNothing();
 		server.RemoveCar(c);
 		if (!ai.IsNull()) server.RemovePlayer(ai);
 	}
-	botCarAddr = 0;
-	botMode = 0;
-	botFrames.clear();
-	// Check it's really gone
+	// Check they're really gone
 	gameWrapper->SetTimeout([this](GameWrapper*) {
 		ServerWrapper sv = gameWrapper->GetGameEventAsServer();
 		if (sv.IsNull()) return;
@@ -138,7 +162,7 @@ void RLCoach::BotInput(CarWrapper& car, void* params)
 {
 	if (!IsBotCar(car) || !params) return;
 	botInputsSeen++;
-	if (botMode == 1 || botMode == 2)
+	if (botMode == 1 || botMode == 2 || botMode == 4)
 	{
 		*reinterpret_cast<ControllerInput*>(params) = ControllerInput{};
 	}
@@ -172,7 +196,7 @@ void RLCoach::BotTick(CarWrapper& car)
 
 void RLCoach::DrawBotStatus(CanvasWrapper& canvas)
 {
-	if (botStatus.empty()) return;
+	if (botStatus.empty() || botMode == 4 || !botTestUsed) return;   // only after the bot test commands, never for the Combine's bot
 	canvas.SetColor(255, 255, 255, 230);
 	canvas.SetPosition(Vector2{ 24, 160 });
 	canvas.DrawString(botStatus, 1.2f, 1.2f);
@@ -202,7 +226,7 @@ CarWrapper RLCoach::BotCar()
 // may not reach the plugin, so this doesn't rely on it.
 void RLCoach::BotDrive()
 {
-	if (!botCarAddr || botMode == 0) return;
+	if (!botCarAddr || botMode == 0 || botMode == 4) return;   // mode 4: the Combine places it itself
 	CarWrapper bot = BotCar();
 	if (bot.IsNull()) { botStatus = "Bot test: the bot's car is gone"; botCarAddr = 0; return; }
 	botDriven++;

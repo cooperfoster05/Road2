@@ -33,6 +33,20 @@ struct EngineResult
 	int   tries = 0;
 	float ms = 0;
 	std::string note;
+	std::string noneWhy;       // when it found nothing better: why, in words ("it found 800 goals, none above your 3")
+
+	// Step by step (Nov 1, plan 6e): your rep and the engine's line graded segment by segment (the rulebook's steps:
+	// takeoff, flight, contact; setup, read, second touch; pop, carry, shot...). Only the steps the engine played (from
+	// its start on). root = the earliest step the engine did better: where your rep went wrong first.
+	struct StepCue
+	{
+		std::string step;           // "Takeoff"
+		int yours = 0, line = 0;    // 0 not graded, 1 Costly or worse, 2 Sloppy, 3 Solid, 4 Clean
+		std::string yourWhy, lineWhy;
+		std::string fix;            // the biggest difference inside this step, in words (may be empty)
+		bool root = false;
+	};
+	std::vector<StepCue> steps;
 
 	// The simplifier (Oct 24): the line as inputs a person could copy (holds, a few stick positions), shown in place of
 	// the perfect one when it scores at the same grade and holds up the same way

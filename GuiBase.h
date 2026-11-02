@@ -16,6 +16,13 @@ public:
 
 	bool isWindowOpen_ = false;
 	std::string menuTitle_ = "RLCoach";
+	// Nov 1: a size-conscious window. uiBaseSize_ is the "Window size" setting (RenderWindow sets it from its cvar).
+	// The height always fits what's showing (fitHeight_, measured each frame), and dragging the window narrower than
+	// it needs shrinks the whole UI with it instead of cutting things off.
+	float uiBaseSize_ = 1.0f;
+	float lastBaseSize_ = 1.0f;
+	float fitHeight_ = 0.0f;
+	float uiScaleNow_ = 1.0f;   // UiStyle::gUser while this window draws
 
 	std::string GetMenuName() override;
 	std::string GetMenuTitle() override;

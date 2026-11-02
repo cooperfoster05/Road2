@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <format>
+#include <map>
 #include <memory>
 #include <cstdio>
 #include <cstdlib>
@@ -2776,23 +2777,7 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 			(a.aimPt - b.aimPt).Length() < 15.0f && std::fabs(a.reach - b.reach) < 1.0f;
 	};
 	auto seenOption = [&](const Option& o) { for (const Tried& t : tried) if (sameOption(t.o, o)) return true; return false; };
-	auto correct = [&](Option o, Vec want, int iters) {
-		for (int it = 0; it < iters && !stop() && out.tries < budget; it++)
-		{
-			if (seenOption(o)) break;
-			tryOption(o);
-			const SimRun& r = tried.back().run;
-			if (r.touchTick < 0 || !r.shot.valid || !r.shot.reachesGoalLine) break;
-			float ex = r.shot.crossX - want.x, ez = r.shot.crossZ - want.z;
-			if (std::fabs(ex) < 40.0f && std::fabs(ez) < 40.0f) break;
-			Vec next = o.aimPt - Vec(ex * 0.8f, 0, ez * 0.8f);
-			next.x = std::clamp(next.x, -2500.0f, 2500.0f);
-			next.z = std::clamp(next.z, -800.0f, 2500.0f);
-			Option o2;
-			if (!makePlan(o.plan.arriveTick, next, o.reach, o.jumpLead, o.plan.dodge, o.plan.doubleJump, o2, o.plan.power)) break;
-			o = o2;
-		}
-	};
+	// (the old one-chain aim fix, "correct", was replaced by the parallel chains below; removed Nov 1)
 	{
 		std::vector<int> order;
 		for (int i = 0; i < static_cast<int>(tried.size()); i++)
@@ -3458,6 +3443,7 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 	};
 	int checked = 0;
 	int dbgKind = 0, dbgFragile = 0, dbgWin = 0, dbgUnreached = 0, dbgCand = 0;
+	int kindBeat = 0;   // lines graded above yours that played a different kind of shot (for the "nothing better" words)
 	if (kStepDebug)
 	{
 		int types[8] = {}, inT[8] = {}, tip = 0;
@@ -3481,7 +3467,7 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 			break;
 		}
 		const int g4 = pk.botIdx >= 0 ? tried[pk.botIdx].run.grade.overall : cemBest[pk.cemIdx].run.grade.overall;
-		if (pk.q < -50000.0f) { dbgKind += g4 >= 4; continue; }   // not the kind of shot you went for
+		if (pk.q < -50000.0f) { dbgKind += g4 >= 4; kindBeat += g4 > out.realGrade; continue; }   // not the kind of shot you went for
 		int expect = pk.botIdx >= 0 ? tried[pk.botIdx].run.grade.overall : cemBest[pk.cemIdx].run.grade.overall;
 		if (!beats(expect, pk.q)) continue;   // only lines that beat your shot (or a cleaner 4 than yours)
 		checked++;
@@ -3497,8 +3483,11 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 		const bool sameGrade = win.grade.overall == out.realGrade;
 		if (kStepDebug) { for (size_t q = pi2 + 1; q < picks.size(); q++) { const Pick& p2 = picks[q]; int g = p2.botIdx >= 0 ? tried[p2.botIdx].run.grade.overall : cemBest[p2.cemIdx].run.grade.overall; dbgUnreached += g >= 4; } }
 		if (kStepDebug) fprintf(stderr, "PICKSTAT shipped grade %d expect %d | 4-5 candidates %d: wrong kind %d, fragile %d, replay/style %d, after the pick or unchecked %d | checked %d\n", win.grade.overall, expect, dbgCand, dbgKind, dbgFragile, dbgWin, dbgUnreached, checked);
-		// The same line as inputs a person could copy, if it still holds up (the shown line, then; the perfect one is kept)
-		Simple simp = simplify(win, pk);
+		// The same line as inputs a person could copy, if it still holds up (the shown line, then; the perfect one is kept).
+		// Off since Nov 1 (Coop: the effort goes into the engine itself; the input ghost shows the perfect line, smoothed
+		// for display): kSimplify brings it back.
+		constexpr bool kSimplify = false;
+		Simple simp = kSimplify ? simplify(win, pk) : Simple{};
 		if (std::getenv("ENG_SIMPDBG"))
 			fprintf(stderr, "SIMP ok %d reproduced %d grade %d level %d rounds %d changes %d -> %d fine %d held %d (perfect held %d) src %s\n", (int)simp.ok, (int)simp.reproduced,
 				win.grade.overall, simp.level, simp.rounds, simp.changesBefore, simp.changes, simp.fineSpots, simp.held, held,
@@ -3660,6 +3649,72 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 			}
 		}
 		lines += std::format("Boost used: {:.0f} (you: {:.0f}).\n", win.boostUsed, yourBoost);
+
+		// Step by step (Nov 1, plan 6e): both reps graded segment by segment; for each step the engine played, how you
+		// both did, and the biggest difference that belongs to it. The earliest step it did better is the root cause.
+		{
+			auto rank = [](Grade g) {
+				switch (g)
+				{
+				case Grade::Calculated: case Grade::Clean: return 4;
+				case Grade::Solid: return 3;
+				case Grade::Sloppy: return 2;
+				case Grade::None: return 0;
+				default: return 1;
+				}
+			};
+			// which step a difference belongs to (by what it's about)
+			auto stepOf = [](const std::string& say) {
+				if (say.find("jump") != std::string::npos || say.find("ground") != std::string::npos) return SegKind::Takeoff;
+				if (say.find("first touch") != std::string::npos || say.find("touching it") != std::string::npos || say.find("nose") != std::string::npos
+					|| say.find("carry it") != std::string::npos) return SegKind::AirDribble;
+				if (say.find("boost") != std::string::npos) return SegKind::Flight;
+				if (say.find("corner") != std::string::npos) return SegKind::Result;
+				return SegKind::Contact;   // under it, flatter, its side, sooner / later, harder
+			};
+			const int yEnd = eventTick >= 0 ? eventTick : n - 1;
+			RepSegments ys = Segmenter::Split(fr, yEnd);
+			RepGrade yg = Grader::GradeRep(fr, ys, real, realIn, floorBeforeGoal, ref);
+			const int lEnd = win.eventTick >= 0 ? win.eventTick : static_cast<int>(win.frames.size()) - 1;
+			RepSegments ls = Segmenter::Split(win.frames, lEnd);
+			RepGrade lg = Grader::GradeRep(win.frames, ls, win.shot, win.wentIn, win.floorFirst, ref);
+			auto gradeOf = [](const RepGrade& g, int segIndex) -> const SegmentGrade* {
+				for (const SegmentGrade& sg : g.segs) if (sg.segIndex == segIndex) return &sg;
+				return nullptr;
+			};
+			// pair the line's steps with yours: the same kind of segment, the same one in order (2nd contact with 2nd contact)
+			std::map<int, int> seen;
+			bool rootSet = false;
+			for (int li = 0; li < static_cast<int>(ls.segs.size()); li++)
+			{
+				const Segment& L = ls.segs[li];
+				const int occ = seen[static_cast<int>(L.kind)]++;
+				if (L.kind == SegKind::Result || L.kind == SegKind::Recovery) continue;
+				if (L.end < s) continue;   // before the engine took over: the same as yours
+				const SegmentGrade* lgr = gradeOf(lg, li);
+				if (!lgr || lgr->grade == Grade::None) continue;
+				int yi = -1, k = 0;
+				for (int i = 0; i < static_cast<int>(ys.segs.size()); i++)
+					if (ys.segs[i].kind == L.kind && k++ == occ) { yi = i; break; }
+				const SegmentGrade* ygr = yi >= 0 ? gradeOf(yg, yi) : nullptr;
+				EngineResult::StepCue c;
+				c.step = Segmenter::Name(L.kind);
+				c.line = rank(lgr->grade);
+				c.lineWhy = lgr->why;
+				c.yours = ygr ? rank(ygr->grade) : 0;
+				c.yourWhy = ygr ? ygr->why : (yi < 0 ? "you didn't have this step" : "");
+				for (const Diff& d : diffs) if (stepOf(d.say) == L.kind && d.size >= 0.75f) { c.fix = d.say; break; }
+				if (!rootSet && c.line > c.yours) { c.root = true; rootSet = true; }
+				out.steps.push_back(c);
+			}
+			if (!out.steps.empty())
+			{
+				lines += "Step by step:\n";
+				for (const EngineResult::StepCue& c : out.steps)
+					lines += std::format("{}{}: {} (you: {}){}\n", c.root ? "* " : "", c.step, c.lineWhy.empty() ? "graded the same" : c.lineWhy,
+						c.yourWhy.empty() ? "-" : c.yourWhy, c.fix.empty() ? "" : " - " + c.fix);
+			}
+		}
 		out.compare = lines;
 		out.detail = std::format("{}Would be a {} ({}).\n{}It plays perfect inputs from {} into your rep: it shows the ceiling for this shot. "
 			"It scored from {} of {} slightly different starts, with the timing a tick or two early or late.", lines, out.grade, out.gradeWhy,
@@ -3680,6 +3735,22 @@ static EngineResult LineAt(const std::vector<Frame>& fr, bool realIn, bool floor
 		scale < 0.99f ? std::format(" This computer is slower, so the search was sized down to {:.0f}% to fit the time.", scale * 100.0f)
 		: scale > 1.01f ? std::format(" It had time to spare, so it searched {:.1f}x deeper.", scale) : std::string());
 	if (!stepNote.empty()) out.note += " " + stepNote;
+	// Nothing better, in words (Nov 1): on the ground bench a third of the "nothing found" reps weren't shots at all (the
+	// touch went the other way, e.g. carrying it out of the corner), and others had hundreds of goals that just didn't
+	// beat yours. "Your shot was the best it could find" was wrong for the first and vague for the second.
+	if (out.status == EngineStatus::NothingFound)
+	{
+		if (goals == 0 && real.valid && !realIn && !real.reachesGoalLine && real.aimErrDeg > 90.0f)
+			out.noneWhy = std::format("Your touch went {:.0f} degrees away from the goal, so this wasn't really a shot, and nothing it tried from here scored either.", real.aimErrDeg);
+		else if (touched == 0)
+			out.noneWhy = "None of its lines could reach the ball in time from here.";
+		else if (goals == 0)
+			out.noneWhy = std::format("{} of its lines touched the ball, but none of them scored from here.", touched);
+		else if (kindBeat > 0)
+			out.noneWhy = std::format("It found {} goals from here. The ones graded above yours played a different kind of shot, so they don't count.", goals);
+		else
+			out.noneWhy = std::format("It found {} goals from here, but none graded higher than your {}: your shot was as good as anything it found.", goals, out.realGrade);
+	}
 	out.ms = elapsed() * 1000.0f;
 	return out;
 }

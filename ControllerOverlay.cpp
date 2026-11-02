@@ -246,7 +246,14 @@ void ControllerOverlay::Draw(CanvasWrapper& c, const PadInput& in, PadStyle st, 
 		if (im > 1.0f) { ix /= im; iy /= im; }
 		// (it travels further than your cap and is smaller, so the two stay apart when they disagree)
 		const float gkx = lsx + gx * 10, gky = lsy + gy * 10, ykx = lsx + ix * 7, yky = lsy + iy * 7;
-		if (std::hypot(gkx - ykx, gky - yky) > 3.0f) Line(c, X(ykx), Y(yky), X(gkx), Y(gky), 1.5f * s, Rgba{ kGhost.r, kGhost.g, kGhost.b, static_cast<unsigned char>(kGhost.a / 2) });
+		// Nov 1: the line from your stick to the line's is the "where you're off" cue: drawn once you're more than a
+		// little off, cyan when close, amber when off, red when way off (the gap is measured in stick travel, 0-2)
+		const float off = std::hypot(gx - ix, gy - iy);
+		if (off > 0.12f)
+		{
+			const Rgba col = off < 0.35f ? kGhost : off < 0.75f ? Rgba{ 251, 191, 36, kGhost.a } : Rgba{ 248, 113, 113, kGhost.a };
+			Line(c, X(ykx), Y(yky), X(gkx), Y(gky), (off < 0.35f ? 1.8f : 2.6f) * s, col);
+		}
 		RingU(gkx, gky, 9, 2.2f, kGhost);
 		if (gm > 0.08f) Line(c, X(lsx), Y(lsy), X(lsx + gx * 16), Y(lsy + gy * 16), 1.5f * s, kGhost);
 	}

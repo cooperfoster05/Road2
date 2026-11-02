@@ -77,12 +77,16 @@ void RLCoach::LearnPublish()
 	u.ghost = learnGhost;
 	u.warmupOffered = learnWarmupOffered && !learnWarmupDone;
 	u.warmup = learnWarmup;
-	u.stageNames.clear(); u.stageFirst.clear(); u.stageLast.clear(); u.best.clear(); u.passed.clear(); u.recent.clear();
+	u.stageNames.clear(); u.stageFirst.clear(); u.stageLast.clear(); u.best.clear(); u.passed.clear(); u.recent.clear(); u.stageWhole.clear();
+	u.notes = learnLesson.notes;
+	for (int k = 0; k < 3; k++) u.stars[k] = learnLesson.koStars[k];
+	u.starsWho = learnLesson.koStarsWho;
 	for (size_t i = 0; i < learnLesson.stages.size(); i++)
 	{
 		u.stageNames.push_back(learnLesson.stages[i].name);
 		u.stageFirst.push_back(learnLesson.stages[i].first);
 		u.stageLast.push_back(learnLesson.stages[i].last);
+		u.stageWhole.push_back(learnLesson.stages[i].whole ? 1 : 0);
 		u.best.push_back(i < learnProgress.best.size() ? learnProgress.best[i] : 0);
 		u.passed.push_back(learnProgress.PassedRecent(static_cast<int>(i)));
 		std::vector<int> r;
@@ -327,7 +331,9 @@ void RLCoach::LearnTry()
 	practiceLabel = std::format("Learn: {}{}", learnLesson.stages[learnStage].name, learnWarmup ? " (warm-up)" : "");
 	practiceShot = learnLesson.modelShot;
 	practiceBallStartTick = learnLesson.StageStart(0);
-	PracticeSetLeadIn(0.0f);
+	const int ride = learnLesson.StageRideFrom(learnStage);
+	practiceRideUntil = ride >= 0 ? start : -1;
+	PracticeSetLeadIn(ride >= 0 ? (start - ride) / 120.0f : 0.0f);
 
 	practiceAttempts = 0;
 	practiceHitsByPct.clear();
@@ -414,7 +420,7 @@ void RLCoach::LearnBeginLive()
 bool RLCoach::LearnStageDone(const Frame& f)
 {
 	learnFull.push_back(f);
-	return Lessons::StageDone(learnLesson, learnStage, learnFull, practiceStartTick);
+	return Lessons::StageDone(learnLesson, learnStage, learnFull, LearnHandover());
 }
 
 void RLCoach::LearnOnAttempt(const std::string& reason)
@@ -427,7 +433,7 @@ void RLCoach::LearnOnAttempt(const std::string& reason)
 		LearnPublish();
 		return;
 	}
-	StageScore sc = Lessons::Score(learnLesson, learnStage, learnFull, practiceStartTick, practiceWentIn, practiceFloorFirst, ShotReference{});
+	StageScore sc = Lessons::Score(learnLesson, learnStage, learnFull, LearnHandover(), practiceWentIn, practiceFloorFirst, ShotReference{});
 	LearnLogAttempt(sc);
 	learnLast = sc;
 	learnLastStage = learnStage;
@@ -538,7 +544,7 @@ namespace
 void RLCoach::RenderLearn()
 {
 	using namespace UiStyle;
-	const float S = kScale;
+	const float S = Sc();   // the window's size right now (UiStyle.h)
 	ImFont* fLabel = uiFonts[UiFonts::Label];
 	ImFont* fBold = uiFonts[UiFonts::Bold];
 	ImFont* fHead = uiFonts[UiFonts::Head];
@@ -728,14 +734,19 @@ void RLCoach::RenderLearn()
 		}
 		else
 		{
-			wrapped(last == static_cast<int>(u.steps.size()) - 1 && first == 0
-				? std::format("The whole thing, start to finish. Graded like any {} rep; each step is scored too, so you can see which one to work on.", Lower(u.name))
-				: std::format("Put steps {}-{} together in one go. Each step is scored; your score is the lowest of them.", first + 1, last + 1), kText);
+			const bool whole = stage < static_cast<int>(u.stageWhole.size()) && u.stageWhole[stage];
+			if (whole && u.stars[2] > 0)
+				wrapped(std::format("The whole kickoff, from go to the ball, scored on your time: one star {:.2f} s, two stars {:.2f} s, three stars {:.2f} s. "
+					"{} Each step is scored too, so you can see which one to work on.", u.stars[0], u.stars[1], u.stars[2], u.starsWho), kText);
+			else
+				wrapped(whole || (last == static_cast<int>(u.steps.size()) - 1 && first == 0)
+					? std::format("The whole thing, start to finish. Graded like any {} rep; each step is scored too, so you can see which one to work on.", Lower(u.name))
+					: std::format("Put steps {}-{} together in one go. Each step is scored; your score is the lowest of them.", first + 1, last + 1), kText);
 			ImGui::Spacing();
 			label("ONE CUE PER STEP", kMuted);
 			for (int s = first; s <= last; s++)
 			{
-				ImGui::TextColored(kMuted, "%d", s + 1);
+				ImGui::TextColored(kMuted, "%d", whole ? s - first + 1 : s + 1);
 				ImGui::SameLine();
 				wrapped(u.steps[s].name + ": " + u.steps[s].cue, kSub);
 			}
@@ -830,7 +841,7 @@ void RLCoach::RenderLearn()
 			// The score in the middle of the gauge
 			std::string n = std::to_string(u.last.score);
 			ImFont* font = fBig ? fBig : ImGui::GetFont();
-			const float size = fBig ? fBig->FontSize * 0.62f : ImGui::GetFontSize() * 1.4f;
+			const float size = fBig ? fBig->FontSize * 0.62f * gUser : ImGui::GetFontSize() * 1.4f;   // (an explicit size: times the window size)
 			ImVec2 ts = font->CalcTextSizeA(size, 1e9f, 0.0f, n.c_str());
 			dl->AddText(font, size, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), U32(GradeColor(u.last.score)), n.c_str());
 		}
@@ -845,13 +856,25 @@ void RLCoach::RenderLearn()
 
 	if (u.practicing) ImGui::TextColored(kMuted, "Move to start each attempt. Free play's reset button counts as a retry.");
 	else if (u.watching) ImGui::TextColored(kMuted, "Watching the model. Press Try it when you're ready.");
+
+	// ---- More on it (kickoffs: what decides them, variations, teammates, the Combine) ----
+	if (!u.notes.empty())
+	{
+		Heading("MORE ON KICKOFFS");
+		for (const std::string& t : u.notes)
+		{
+			ImGui::TextColored(kAccentText, "-");
+			ImGui::SameLine();
+			wrapped(t, kSub);
+		}
+	}
 }
 
 // The lesson list: the skill tree as a list for now (a drawn tree comes with the design pass)
 void RLCoach::RenderLearnList()
 {
 	using namespace UiStyle;
-	const float S = kScale;
+	const float S = Sc();   // the window's size right now (UiStyle.h)
 	ImFont* fLabel = uiFonts[UiFonts::Label];
 	ImFont* fHead = uiFonts[UiFonts::Head];
 	ImFont* fBold = uiFonts[UiFonts::Bold];
@@ -910,7 +933,7 @@ void RLCoach::RenderLearnList()
 
 		const float tx = p.x + 32.0f * S;
 		const ImVec4 nameCol = !en.built ? kMuted : en.locked ? kSub : kText;
-		dl->AddText(fBold ? fBold : ImGui::GetFont(), fBold ? fBold->FontSize : ImGui::GetFontSize(), ImVec2(tx, p.y + 6.0f * S), U32(nameCol), en.name.c_str());
+		dl->AddText(fBold ? fBold : ImGui::GetFont(), fBold ? fBold->FontSize * gUser : ImGui::GetFontSize(), ImVec2(tx, p.y + 6.0f * S), U32(nameCol), en.name.c_str());
 		std::string sub = en.blurb;
 		if (en.locked && !en.missing.empty())
 		{

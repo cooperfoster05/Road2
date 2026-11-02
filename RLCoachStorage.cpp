@@ -135,7 +135,7 @@ void RLCoach::Housekeep(const std::filesystem::path& root, const std::filesystem
 	SetStorageMsg("Updating shot book and grades...");
 	shotBook.Update(root);
 	if (housekeepStop) return;
-	gradeBook.Refresh(root, shotBook);
+	gradeBook.Refresh(root, shotBook, &housekeepStop);
 	if (housekeepStop) return;
 	habitBook.Update(root);   // measures habits before any recording is cleaned up (the numbers are kept)
 	if (housekeepStop) return;

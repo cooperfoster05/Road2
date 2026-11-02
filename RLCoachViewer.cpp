@@ -381,6 +381,9 @@ void RLCoach::DrawViewerPaths(CanvasWrapper& canvas)
 		{
 			Vector2F s;
 			bool ok = ToScreen(canvas, camLoc, camFwd, getPos(viewerFrames[i]), s);
+			// a jump back to a spawn (a kickoff lesson's left then right kickoff) isn't joined up
+			if (i >= step && std::fabs(viewerFrames[i].carX - viewerFrames[i - step].carX) + std::fabs(viewerFrames[i].carY - viewerFrames[i - step].carY) > 800.0f)
+				havePrevPt = false;
 			if (ok && havePrevPt)
 			{
 				// Already-played part is bright, the rest is faint
@@ -567,12 +570,14 @@ namespace
 		r.frames = std::move(e.frames);
 		r.eventTick = e.eventTick;
 		r.note = e.note;
+		r.noneWhy = e.noneWhy;
 		r.tries = e.tries;
 		r.ms = e.ms;
 		r.simplified = e.simplified;
 		r.inputChanges = e.inputChanges;
 		r.inputChangesPerfect = e.inputChangesPerfect;
 		r.fineSpans = e.fineSpans;
+		for (const EngineResult::StepCue& c : e.steps) r.steps.push_back({ c.step, c.yours, c.line, c.yourWhy, c.lineWhy, c.fix, c.root });
 		return r;
 	}
 
@@ -753,7 +758,7 @@ void RLCoach::StartWhatIf(int depth, WhatIfPoint point, int engineStart)
 			if (lineFile[slot] == item.file && !whatIfCancel)
 			{
 				lineResult[slot] = r;
-				for (ReviewCacheEntry& c : reviewCache) if (c.file == item.file) c.line[slot] = std::move(r);
+				for (ReviewCacheEntry& c : reviewCache) if (c.file == item.file) c.line[slot] = r;
 			}
 		}
 		whatIfRunningSlot = -1;
@@ -923,10 +928,11 @@ void RLCoach::StartGradeRefresh()
 	if (!writer || gradeThreadBusy) return;
 	if (gradeThread.joinable()) gradeThread.join();
 	gradeThreadBusy = true;
+	gradeStop = false;
 	auto root = writer->Folder();
 	gradeThread = std::thread([this, root]() {
 		shotBook.Update(root);
-		gradeBook.Refresh(root, shotBook);
+		gradeBook.Refresh(root, shotBook, &gradeStop);
 		habitBook.Update(root);
 		coachBook.Update(root);
 		gradeThreadBusy = false;
@@ -957,12 +963,13 @@ namespace
 	{
 		WhatIfStatus status = WhatIfStatus::None;
 		WhatIfPoint point = WhatIfPoint::Shot;
-		std::string what, cue, detail, gradeWhy, fixes, note;
+		std::string what, cue, detail, gradeWhy, fixes, note, noneWhy;
 		int grade = 0, held = 0, heldOf = 0, startTick = -1, depth = 1;
 		bool wentIn = false, mine = false;
 		bool simplified = false;
 		int changes = 0, changesPerfect = 0;
 		std::vector<int> fineAt;
+		std::vector<WhatIfStep> steps;
 		bool shows() const { return mine && (status == WhatIfStatus::Found || status == WhatIfStatus::CleanerWayIn); }
 	};
 
@@ -993,7 +1000,8 @@ namespace
 void RLCoach::RenderWindow()
 {
 	using namespace UiStyle;
-	const float S = kScale;   // the whole window's size (the fonts are loaded at the same scale, UiFonts.h)
+	const float S = Sc();   // the whole window's size right now (UiStyle.h; the window sets it, GuiBase.cpp)
+	uiBaseSize_ = windowSize ? *windowSize : 1.0f;   // "Road2 window size", used from the next frame
 	if (!repListLoaded || repListStale.exchange(false)) RefreshRepList();
 	FetchUiFonts();
 	FontScope bodyFont(uiFonts[UiFonts::Body]);
@@ -1056,7 +1064,7 @@ void RLCoach::RenderWindow()
 		}
 	}
 
-	gradeBook.TryCopy(uiAutoGrades);   // keeps the last copy if a refresh is busy
+	gradeBook.TryCopy(uiAutoGrades, &uiAutoGradesSeen);   // only when a grade changed; keeps the last copy if a refresh is busy
 	std::string watchingFile;
 	{
 		std::lock_guard<std::mutex> lock(uiSegMutex);
@@ -1137,11 +1145,12 @@ void RLCoach::RenderWindow()
 				LineView& v = line[s];
 				v.mine = lineFile[s] == watching;
 				v.status = r.status; v.point = r.point; v.what = r.what; v.cue = r.cue; v.detail = r.detail; v.gradeWhy = r.gradeWhy;
-				v.fixes = r.fixes; v.note = r.note; v.grade = r.grade; v.held = r.held; v.heldOf = r.heldOf; v.startTick = r.startTick;
+				v.fixes = r.fixes; v.note = r.note; v.noneWhy = r.noneWhy; v.grade = r.grade; v.held = r.held; v.heldOf = r.heldOf; v.startTick = r.startTick;
 				v.depth = r.depth; v.wentIn = r.wentIn;
 				v.simplified = r.simplified; v.changes = r.inputChanges; v.changesPerfect = r.inputChangesPerfect;
 				v.fineAt.clear();
 				for (const auto& f : r.fineSpans) v.fineAt.push_back(f.first);
+				v.steps = r.steps;
 			}
 		}
 		const bool busy = whatIfBusy;
@@ -1664,6 +1673,35 @@ void RLCoach::RenderWindow()
 							subline(std::format("Perfect inputs ({} changes): a simpler version didn't hold up, so this one is hard to copy.", v.changesPerfect));
 					}
 					if (ImGui::IsItemHovered() && !v.detail.empty()) ImGui::SetTooltip("%s", v.detail.c_str());
+					// Step by step (Nov 1): each step the engine played, your grade against its grade, the root cause marked
+					if (!fixTab && !v.steps.empty())
+					{
+						static const char* kRank[5] = { "-", "Costly", "Sloppy", "Solid", "Clean" };
+						ImGui::Dummy(ImVec2(0, 2));
+						label("STEP BY STEP", kMuted);
+						for (const WhatIfStep& st : v.steps)
+						{
+							const char* yn = kRank[std::clamp(st.yours, 0, 4)];
+							const char* ln = kRank[std::clamp(st.line, 0, 4)];
+							ImGui::BeginGroup();
+							ImGui::TextColored(st.root ? kRoot : kSub, "%s", st.step.c_str());
+							ImGui::SameLine(92.0f * S);
+							ImGui::TextColored(st.yours > 0 ? SegGradeColor(yn) : kMuted, "%s", yn);
+							ImGui::SameLine(0, 4.0f * S);
+							ImGui::TextColored(kMuted, "->");
+							ImGui::SameLine(0, 4.0f * S);
+							ImGui::TextColored(st.line > 0 ? SegGradeColor(ln) : kMuted, "%s", ln);
+							if (st.root) { ImGui::SameLine(); Pill("ROOT CAUSE", kRoot); }
+							if (!st.fix.empty() && st.line > st.yours)
+							{
+								ImGui::SameLine();
+								ImGui::TextColored(kSub, "%s", st.fix.c_str());
+							}
+							ImGui::EndGroup();
+							if (ImGui::IsItemHovered())
+								ImGui::SetTooltip("You: %s\nEngine: %s", st.yourWhy.empty() ? "-" : st.yourWhy.c_str(), st.lineWhy.empty() ? "-" : st.lineWhy.c_str());
+						}
+					}
 					ImGui::Dummy(ImVec2(0, 4));
 					std::vector<ReviewStat> ts;
 					ts.push_back({ fixTab ? "Starts at" : "Takes over", std::format("{:.2f} s", v.startTick / 120.0f), segName(v.startTick) });
@@ -1685,7 +1723,7 @@ void RLCoach::RenderWindow()
 					if (v.status == WhatIfStatus::NothingBetter)
 						emptyState(1, fixTab ? "No small fix found" : "No better line found",
 							fixTab ? "Small changes to your inputs didn't beat your shot. The best line tab doesn't stick to your inputs."
-								: "Your shot was the best it could find from here.");
+								: v.noneWhy.empty() ? "Your shot was the best it could find from here." : v.noneWhy);
 					else
 						emptyState(1, WhatIf::StatusText(v.status), "");
 					if (fixTab && rootSeg >= 0)
@@ -1935,30 +1973,89 @@ void RLCoach::RenderWindow()
 	Heading("REPS");
 	if (gradeThreadBusy) { ImGui::SameLine(); ImGui::TextDisabled("grading..."); }
 
-	// Hide reps with no grade at all (no rating from you, no auto grade): bailed and reset reps, mostly
+	// One Filter button holds every filter (Nov 1): which days, whose grade, which grades, which shot, and ungraded
+	// reps. Each one is a cvar, so they stick.
+	static const char* kShotNames[8] = { "All shots", "Aerials", "Ground shots", "Double taps", "Dribbles", "Air dribbles", "Flip resets", "Ceiling shots" };
+	const int range = *viewerRange;
+	const int gradeFrom = viewerGradeFrom ? *viewerGradeFrom : 0;               // 0 either, 1 yours, 2 auto
+	const int gradeMask = viewerGrades ? (*viewerGrades & 31) : 31;             // bit g-1 = grade g shown
+	const int shotPick = viewerShotFilter ? *viewerShotFilter : 0;                          // 0 all, else ShotType + 1
 	{
-		bool showAll = *showUngraded;
+		auto setCvar = [this](const char* name, float v) {
+			std::string n = name;
+			gameWrapper->Execute([this, n, v](GameWrapper*) { cvarManager->getCvar(n).setValue(v); });
+		};
+		const int active = (range != 0) + (gradeFrom != 0) + (gradeMask != 31) + (shotPick != 0) + (*showUngraded ? 1 : 0);
 		ImGui::SameLine();
-		if (ImGui::Checkbox("Show ungraded", &showAll))
+		const std::string fl = active ? std::format("Filter ({})##filter", active) : std::string("Filter##filter");
+		if (active ? OutlineButton(fl.c_str()) : ImGui::Button(fl.c_str())) ImGui::OpenPopup("repfilter");
+		if (ImGui::BeginPopup("repfilter"))
 		{
-			float v = showAll ? 1.0f : 0.0f;
-			gameWrapper->Execute([this, v](GameWrapper*) { cvarManager->getCvar("rlcoach_viewer_show_ungraded").setValue(v); });
+			FontScope f(fLabel);
+			ImGui::TextColored(kMuted, "SHOW");
+			const char* ranges[4] = { "Today", "Last 7 days", "Starred", "All" };
+			for (int r = 0; r < 4; r++)
+			{
+				if (r) ImGui::SameLine();
+				if (ImGui::RadioButton(ranges[r], range == r)) setCvar("rlcoach_viewer_range", static_cast<float>(r));
+			}
+			ImGui::Spacing();
+			ImGui::TextColored(kMuted, "GRADED BY");
+			const char* froms[3] = { "You or auto", "You", "Auto" };
+			for (int g = 0; g < 3; g++)
+			{
+				if (g) ImGui::SameLine();
+				if (ImGui::RadioButton(froms[g], gradeFrom == g)) setCvar("rlcoach_viewer_grade_from", static_cast<float>(g));
+			}
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("You: reps you rated. Auto: the plugin's grade. You or auto: either one counts.");
+			ImGui::Spacing();
+			ImGui::TextColored(kMuted, "GRADES");
+			for (int g = 1; g <= 5; g++)
+			{
+				if (g > 1) ImGui::SameLine();
+				const bool on = (gradeMask >> (g - 1)) & 1;
+				ImGui::PushID(g);
+				ImGui::PushStyleColor(ImGuiCol_Button, on ? GradeColor(g) : Hex(0x15223A));
+				ImGui::PushStyleColor(ImGuiCol_Text, on ? kOnAccent : kMuted);
+				if (ImGui::Button(std::to_string(g).c_str(), ImVec2(30 * S, 0)))
+				{
+					int m = gradeMask ^ (1 << (g - 1));
+					if (m == 0) m = 31;   // nothing picked = all of them
+					setCvar("rlcoach_viewer_grades", static_cast<float>(m));
+				}
+				ImGui::PopStyleColor(2);
+				ImGui::PopID();
+			}
+			ImGui::Spacing();
+			ImGui::TextColored(kMuted, "SHOT");
+			int sp = shotPick;
+			ImGui::PushItemWidth(170 * S);
+			if (ImGui::Combo("##shot", &sp, kShotNames, 8)) setCvar("rlcoach_viewer_shot", static_cast<float>(sp));
+			ImGui::PopItemWidth();
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("The shot type comes from the auto grade, so this only lists auto-graded reps.");
+			ImGui::Spacing();
+			bool showAll = *showUngraded;
+			if (ImGui::Checkbox("Show ungraded", &showAll)) setCvar("rlcoach_viewer_show_ungraded", showAll ? 1.0f : 0.0f);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reps you didn't rate that also have no auto grade (bailed or reset).\nThey stay saved; this only hides them from the list.");
+			if (active && LinkButton("Clear filters"))
+			{
+				setCvar("rlcoach_viewer_range", 0); setCvar("rlcoach_viewer_grade_from", 0); setCvar("rlcoach_viewer_grades", 31);
+				setCvar("rlcoach_viewer_shot", 0); setCvar("rlcoach_viewer_show_ungraded", 0);
+			}
+			ImGui::EndPopup();
 		}
-		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reps you didn't rate that also have no auto grade (bailed or reset).\nThey stay saved; this only hides them from the list.");
 	}
-	// Which reps: today (default), the last 7 days, starred, or everything
-	{
-		int range = *viewerRange;
-		const char* ranges[4] = { "Today", "Last 7 days", "Starred", "All" };
-		ImGui::SameLine();
-		ImGui::PushItemWidth(120 * S);
-		if (ImGui::Combo("##range", &range, ranges, 4))
-		{
-			float v = static_cast<float>(range);
-			gameWrapper->Execute([this, v](GameWrapper*) { cvarManager->getCvar("rlcoach_viewer_range").setValue(v); });
-		}
-		ImGui::PopItemWidth();
-	}
+	// Does a rep pass the grade and shot filters? (the day filter and "show ungraded" are checked below)
+	auto passesGradeFilter = [&](const RepListItem& it) {
+		auto ag = uiAutoGrades.find(it.file);
+		const int autoG = ag != uiAutoGrades.end() ? ag->second.overall : 0;
+		if (shotPick != 0 && (ag == uiAutoGrades.end() || ag->second.shotType + 1 != shotPick)) return false;
+		auto inMask = [&](int g) { return g >= 1 && g <= 5 && ((gradeMask >> (g - 1)) & 1); };
+		if (gradeFrom == 1) return inMask(it.rating);
+		if (gradeFrom == 2) return inMask(autoG);
+		if (gradeMask == 31) return true;
+		return inMask(it.rating) || inMask(autoG);
+	};
 	auto dayString = [](int daysAgo) {
 		std::time_t t = std::time(nullptr) - static_cast<std::time_t>(daysAgo) * 86400;
 		std::tm local{};
@@ -1968,7 +2065,6 @@ void RLCoach::RenderWindow()
 		return std::string(buf);
 	};
 	const std::string today = dayString(0), weekStart = dayString(6);
-	const int range = *viewerRange;
 
 	std::vector<int> shown;
 	shown.reserve(repList.size());
@@ -1980,6 +2076,7 @@ void RLCoach::RenderWindow()
 		std::string day = it.savedAt.substr(0, 10);
 		bool inRange = range == 3 || (range == 2 && it.kept) || (range == 1 && day >= weekStart) || (range == 0 && day == today);
 		if (!inRange && !watching) continue;
+		if (!watching && !passesGradeFilter(it)) continue;
 		auto ag = uiAutoGrades.find(it.file);
 		bool graded = it.rating > 0 || (ag != uiAutoGrades.end() && ag->second.overall > 0);
 		bool pending = ag == uiAutoGrades.end() && it.hasRecording && it.endReason != "reset";   // still being graded
@@ -1989,8 +2086,10 @@ void RLCoach::RenderWindow()
 	ImGui::SameLine();
 	if (hiddenUngraded > 0) ImGui::TextDisabled("%d shown, %d ungraded hidden", static_cast<int>(shown.size()), hiddenUngraded);
 	else ImGui::TextDisabled("%d shown", static_cast<int>(shown.size()));
-	if (shown.empty())
-		ImGui::TextDisabled(range == 0 ? "No reps today yet. Switch to \"Last 7 days\" or \"All\" to see older ones."
+	if (shown.empty() && (gradeFrom != 0 || gradeMask != 31 || shotPick != 0))
+		ImGui::TextDisabled("No reps match these filters. Open Filter to widen them.");
+	else if (shown.empty())
+		ImGui::TextDisabled(range == 0 ? "No reps today yet. Switch to \"Last 7 days\" or \"All\" (Filter) to see older ones."
 			: range == 2 ? "No starred reps. Star a rep to keep it forever and find it here." : "No reps to show.");
 
 	ImGui::PushStyleColor(ImGuiCol_ChildBg, kPanel2);

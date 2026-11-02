@@ -16,7 +16,7 @@ int main(int argc, char** argv)
 	std::ifstream f(argv[1]); std::string line; std::getline(f, line);
 	FILE* out = fopen(argv[3], "w");
 	fprintf(out, "source,bx,by,bz,bvx,bvy,bvz,bwx,bwy,bwz,cx,cy,cz,cvx,cvy,cvz,cwx,cwy,cwz,pitch,yaw,roll,boost,surface\n");
-	int n = 0, clean = 0, rollA = 0, rollB = 0, unreal = 0;
+	int n = 0, clean = 0, rollA = 0, rollB = 0, unreal = 0, jumping = 0;
 	std::vector<float> sr, srP;
 	while (std::getline(f, line))
 	{
@@ -69,6 +69,9 @@ int main(int argc, char** argv)
 			fprintf(stderr, "FAIL %s surf %d z %.0f speed %.0f vz %.0f theta %.2f dist %.0f saveZ %.0f realT %.2f est %.2f\n", car.onSurface ? "S" : "A", car.onSurface, car.pos.z, sp, car.vel.z, th, hd, sz, dt, r.tReachReal);
 		}
 		sr.push_back(r.slackReal);
+		// the defender already jumping or dodging when the shot was hit: a fine save, a bad place to spawn you (Oct 29)
+		const bool jumped = c.size() > 33 && c[33] == "1";
+		if (jumped) { jumping++; continue; }
 		if (c[0].back() == 'P') srP.push_back(r.slackReal);
 		// Turned so the ball heads for the blue goal (y = -5120)
 		if (gs > 0)
@@ -78,7 +81,7 @@ int main(int argc, char** argv)
 			car.yaw = -car.yaw; car.roll = -car.roll;
 		}
 		fprintf(out, "%c,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%.1f,%d\n",
-			c[0].back(), b.pos.x, b.pos.y, b.pos.z, b.vel.x, b.vel.y, b.vel.z, b.angVel.x, b.angVel.y, b.angVel.z,
+			c.size() > 34 && !c[34].empty() ? c[34][0] : c[0].back(), b.pos.x, b.pos.y, b.pos.z, b.vel.x, b.vel.y, b.vel.z, b.angVel.x, b.angVel.y, b.angVel.z,
 			car.pos.x, car.pos.y, car.pos.z, car.vel.x, car.vel.y, car.vel.z, w.x, w.y, w.z, car.pitch, car.yaw, car.roll, boost, car.onSurface ? 1 : 0);
 	}
 	fclose(out);
@@ -88,6 +91,6 @@ int main(int argc, char** argv)
 		int neg = 0; for (float x : v) neg += x < -0.05f;
 		printf("%s %zu: realistic slack min %.2f p2 %.2f p5 %.2f p10 %.2f p25 %.2f p50 %.2f p75 %.2f  (below -0.05: %d)\n", name, v.size(), v.empty() ? 0 : v[0], q(.02f), q(.05f), q(.10f), q(.25f), q(.5f), q(.75f), neg);
 	};
-	printf("rows %d, clean %d; roll sign A %d B %d; realistic estimate later than the real save: %d\n", n, clean, rollA, rollB, unreal);
+	printf("rows %d, clean %d; roll sign A %d B %d; realistic estimate later than the real save: %d; left out (already jumping): %d\n", n, clean, rollA, rollB, unreal, jumping);
 	pr("all", sr); pr("pro", srP);
 }

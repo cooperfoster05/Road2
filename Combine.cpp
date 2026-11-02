@@ -7,6 +7,7 @@
 #include <random>
 #include <format>
 #include <cctype>
+#include <cstdio>
 
 using namespace RocketSim;
 
@@ -267,6 +268,7 @@ std::vector<Combine::SaveSituation> Combine::LoadSaveSituations(const std::strin
 		s.car.pitch = v[18]; s.car.yaw = v[19]; s.car.roll = v[20]; s.car.hasFacing = true;
 		s.boost = v[21];
 		s.car.onSurface = v[22] > 0.5f;
+		if (v.size() >= 26) { s.recvZ = v[23]; s.recvSpeed = v[24]; s.recvDt = v[25]; }
 		out.push_back(s);
 	}
 	return out;
@@ -300,9 +302,25 @@ std::vector<Combine::SaveShot> Combine::MakeSaveSet(uint32_t seed, int level, in
 			s.car = sit.car;
 			s.carAngVel = sit.carAngVel;
 			s.boost = sit.boost;
-			const float nx = U(-60.0f, 60.0f), ny = U(-60.0f, 60.0f);
-			s.car.pos.x += nx; s.car.pos.y += ny;
-			s.car.vel.x += U(-80.0f, 80.0f); s.car.vel.y += U(-80.0f, 80.0f);
+			// Nudges stay along the surface you're on (Oct 29): nudging a wall car in x or y lifted it off the wall (or into
+			// it), so its wheels didn't grip and it slid for a second
+			{
+				const float cp = std::cos(sit.car.pitch), sp = std::sin(sit.car.pitch), cy = std::cos(sit.car.yaw), sy = std::sin(sit.car.yaw);
+				const float cr = std::cos(sit.car.roll), sr = std::sin(sit.car.roll);
+				const Vec3 up{ -cr * cy * sp - sr * sy, -cr * sy * sp + sr * cy, cp * cr };
+				auto Flat = [&](Vec3 d) { const float k = d.x * up.x + d.y * up.y + d.z * up.z; return Vec3{ d.x - k * up.x, d.y - k * up.y, d.z - k * up.z }; };
+				const Vec3 dp = Flat({ U(-60.0f, 60.0f), U(-60.0f, 60.0f), U(-60.0f, 60.0f) });
+				const Vec3 dv = Flat({ U(-80.0f, 80.0f), U(-80.0f, 80.0f), U(-80.0f, 80.0f) });
+				s.car.pos.x += dp.x; s.car.pos.y += dp.y; s.car.pos.z += dp.z;
+				s.car.vel.x += dv.x; s.car.vel.y += dv.y; s.car.vel.z += dv.z;
+				if (sit.car.onSurface && up.z < 0.9f)
+				{
+					// a wall car: no speed away from the wall, and a touch into it so the wheels grip from the first tick
+					const float vn = s.car.vel.x * up.x + s.car.vel.y * up.y + s.car.vel.z * up.z;
+					const float push = -40.0f - vn;
+					s.car.vel.x += push * up.x; s.car.vel.y += push * up.y; s.car.vel.z += push * up.z;
+				}
+			}
 			s.ball.vel.x += U(-40.0f, 40.0f); s.ball.vel.z += U(-30.0f, 30.0f);
 			if (mirror)
 			{
@@ -500,6 +518,7 @@ std::vector<Combine::RecoveryThrow> Combine::MakeRecoverySet(uint32_t seed, int 
 	auto U = [&](float a, float b) { return a + (b - a) * static_cast<float>(rng() >> 8) * (1.0f / 16777216.0f); };
 	const float pi = 3.14159265f;
 	const float lv = static_cast<float>(std::clamp(level, 1, kSaveLevels));
+	int stranded = 0;   // at most one "stranded high" throw a set: an occasional change of pace
 	for (int tries = 0; static_cast<int>(out.size()) < count && tries < count * 400; tries++)
 	{
 		RecoveryThrow t;
@@ -508,7 +527,8 @@ std::vector<Combine::RecoveryThrow> Combine::MakeRecoverySet(uint32_t seed, int 
 		const float kind = U(0.0f, 1.0f);
 		const float spinLo = 0.4f + 0.7f * (lv - 1.0f), spinHi = std::min(5.5f, 2.6f + 0.75f * lv);
 		const float w = U(spinLo, spinHi);
-		if (kind < 0.35f)
+		bool high = false;
+		if (kind < 0.30f)
 		{
 			// Out of an aerial: high, travelling up field (or across), nose up
 			t.pos = { U(-3400.0f, 3400.0f), U(-2500.0f, 4600.0f), U(700.0f, 1750.0f) };
@@ -516,7 +536,7 @@ std::vector<Combine::RecoveryThrow> Combine::MakeRecoverySet(uint32_t seed, int 
 			t.vel = { sp * std::cos(e) * std::cos(a), sp * std::cos(e) * std::sin(a), sp * std::sin(e) };
 			t.pitch = U(0.2f, pi * 0.5f); t.yaw = std::atan2(t.vel.y, t.vel.x) + U(-0.8f, 0.8f) * lv * 0.5f; t.roll = U(-pi, pi) * (0.2f + 0.16f * lv);
 		}
-		else if (kind < 0.60f)
+		else if (kind < 0.50f)
 		{
 			// Knocked about in a 50/50 or a bump: low, fast, spinning
 			t.pos = { U(-3600.0f, 3600.0f), U(-4200.0f, 4600.0f), U(180.0f, 650.0f) };
@@ -524,7 +544,7 @@ std::vector<Combine::RecoveryThrow> Combine::MakeRecoverySet(uint32_t seed, int 
 			t.vel = { sp * std::cos(e) * std::cos(a), sp * std::cos(e) * std::sin(a), sp * std::sin(e) };
 			t.pitch = U(-pi * 0.5f, pi * 0.5f); t.yaw = U(-pi, pi); t.roll = U(-pi, pi);
 		}
-		else if (kind < 0.80f)
+		else if (kind < 0.65f)
 		{
 			// Bailing off a side wall: near it, high, moving off it
 			const float side = U(0.0f, 1.0f) < 0.5f ? -1.0f : 1.0f;
@@ -532,6 +552,35 @@ std::vector<Combine::RecoveryThrow> Combine::MakeRecoverySet(uint32_t seed, int 
 			const float sp = U(500.0f, 900.0f + 200.0f * lv);
 			t.vel = { -side * U(200.0f, 700.0f), U(-1.0f, 1.0f) * sp, U(-300.0f, 400.0f) };
 			t.pitch = U(-0.8f, 0.8f); t.yaw = U(-pi, pi); t.roll = side * U(0.6f, 1.6f) + U(-0.5f, 0.5f) * lv * 0.4f;
+		}
+		else if (kind < 0.82f)
+		{
+			// Sent flying at a wall or your own goal (a bump, a missed challenge): you meet the wall or the back wall first
+			const float pick = U(0.0f, 1.0f);
+			const float sp = U(900.0f, 1300.0f + 150.0f * lv), e = U(-0.1f, 0.5f);
+			if (pick < 0.55f)
+			{
+				const float side = U(0.0f, 1.0f) < 0.5f ? -1.0f : 1.0f;
+				t.pos = { side * U(2000.0f, 3200.0f), U(-4000.0f, 4000.0f), U(250.0f, 1200.0f) };
+				const float a = (side > 0 ? 0.0f : pi) + U(-0.6f, 0.6f);
+				t.vel = { sp * std::cos(e) * std::cos(a), sp * std::cos(e) * std::sin(a), sp * std::sin(e) };
+			}
+			else
+			{
+				t.pos = { U(-2500.0f, 2500.0f), U(-4200.0f, -3000.0f), U(250.0f, 1100.0f) };
+				const float a = -pi * 0.5f + U(-0.6f, 0.6f);
+				t.vel = { sp * std::cos(e) * std::cos(a), sp * std::cos(e) * std::sin(a), sp * std::sin(e) };
+			}
+			t.pitch = U(-pi * 0.5f, pi * 0.5f); t.yaw = U(-pi, pi); t.roll = U(-pi, pi);
+		}
+		else if (kind < 0.90f && stranded == 0)
+		{
+			// Stranded high up (an aerial gone wrong): plenty of time to land, but the race is getting down fast
+			high = true;
+			t.pos = { U(-3000.0f, 3000.0f), U(-3500.0f, 4000.0f), U(1450.0f, 1500.0f + 90.0f * lv) };
+			const float a = U(-pi, pi), sp = U(0.0f, 600.0f), e = U(-0.2f, 0.8f);
+			t.vel = { sp * std::cos(e) * std::cos(a), sp * std::cos(e) * std::sin(a), sp * std::sin(e) };
+			t.pitch = U(0.1f, pi * 0.5f); t.yaw = U(-pi, pi); t.roll = U(-pi, pi);
 		}
 		else
 		{
@@ -548,7 +597,8 @@ std::vector<Combine::RecoveryThrow> Combine::MakeRecoverySet(uint32_t seed, int 
 		if (rc.normal.z < -0.7f) continue;   // ceiling landings: not this event
 		t.tHit = rc.tHit; t.normal = rc.normal; t.tTurn = rc.tTurn; t.tTurnReal = rc.tTurnReal;
 		t.margin = rc.tHit - rc.tTurnReal;
-		if (t.margin < lo || t.margin >= hi) continue;
+		if (t.margin < lo || (!high && t.margin >= hi)) continue;   // stranded throws have plenty of turn time by design
+		if (high && rc.normal.z < 0.7f) continue;
 		t.land = rc.land; t.landVel = rc.landVel;
 		// The target: your back post (the far one from where you land), at most 3000 away
 		{
@@ -570,8 +620,24 @@ std::vector<Combine::RecoveryThrow> Combine::MakeRecoverySet(uint32_t seed, int 
 			const float sp = Len(vs.x, vs.y, vs.z);
 			const float along = d > 1 ? (vs.x * px + vs.y * py + vs.z * pz) / d : 0.0f;
 			const float theta = sp > 1 && d > 1 ? std::acos(std::clamp(along / sp, -1.0f, 1.0f)) : 0.0f;
-			t.par = rc.tHit + RealDriveTime(sp, along, theta, std::max(0.0f, d - kRecoveryTargetRadius));
+			float tLand = rc.tHit;
+			if (high)
+			{
+				// A good player doesn't wait to fall: nose down, boost to the floor, wheels down just before it
+				const float fz = std::sin(t.pitch);   // the nose's height part (Unreal pitch)
+				const float tAim = std::acos(std::clamp(-fz, -1.0f, 1.0f)) / 3.5f + 0.1f;
+				float z = t.pos.z, vz = t.vel.z, tt = 0;
+				for (; z > 17.0f && tt < 6.0f; tt += 1.0f / 120.0f)
+				{
+					const bool boost = tt > tAim && (z - 17.0f) > -vz * 0.3f + 0.5f * 650.0f * 0.09f;
+					vz = std::max(-2300.0f, vz - (650.0f + (boost ? 991.67f : 0.0f)) / 120.0f);
+					z += vz / 120.0f;
+				}
+				tLand = std::min(rc.tHit, tt);
+			}
+			t.par = tLand + RealDriveTime(sp, along, theta, std::max(0.0f, d - kRecoveryTargetRadius));
 		}
+		if (high) stranded++;
 		out.push_back(t);
 	}
 	return out;
@@ -610,4 +676,492 @@ void Combine::RecoveryPointCuts(int level, float& three, float& two, float& one)
 	};
 	const int i = std::clamp(level, 1, kSaveLevels) - 1;
 	three = kCuts[i][0]; two = kCuts[i][1]; one = kCuts[i][2];
+}
+
+// ---- Reads ----
+
+float Combine::ReadMinHeight(int level)
+{
+	// the ball's centre: the floor, then a low touch, a jump, an aerial, crossbar height
+	static const float kH[kSaveLevels] = { 0.0f, 180.0f, 300.0f, 450.0f, 640.0f };
+	return kH[std::clamp(level, 1, kSaveLevels) - 1];
+}
+
+void Combine::ReadLevelBand(int level, float& lo, float& hi)
+{
+	// Spare time inside the read window (off the wall to landing) by the realistic estimate
+	static const float kBands[kSaveLevels + 1] = { 3.0f, 1.0f, 0.6f, 0.35f, 0.18f, 0.03f };
+	level = std::clamp(level, 1, kSaveLevels);
+	hi = kBands[level - 1];
+	lo = kBands[level];
+}
+
+std::vector<Combine::ReadSetup> Combine::MakeReadSet(uint32_t seed, int level, int count)
+{
+	std::vector<ReadSetup> out;
+	const int lvi = std::clamp(level, 1, kSaveLevels);
+	const float lv = static_cast<float>(lvi);
+	float lo, hi;
+	ReadLevelBand(level, lo, hi);
+	std::unique_ptr<Arena> arena(Arena::Create(GameMode::SOCCAR));
+	std::mt19937 rng(seed * 2246822519u + static_cast<uint32_t>(level) * 3571u + 17u);
+	auto U = [&](float a, float b) { return a + (b - a) * static_cast<float>(rng() >> 8) * (1.0f / 16777216.0f); };
+	const float pi = 3.14159265f;
+	const float dt = 1.0f / 120.0f;
+	int perKind[3] = { 0, 0, 0 };
+	const int maxPerKind[3] = { (count * 4 + 9) / 10, (count * 3 + 9) / 10, (count * 3 + 9) / 10 };
+	for (int tries = 0; static_cast<int>(out.size()) < count && tries < count * 500; tries++)
+	{
+		ReadSetup r;
+		const float k = U(0.0f, 1.0f);
+		r.kind = k < 0.4f ? 0 : k < 0.7f ? 1 : 2;
+		if (perKind[r.kind] >= maxPerKind[r.kind]) continue;
+		// Where it's hit from, and the point on the wall or backboard it's hit at
+		Vec3 from, at;
+		// (Oct 30: higher and harder at higher levels; Coop found Legend too tame, nothing above net height)
+		if (r.kind == 0)
+		{
+			from = { U(-2800.0f, 2800.0f), U(-2000.0f, 1500.0f), U(93.0f, 400.0f + 100.0f * lv) };
+			at = { U(-1600.0f, 1600.0f), -5120.0f, std::min(1900.0f, U(750.0f + 100.0f * lv, 1300.0f + 140.0f * lv)) };
+		}
+		else if (r.kind == 1)
+		{
+			const float side = U(0.0f, 1.0f) < 0.5f ? -1.0f : 1.0f;
+			from = { side * U(-1500.0f, 2500.0f), U(-800.0f, 2500.0f), U(93.0f, 300.0f + 100.0f * lv) };
+			at = { side * 4096.0f, U(1800.0f, 4500.0f), std::min(1800.0f, U(300.0f + 150.0f * lv, 900.0f + 200.0f * lv)) };
+		}
+		else
+		{
+			from = { U(-2800.0f, 2800.0f), U(0.0f, 2800.0f), U(93.0f, 400.0f + 100.0f * lv) };
+			at = { U(-1600.0f, 1600.0f), 5120.0f, std::min(1900.0f, U(750.0f + 100.0f * lv, 1300.0f + 140.0f * lv)) };
+		}
+		const float speed = U(1300.0f + 200.0f * lv, 1900.0f + 250.0f * lv);
+		const float dx = at.x - from.x, dy = at.y - from.y, dz = at.z - from.z;
+		const float T = Len(dx, dy, dz) / speed;
+		r.ball.pos = from;
+		r.ball.vel = { dx / T, dy / T, dz / T + 0.5f * kGravity * T };
+		if (Len(r.ball.vel.x, r.ball.vel.y, r.ball.vel.z) > 3500.0f) continue;
+		// spin off the shot (more at higher levels): it changes how it comes off the wall
+		{
+			const float w = U(0.0f, 1.2f * lv), a = U(-pi, pi), e = U(-1.2f, 1.2f);
+			r.ball.angVel = { w * std::cos(e) * std::cos(a), w * std::cos(e) * std::sin(a), w * std::sin(e) };
+		}
+		// Fly it: when it comes off the wall, and when it lands after that
+		BallState bs;
+		bs.pos = Vec(from.x, from.y, from.z);
+		bs.vel = Vec(r.ball.vel.x, r.ball.vel.y, r.ball.vel.z);
+		bs.angVel = Vec(r.ball.angVel.x, r.ball.angVel.y, r.ball.angVel.z);
+		arena->ball->SetState(bs);
+		std::vector<Vec3> path;
+		std::vector<BallState> states;
+		Vec prevV = bs.vel;
+		int iWall = -1, iFloor = -1;
+		bool bad = false;
+		for (int i = 1; i <= 720 && iFloor < 0; i++)
+		{
+			arena->Step(1);
+			const BallState s = arena->ball->GetState();
+			path.push_back({ s.pos.x, s.pos.y, s.pos.z });
+			states.push_back(s);
+			if (std::fabs(s.pos.y) >= kGoalLine && std::fabs(s.pos.x) < 893.0f && s.pos.z < 643.0f) { bad = iWall < 0 || r.kind != 0; break; }   // straight in
+			const Vec dv = s.vel - prevV + Vec(0, 0, kGravity * dt);
+			if (iWall < 0)
+			{
+				if (dv.Length() > 300.0f && s.pos.z > 150.0f) iWall = i;
+				else if (s.pos.z < 120.0f && prevV.z < -50.0f && s.vel.z > 0) { bad = true; break; }   // landed before the wall
+			}
+			else if (s.pos.z < 120.0f && prevV.z < -50.0f && s.vel.z > 0) iFloor = i;
+			prevV = s.vel;
+		}
+		if (bad || iWall < 0 || iFloor < 0) continue;
+		// The read window ends when it drops below the level's height (the floor at Warm-up, crossbar height at Legend):
+		// at higher levels you have to meet it in the air
+		{
+			const float hMin = ReadMinHeight(level);
+			for (int i = iWall + 1; i < iFloor; i++)
+				if (path[i - 1].z < hMin && states[i - 1].vel.z < 0) { iFloor = i; break; }
+		}
+		// Higher levels start later in the ball's flight: from the shot at Warm-up, just before it hits the wall at Legend
+		{
+			static const float kLeadLo[kSaveLevels] = { 9.0f, 0.8f, 0.5f, 0.3f, 0.15f };
+			static const float kLeadHi[kSaveLevels] = { 9.0f, 1.3f, 0.9f, 0.6f, 0.4f };
+			const float lead = U(kLeadLo[lvi - 1], kLeadHi[lvi - 1]);
+			const int skip = std::max(0, iWall - static_cast<int>(lead * 120.0f));
+			if (skip > 0)
+			{
+				const BallState& s0 = states[skip - 1];
+				r.ball.pos = { s0.pos.x, s0.pos.y, s0.pos.z };
+				r.ball.vel = { s0.vel.x, s0.vel.y, s0.vel.z };
+				r.ball.angVel = { s0.angVel.x, s0.angVel.y, s0.angVel.z };
+				path.erase(path.begin(), path.begin() + skip);
+				iWall -= skip;
+				iFloor -= skip;
+			}
+		}
+		r.tWall = iWall * dt;
+		r.tFloor = iFloor * dt;
+		if (r.tFloor - r.tWall < 0.35f) continue;
+		// Where you start: back defending your backboard, or up in their half for the others
+		// a way from where it comes down (further at higher levels): up the field from it when defending, back
+		// toward the middle when attacking
+		CarStart car;
+		const Vec3& landAt = path[iFloor - 1];
+		{
+			const float base = r.kind == 0 ? pi * 0.5f : -pi * 0.5f;
+			const float a = base + U(-1.2f, 1.2f);
+			const float D = U(700.0f + 250.0f * lv, 1400.0f + 450.0f * lv);
+			car.pos = { landAt.x + std::cos(a) * D, landAt.y + std::sin(a) * D, 17.0f };
+			if (std::fabs(car.pos.x) > 3700.0f || std::fabs(car.pos.y) > 4700.0f) continue;
+		}
+		// facing roughly where it'll come down (less so at higher levels)
+		car.yaw = std::atan2(landAt.y - car.pos.y, landAt.x - car.pos.x) + U(-1.0f, 1.0f) * (0.25f + 0.3f * (lv - 1.0f));
+		const float sp = U(0.0f, 1100.0f);
+		car.vel = { std::cos(car.yaw) * sp, std::sin(car.yaw) * sp, 0 };
+		car.onSurface = true;
+		car.hasFacing = true;
+		r.car = car;
+		r.boost = std::floor(U(30.0f, 100.0f));
+		// The read window: off the wall to landing. Can a good player get a touch in it, and with how much to spare?
+		bool possible = false;
+		for (int i = iWall; i < iFloor; i++)
+			if (CanReach(car, path[i - 1], i * dt)) { possible = true; break; }
+		if (!possible) continue;
+		// spare time: the most a good player could be early to any point of the ball's path in the window (they get
+		// there, then wait for it)
+		r.tReachReal = -1;
+		r.slackReal = -9;
+		for (int i = iWall; i < iFloor; i += 3)
+		{
+			const float ti = i * dt;
+			if (!CanReachReal(car, path[i - 1], ti)) continue;
+			float a = 0, b = ti;   // the earliest it could be there (binary search)
+			for (int it = 0; it < 9; it++) { const float m = 0.5f * (a + b); if (CanReachReal(car, path[i - 1], m)) b = m; else a = m; }
+			if (ti - b > r.slackReal) { r.slackReal = ti - b; r.tReachReal = ti; }
+		}
+		if (r.tReachReal < 0) continue;
+		if (r.slackReal < lo || r.slackReal >= hi) continue;
+		// mirrored left-right half the time
+		if (U(0.0f, 1.0f) < 0.5f)
+		{
+			r.ball.pos.x = -r.ball.pos.x; r.ball.vel.x = -r.ball.vel.x;
+			r.car.pos.x = -r.car.pos.x; r.car.vel.x = -r.car.vel.x; r.car.yaw = pi - r.car.yaw;
+		}
+		perKind[r.kind]++;
+		out.push_back(r);
+	}
+	return out;
+}
+
+// ---- First touches ----
+
+bool Combine::TouchLevelFits(int level, float z, float s)
+{
+	switch (std::clamp(level, 1, kSaveLevels))
+	{
+	case 1: return z < 180.0f && s < 1500.0f;                // on the ground
+	case 2: return z >= 180.0f && z < 450.0f && s < 2000.0f; // bouncing, a low touch
+	case 3: return z >= 300.0f && z < 750.0f;                // lofted
+	case 4: return z >= 600.0f && z < 1200.0f;               // aerial
+	default: return z >= 950.0f || s >= 2700.0f;             // high, or fast
+	}
+}
+
+const char* Combine::TouchLevelNote(int level)
+{
+	static const char* kNote[kSaveLevels] = { "passes on the ground", "bouncing passes", "lofted passes", "aerial passes", "high or fast passes" };
+	return kNote[std::clamp(level, 1, kSaveLevels) - 1];
+}
+
+std::vector<Combine::TouchShot> Combine::MakeTouchSet(uint32_t seed, int level, int count, const std::vector<SaveSituation>& passes)
+{
+	std::vector<TouchShot> out;
+	std::vector<int> pool;
+	for (int i = 0; i < static_cast<int>(passes.size()); i++)
+		if (TouchLevelFits(level, passes[i].recvZ, passes[i].recvSpeed)) pool.push_back(i);
+	if (pool.empty()) return out;
+	std::mt19937 rng(seed * 2654435761u + static_cast<uint32_t>(level) * 389u + 5u);
+	auto U = [&](float a, float b) { return a + (b - a) * static_cast<float>(rng() >> 8) * (1.0f / 16777216.0f); };
+	const float pi = 3.14159265f;
+	std::vector<int> used;
+	for (int tries = 0; static_cast<int>(out.size()) < count && tries < count * 50; tries++)
+	{
+		const int idx = pool[rng() % pool.size()];
+		if (std::find(used.begin(), used.end(), idx) != used.end() && static_cast<int>(pool.size()) > count) continue;
+		used.push_back(idx);
+		const SaveSituation& p = passes[idx];
+		TouchShot t;
+		t.ball = p.ball; t.car = p.car; t.carAngVel = p.carAngVel; t.boost = p.boost;
+		t.recvZ = p.recvZ; t.recvSpeed = p.recvSpeed; t.recvDt = p.recvDt; t.source = p.source;
+		// a small nudge along the surface you're on, so a set can't be memorized
+		{
+			const RotMat m = Angle(p.car.yaw, p.car.pitch, p.car.roll).ToRotMat();
+			const Vec u = m.up;
+			Vec d(U(-40.0f, 40.0f), U(-40.0f, 40.0f), U(-40.0f, 40.0f));
+			d = d - u * d.Dot(u);
+			t.car.pos.x += d.x; t.car.pos.y += d.y; t.car.pos.z += d.z;
+			if (p.car.onSurface && u.z < 0.9f)
+			{
+				// on a wall: no speed away from it, a touch into it, so the wheels grip from the first tick
+				const float vn = t.car.vel.x * u.x + t.car.vel.y * u.y + t.car.vel.z * u.z;
+				const float push = -40.0f - vn;
+				t.car.vel.x += push * u.x; t.car.vel.y += push * u.y; t.car.vel.z += push * u.z;
+			}
+		}
+		if (U(0.0f, 1.0f) < 0.5f)
+		{
+			t.ball.pos.x = -t.ball.pos.x; t.ball.vel.x = -t.ball.vel.x; t.ball.angVel = { t.ball.angVel.x, -t.ball.angVel.y, -t.ball.angVel.z };
+			t.car.pos.x = -t.car.pos.x; t.car.vel.x = -t.car.vel.x; t.carAngVel = { t.carAngVel.x, -t.carAngVel.y, -t.carAngVel.z };
+			t.car.yaw = pi - t.car.yaw; t.car.roll = -t.car.roll;
+		}
+		out.push_back(t);
+	}
+	return out;
+}
+
+// ---- Bot events: 50s and shadow defense ----
+
+std::vector<Combine::Challenge> Combine::LoadChallenges(const std::string& text)
+{
+	std::vector<Challenge> out;
+	size_t pos = 0;
+	auto nums = [](const std::string& line, size_t from, std::vector<float>& v) {
+		v.clear();
+		size_t a = from;
+		while (a != std::string::npos && a < line.size())
+		{
+			const size_t b = line.find(',', a);
+			try { v.push_back(std::stof(line.substr(a, b == std::string::npos ? std::string::npos : b - a))); } catch (...) { v.push_back(0); }
+			a = b == std::string::npos ? b : b + 1;
+		}
+	};
+	std::vector<float> v;
+	while (pos < text.size())
+	{
+		size_t next = text.find('\n', pos);
+		if (next == std::string::npos) next = text.size();
+		std::string line = text.substr(pos, next - pos);
+		pos = next + 1;
+		if (!line.empty() && line.back() == '\r') line.pop_back();
+		if (line.size() < 4 || line[1] != ',') continue;
+		if (line[0] == 'S')
+		{
+			// S,kind,label,boost,tc,ballEnd,botEnd, your car (13)
+			if (line.size() < 8) continue;
+			Challenge c;
+			c.kind = line[2];
+			c.source = line[4];
+			nums(line, 6, v);
+			if (v.size() < 17) continue;
+			c.boost = v[0]; c.tContact = v[1]; c.ballEnd = v[2]; c.botEnd = v[3];
+			c.you.pos = { v[4], v[5], v[6] }; c.you.vel = { v[7], v[8], v[9] }; c.you.angVel = { v[10], v[11], v[12] };
+			c.you.q[0] = v[13]; c.you.q[1] = v[14]; c.you.q[2] = v[15]; c.you.q[3] = v[16];
+			out.push_back(std::move(c));
+		}
+		else if (line[0] == 'B' && !out.empty())
+		{
+			nums(line, 2, v);
+			if (v.size() < 14) continue;
+			PathFrame f;
+			f.t = v[0]; f.pos = { v[1], v[2], v[3] }; f.vel = { v[4], v[5], v[6] }; f.angVel = { v[7], v[8], v[9] };
+			f.q[0] = v[10]; f.q[1] = v[11]; f.q[2] = v[12]; f.q[3] = v[13];
+			out.back().bot.push_back(f);
+		}
+		else if (line[0] == 'L' && !out.empty())
+		{
+			nums(line, 2, v);
+			if (v.size() < 10) continue;
+			BallFrame f;
+			f.t = v[0]; f.pos = { v[1], v[2], v[3] }; f.vel = { v[4], v[5], v[6] }; f.angVel = { v[7], v[8], v[9] };
+			out.back().ball.push_back(f);
+		}
+	}
+	// only complete ones
+	out.erase(std::remove_if(out.begin(), out.end(), [](const Challenge& c) { return c.bot.size() < 10 || c.ball.size() < 5; }), out.end());
+	return out;
+}
+
+int Combine::ChallengeLevel(char source)
+{
+	switch (source)
+	{
+	case '1': case '2': return 1;
+	case '3': return 2;
+	case '4': return 3;
+	case '5': return 4;
+	case '6': case 'P': return 5;
+	default: return 0;
+	}
+}
+
+const char* Combine::ChallengeLevelNote(int level)
+{
+	static const char* kNote[kSaveLevels] = { "Gold and Platinum players", "Diamond players", "Champion players", "Grand Champion players", "SSL players and pros" };
+	return kNote[std::clamp(level, 1, kSaveLevels) - 1];
+}
+
+
+namespace
+{
+	// Replay frames come about 30 a second at uneven times, and a position is sometimes repeated then jumps double. So
+	// rebuild each path at 120 a second: follow the recorded speed, pulled gently toward the recorded position (it
+	// stays where the real player went, but moves smoothly).
+	void Densify(Combine::Challenge& c)
+	{
+		std::vector<Combine::PathFrame> dense;
+		const float dt = 1.0f / 120.0f;
+		Combine::Vec3 p = c.bot.front().pos;
+		for (float t = 0; t <= c.bot.back().t + 1e-4f; t += dt)
+		{
+			Combine::PathFrame f = Combine::BotPoseAt(c, t);   // blended from the raw frames
+			if (!dense.empty())
+			{
+				const Combine::Vec3& v = dense.back().vel;
+				p = { p.x + (v.x + f.vel.x) * 0.5f * dt, p.y + (v.y + f.vel.y) * 0.5f * dt, p.z + (v.z + f.vel.z) * 0.5f * dt };
+				const float a = dt / 0.12f;
+				p = { p.x + (f.pos.x - p.x) * a, p.y + (f.pos.y - p.y) * a, p.z + (f.pos.z - p.z) * a };
+				f.pos = p;
+			}
+			dense.push_back(f);
+		}
+		std::vector<Combine::BallFrame> ballDense;
+		Combine::Vec3 bp = c.ball.front().pos;
+		for (float t = 0; t <= c.ball.back().t + 1e-4f; t += dt)
+		{
+			Combine::BallFrame f;
+			if (!Combine::BallAt(c, t, f)) break;
+			if (!ballDense.empty())
+			{
+				const Combine::Vec3& v = ballDense.back().vel;
+				bp = { bp.x + (v.x + f.vel.x) * 0.5f * dt, bp.y + (v.y + f.vel.y) * 0.5f * dt, bp.z + (v.z + f.vel.z) * 0.5f * dt };
+				const float a = dt / 0.12f;
+				bp = { bp.x + (f.pos.x - bp.x) * a, bp.y + (f.pos.y - bp.y) * a, bp.z + (f.pos.z - bp.z) * a };
+				f.pos = bp;
+			}
+			ballDense.push_back(f);
+		}
+		c.bot = std::move(dense);
+		if (!ballDense.empty()) c.ball = std::move(ballDense);
+	}
+}
+
+namespace
+{
+	// Kickoffs where the other taker never left their spawn (AFK; Coop found one in a set, Nov 2): 10 of the 1,100.
+	// A fake kickoff still moves once the ball's been hit (690-910 uu in the data), so 300 uu only catches the AFKs.
+	bool BotStayedPut(const Combine::Challenge& c)
+	{
+		if (c.bot.empty()) return true;
+		float most = 0;
+		for (const Combine::PathFrame& f : c.bot)
+			most = std::max(most, std::hypot(f.pos.x - c.bot.front().pos.x, f.pos.y - c.bot.front().pos.y));
+		return most < 300.0f;
+	}
+}
+
+std::vector<Combine::Challenge> Combine::MakeChallengeSet(uint32_t seed, int level, int count, char kind, const std::vector<Challenge>& all)
+{
+	std::vector<Challenge> out;
+	std::vector<int> pool;
+	for (int i = 0; i < static_cast<int>(all.size()); i++)
+		if (all[i].kind == kind && ChallengeLevel(all[i].source) == std::clamp(level, 1, kSaveLevels) && !(kind == 'K' && BotStayedPut(all[i])))
+			pool.push_back(i);
+	if (pool.empty()) return out;
+	std::mt19937 rng(seed * 2654435761u + static_cast<uint32_t>(level) * 7u + (kind == 'F' ? 101u : 211u));
+	std::vector<int> used;
+	for (int tries = 0; static_cast<int>(out.size()) < count && tries < count * 40; tries++)
+	{
+		const int idx = pool[rng() % pool.size()];
+		if (std::find(used.begin(), used.end(), idx) != used.end() && static_cast<int>(pool.size()) > count) continue;
+		used.push_back(idx);
+		Challenge c = all[idx];
+		if (rng() & 1)
+		{
+			// mirrored left-right: x flips, spins flip in y and z. The rotation (w, x, y, z) becomes (z, -y, -x, w): the
+			// mirror is a front-back flip plus a half turn about z. (Oct 30 fix: it was (w, x, -y, -z), which turns the
+			// car to face away, so half of all 50s and shadow spawns faced backwards.)
+			auto mp = [](PathFrame& f) {
+				f.pos.x = -f.pos.x; f.vel.x = -f.vel.x; f.angVel = { f.angVel.x, -f.angVel.y, -f.angVel.z };
+				const float w = f.q[0], x = f.q[1], y = f.q[2], z = f.q[3];
+				f.q[0] = z; f.q[1] = -y; f.q[2] = -x; f.q[3] = w;
+			};
+			mp(c.you);
+			for (PathFrame& f : c.bot) mp(f);
+			for (BallFrame& f : c.ball) { f.pos.x = -f.pos.x; f.vel.x = -f.vel.x; f.angVel = { f.angVel.x, -f.angVel.y, -f.angVel.z }; }
+		}
+		Densify(c);
+		out.push_back(std::move(c));
+	}
+	return out;
+}
+
+void Combine::QuatToPYR(const float q[4], float& pitch, float& yaw, float& roll)
+{
+	const float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
+	const float fx = 1 - 2 * (qy * qy + qz * qz), fy = 2 * (qx * qy + qw * qz), fz = 2 * (qx * qz - qw * qy);
+	const float rz = 2 * (qy * qz + qw * qx);
+	const float ux = 2 * (qx * qz + qw * qy), uy = 2 * (qy * qz - qw * qx), uz = 1 - 2 * (qx * qx + qy * qy);
+	pitch = std::asin(std::clamp(fz, -1.0f, 1.0f));
+	yaw = std::atan2(fy, fx);
+	auto upErr = [&](float r) {
+		const float sp = std::sin(pitch), cp = std::cos(pitch), sy = std::sin(yaw), cy = std::cos(yaw), sr = std::sin(r), cr = std::cos(r);
+		const float ex = -(cr * sp * cy + sr * sy), ey = cy * sr - cr * sp * sy, ez = cr * cp;
+		return std::fabs(ex - ux) + std::fabs(ey - uy) + std::fabs(ez - uz);
+	};
+	roll = std::atan2(-rz, uz);
+	if (upErr(roll) > upErr(-roll)) roll = -roll;
+}
+
+Combine::PathFrame Combine::BotPoseAt(const Challenge& c, float t)
+{
+	if (c.bot.empty()) return PathFrame{};
+	if (t <= c.bot.front().t) return c.bot.front();
+	if (t >= c.bot.back().t) return c.bot.back();
+	size_t i = 1;
+	while (i < c.bot.size() && c.bot[i].t < t) i++;
+	const PathFrame& a = c.bot[i - 1];
+	const PathFrame& b = c.bot[i];
+	const float k = (t - a.t) / std::max(1e-4f, b.t - a.t);
+	auto L = [k](const Vec3& x, const Vec3& y) { return Vec3{ x.x + (y.x - x.x) * k, x.y + (y.y - x.y) * k, x.z + (y.z - x.z) * k }; };
+	PathFrame f;
+	f.t = t;
+	// a curve through both frames that leaves and arrives at their recorded speeds (cubic Hermite): smoother than a
+	// straight blend, since replay frames come at uneven times
+	{
+		const float h = std::max(1e-4f, b.t - a.t), k2 = k * k, k3 = k2 * k;
+		const float h00 = 2 * k3 - 3 * k2 + 1, h10 = k3 - 2 * k2 + k, h01 = -2 * k3 + 3 * k2, h11 = k3 - k2;
+		f.pos = { h00 * a.pos.x + h10 * h * a.vel.x + h01 * b.pos.x + h11 * h * b.vel.x,
+				  h00 * a.pos.y + h10 * h * a.vel.y + h01 * b.pos.y + h11 * h * b.vel.y,
+				  h00 * a.pos.z + h10 * h * a.vel.z + h01 * b.pos.z + h11 * h * b.vel.z };
+	}
+	f.vel = L(a.vel, b.vel); f.angVel = L(a.angVel, b.angVel);
+	// slerp
+	float d = a.q[0] * b.q[0] + a.q[1] * b.q[1] + a.q[2] * b.q[2] + a.q[3] * b.q[3];
+	float bq[4] = { b.q[0], b.q[1], b.q[2], b.q[3] };
+	if (d < 0) { d = -d; for (float& x : bq) x = -x; }
+	float wa = 1 - k, wb = k;
+	if (d < 0.9995f)
+	{
+		const float th = std::acos(std::clamp(d, -1.0f, 1.0f)), st = std::sin(th);
+		wa = std::sin((1 - k) * th) / st; wb = std::sin(k * th) / st;
+	}
+	float n = 0;
+	for (int j = 0; j < 4; j++) { f.q[j] = wa * a.q[j] + wb * bq[j]; n += f.q[j] * f.q[j]; }
+	n = std::sqrt(std::max(1e-8f, n));
+	for (float& x : f.q) x /= n;
+	return f;
+}
+
+bool Combine::BallAt(const Challenge& c, float t, BallFrame& out)
+{
+	if (c.ball.empty() || t > c.ballEnd || t > c.ball.back().t + 1e-3f) return false;
+	if (t <= c.ball.front().t) { out = c.ball.front(); return true; }
+	size_t i = 1;
+	while (i < c.ball.size() && c.ball[i].t < t) i++;
+	if (i >= c.ball.size()) { out = c.ball.back(); return true; }
+	const BallFrame& a = c.ball[i - 1];
+	const BallFrame& b = c.ball[i];
+	const float k = (t - a.t) / std::max(1e-4f, b.t - a.t);
+	auto L = [k](const Vec3& x, const Vec3& y) { return Vec3{ x.x + (y.x - x.x) * k, x.y + (y.y - x.y) * k, x.z + (y.z - x.z) * k }; };
+	out.t = t; out.pos = L(a.pos, b.pos); out.vel = L(a.vel, b.vel); out.angVel = L(a.angVel, b.angVel);
+	return true;
 }

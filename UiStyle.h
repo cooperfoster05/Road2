@@ -14,6 +14,11 @@ namespace UiStyle
 	// The viewer's size (Oct 24: at 1.0 it took over a quarter of a 1080p screen). Everything in the window is drawn at
 	// this scale; the fonts in UiFonts.h are loaded at the matching sizes, so change both together.
 	inline constexpr float kScale = 0.8f;
+	// Nov 1: the window's own size on top of that. Set every frame by the window (GuiBase.cpp): the "Window size"
+	// setting, times how far you've dragged the window narrower than it needs (the whole UI shrinks with it, down to
+	// 0.6). Sc() is the scale to draw at; the fonts are scaled to match with SetWindowFontScale.
+	inline float gUser = 1.0f;
+	inline float Sc() { return kScale * gUser; }
 
 	inline ImVec4 Hex(unsigned rgb, float a = 1.0f)
 	{
@@ -61,9 +66,9 @@ namespace UiStyle
 				c(ImGuiCol_TitleBgActive, Hex(0x0E1727));
 				c(ImGuiCol_TitleBgCollapsed, Hex(0x0E1727, 0.9f));
 				c(ImGuiCol_Border, kLine);
-				f(ImGuiStyleVar_WindowRounding, 12.0f * kScale);
+				f(ImGuiStyleVar_WindowRounding, 12.0f * Sc());
 				f(ImGuiStyleVar_WindowBorderSize, 1.0f);
-				v2(ImGuiStyleVar_WindowPadding, ImVec2(18 * kScale, 14 * kScale));
+				v2(ImGuiStyleVar_WindowPadding, ImVec2(18 * Sc(), 14 * Sc()));
 			}
 			c(ImGuiCol_Text, kText);
 			c(ImGuiCol_TextDisabled, kMuted);
@@ -85,15 +90,15 @@ namespace UiStyle
 			c(ImGuiCol_ScrollbarGrab, Hex(0x1F3350));
 			c(ImGuiCol_ScrollbarGrabHovered, Hex(0x2A456B));
 			c(ImGuiCol_PopupBg, Hex(0x0E1727, 0.98f));
-			f(ImGuiStyleVar_FrameRounding, 7.0f * kScale);
-			f(ImGuiStyleVar_ChildRounding, 10.0f * kScale);
+			f(ImGuiStyleVar_FrameRounding, 7.0f * Sc());
+			f(ImGuiStyleVar_ChildRounding, 10.0f * Sc());
 			f(ImGuiStyleVar_GrabRounding, 6.0f);
 			f(ImGuiStyleVar_PopupRounding, 8.0f);
 			f(ImGuiStyleVar_ScrollbarRounding, 6.0f);
 			f(ImGuiStyleVar_FrameBorderSize, 0.0f);
 			f(ImGuiStyleVar_GrabMinSize, 10.0f);
-			v2(ImGuiStyleVar_FramePadding, ImVec2(10 * kScale, 5 * kScale));
-			v2(ImGuiStyleVar_ItemSpacing, ImVec2(8 * kScale, 7 * kScale));
+			v2(ImGuiStyleVar_FramePadding, ImVec2(10 * Sc(), 5 * Sc()));
+			v2(ImGuiStyleVar_ItemSpacing, ImVec2(8 * Sc(), 7 * Sc()));
 		}
 		~Scope()
 		{
@@ -119,11 +124,11 @@ namespace UiStyle
 	inline void Pill(const std::string& text, ImVec4 color, float minWidth = 0.0f)
 	{
 		ImVec2 ts = ImGui::CalcTextSize(text.c_str());
-		float w = std::max(ts.x + 14.0f * kScale, minWidth), h = ts.y + 4.0f * kScale;
+		float w = std::max(ts.x + 14.0f * Sc(), minWidth), h = ts.y + 4.0f * Sc();
 		ImVec2 p = ImGui::GetCursorScreenPos();
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 		dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), U32(color, 0.16f), h * 0.5f);
-		dl->AddText(ImVec2(p.x + (w - ts.x) * 0.5f, p.y + 2.0f * kScale), U32(color), text.c_str());
+		dl->AddText(ImVec2(p.x + (w - ts.x) * 0.5f, p.y + 2.0f * Sc()), U32(color), text.c_str());
 		ImGui::Dummy(ImVec2(w, h));
 	}
 
