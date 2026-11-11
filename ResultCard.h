@@ -28,6 +28,7 @@ namespace ResultCard
 		std::string code;         // "SV3-1A2B3C4D"
 		int points = 0, maxPoints = 30;
 		std::vector<int> each;    // points per item (-1 = didn't count)
+		bool colorBlind = false;  // sky blue / yellow / pink in place of green / amber / red
 	};
 
 	namespace detail
@@ -122,6 +123,7 @@ namespace ResultCard
 		if (!heavy.Load(fonts / "BarlowCondensed-ExtraBoldItalic.ttf") || !bold.Load(fonts / "BarlowCondensed-Bold.ttf")) { error = "the fonts aren't in " + fonts.string(); return false; }
 		const Rgb navy{ 11, 15, 26 }, panel{ 18, 26, 44 }, track{ 26, 36, 64 }, blue{ 46, 139, 255 }, orange{ 255, 138, 31 }, white{ 238, 242, 248 },
 			sub{ 167, 179, 200 }, good{ 61, 220, 132 }, warn{ 255, 176, 32 }, bad{ 255, 90, 90 }, ink{ 4, 16, 31 }, silver{ 199, 208, 222 }, bronze{ 205, 140, 80 };
+		const Rgb goodC = d.colorBlind ? Rgb{ 86, 180, 233 } : good, warnC = d.colorBlind ? Rgb{ 240, 228, 66 } : warn, badC = d.colorBlind ? Rgb{ 204, 121, 167 } : bad;
 		Canvas cv;
 		cv.Fill(navy);
 		cv.Slant(-60, 0, 1400, 150, panel);                      // the header band
@@ -164,7 +166,7 @@ namespace ResultCard
 			for (int i = 0; i < n && i < static_cast<int>(d.each.size()); i++)
 			{
 				const int p = d.each[i];
-				cv.Slant(56 + i * (w + gap), 500, w, 44, p < 0 ? track : p == 0 ? bad : p >= 3 ? good : warn);
+				cv.Slant(56 + i * (w + gap), 500, w, 44, p < 0 ? track : p == 0 ? badC : p >= 3 ? goodC : warnC);
 				const std::string t = p < 0 ? "-" : "+" + std::to_string(p);
 				bold.Draw(cv, 56 + i * (w + gap) + (w - bold.Width(t, 30)) * 0.5f + 44 * kSlant * 0.5f, 533, t, 30, p < 0 ? sub : ink);
 			}

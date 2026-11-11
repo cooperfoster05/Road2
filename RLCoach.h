@@ -280,6 +280,9 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::atomic<int> uiLastLine{ kBestLine };   // the line drawn faintly over your rep
 	std::atomic<int> whatIfDepth{ 1 };    // the search running (or last run): 1 normal, 2 deeper
 	std::atomic<int> whatIfRunningSlot{ -1 };   // which slot the running search fills (-1 = none)
+	// The best line thinks in rounds (Nov 11): a first answer in about 3 s, shown at once, then the full search keeps
+	// going and replaces it only with a higher grade. 2 = a first answer is up and it's still improving.
+	std::atomic<int> whatIfRound{ 0 };
 	std::atomic<int> whatIfRunningPoint{ 0 };   // which search: WhatIfPoint as an int
 	std::atomic<int> whatIfEngineStart{ -1 };   // where the last engine line took over (-1 = its default start)
 	std::atomic<int> uiWhatIfKeyKind{ -1 };     // stage 2: the breakdown line (SegKind) of the key moment, -1 = none
@@ -303,6 +306,9 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::string uiOverallName, uiOverallWhy, uiMechanic;
 	std::vector<ReviewStat> uiStats;
 	int uiTab = 0;                        // render thread: 0 your shot, 1 smallest fix, 2 best line
+	// Motion (Nov 11): the grade badge pops in when a rep opens; a finished set's score counts up and its pips fill in
+	std::string uiAnimRep, uiDoneCode;    // render thread: the rep / finished set the animation is for
+	double uiAnimRepAt = 0, uiDoneAt = 0; // render thread: when it started (ImGui time)
 	std::string uiTabFile;                // render thread: the rep uiTab belongs to (a new rep opens on Your shot)
 	bool uiDetailsOpen = false;           // render thread: the breakdown under the tabs
 
@@ -505,6 +511,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::shared_ptr<float> padX, padY, padScale;   // road2_pad_x / _y / _scale
 	std::shared_ptr<int>   padTheme;          // road2_pad_theme: 0 dark, 1 light
 	std::shared_ptr<int>   padJump, padBoost, padSlide, padRollLeft, padRollRight;   // road2_pad_<action>: button index
+	std::shared_ptr<bool>  lineGhost = std::make_shared<bool>(true);   // road2_line_ghost: the line's car as a wire ghost while your rep plays
 	std::shared_ptr<int>   targetHitbox;      // road2_target_hitbox: 0 off, 1 for your touch, 2 for the earliest intercept
 	std::shared_ptr<float> ghostOpacity;      // road2_ghost_opacity: the controller ghost when practicing a line, 0-1 (0 = off)
 	std::shared_ptr<float> windowSize;        // road2_window_size: the Road2 window's size, 0.6-1.6 (Nov 1)
@@ -624,12 +631,16 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 		std::vector<std::string> outcomes;
 		std::vector<int> pointsEach;           // per item (-1 = didn't count)
 		std::map<std::string, int> bests;
+		std::string reviewNote;                // the plan's line from your reviewed reps (empty = not enough reps yet)
+		int streak = 0;                        // days in a row with today's set finished (counting today or up to yesterday)
 	};
 	std::mutex uiCombineMutex;
 	UiCombine uiCombine;
 	std::atomic<bool> uiCombineMode{ false };   // the window shows the Combine page
 	int uiCombineLevel = 1;                     // render thread: the level picked on the page
 	std::string uiCombineCode;                  // render thread: the code box
+	std::string combineReviewNote;              // built when the bests load, from auto_grades.csv
+	std::vector<long long> combineDailyDays;    // the days (since 1970, UTC) a daily set was finished: combine\daily.csv
 	std::string uiCardStatus;                   // render thread: where the last result card was saved (or why it wasn't)
 	void SaveResultCard(const UiCombine& u);    // a finished set as a PNG in data\Road2\cards (ResultCard.h)
 	std::map<std::string, bool> uiCombineNexto;  // render thread: the event cards set to play Nexto

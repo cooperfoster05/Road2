@@ -776,9 +776,27 @@ void RLCoach::StartReview()
 		{
 			whatIfRunningSlot = kBestLine;
 			whatIfRunningPoint = static_cast<int>(WhatIfPoint::Engine);
-			try { best = FromEngine(Engine::Line(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, 15.0f, -1, 1), 1); }
+			// Round 1: about 3 s (the engine sizes its search to the time), up on screen straight away
+			whatIfRound = 1;
+			try { best = FromEngine(Engine::Line(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, 3.0f, -1, 1), 1); }
 			catch (...) { best = WhatIfResult{}; best.status = WhatIfStatus::CantSimulate; }
 			publish(kBestLine, WhatIfResult(best));
+			// Round 2: the full search, unless round 1 already found a 5. It only replaces the first answer with a higher
+			// grade (or when the first found nothing), and never while you're watching that line
+			if (!whatIfCancel && best.status != WhatIfStatus::CantSimulate && best.status != WhatIfStatus::Cancelled && !(Shows(best) && best.grade >= 5))
+			{
+				whatIfRound = 2;
+				WhatIfResult deep;
+				try { deep = FromEngine(Engine::Line(fr, item.goal, item.floorBeforeGoal, item.eventTick, ref, 0, &whatIfCancel, 15.0f, -1, 1), 1); }
+				catch (...) { deep = WhatIfResult{}; deep.status = WhatIfStatus::Cancelled; }
+				const bool better = deep.status != WhatIfStatus::Cancelled && (!Shows(best) || (Shows(deep) && deep.grade > best.grade));
+				if (better && !whatIfCancel && uiShowing.load() != kBestLine && practiceState == PracticeState::Off)
+				{
+					best = std::move(deep);
+					publish(kBestLine, WhatIfResult(best));
+				}
+			}
+			whatIfRound = 0;
 		}
 		if (!whatIfCancel && fix.status != WhatIfStatus::Cancelled && best.status != WhatIfStatus::Cancelled)
 		{
@@ -998,7 +1016,7 @@ void RLCoach::DrawWhatIfPath(CanvasWrapper& canvas)
 	// you see the two side by side as it plays (and a faint ball where the line has the ball). From where the line
 	// takes over; nothing before that (it's your own rep until then).
 	const int tick = static_cast<int>(viewerPlayhead);
-	if (tick >= r.startTick && tick < static_cast<int>(r.frames.size()))
+	if (*lineGhost && tick >= r.startTick && tick < static_cast<int>(r.frames.size()))
 	{
 		CarWrapper car = gameWrapper->GetLocalCar();
 		if (!car.IsNull())
@@ -1265,7 +1283,10 @@ void RLCoach::RenderWindow()
 			}
 		}
 		const bool busy = whatIfBusy;
-		const int busySlot = busy ? whatIfRunningSlot.load() : -1;
+		int busySlot = busy ? whatIfRunningSlot.load() : -1;
+		// Round 2 of the best line with a first answer already up: the line shows, marked as still improving
+		const bool improving = busy && busySlot == kBestLine && whatIfRound == 2 && line[kBestLine].mine && line[kBestLine].status == WhatIfStatus::Found;
+		if (improving) busySlot = -1;
 		const bool pending = uiReviewPending;
 		const bool simReady = predictor.Ready();
 		const bool simMissing = !simReady && predictor.Status().rfind("No arena files", 0) == 0;   // (Nov 3) a fresh install: say so, not "loading" forever
@@ -1312,7 +1333,10 @@ void RLCoach::RenderWindow()
 			const ImVec2 c(p0.x + D * 0.5f + 2.0f * S, p0.y + D * 0.5f);
 			const ImVec4 gc = GradeColor(overallGrade);
 			(void)c;
-			GradeBadge(dl, ImVec2(p0.x + 6.0f * S, p0.y + 8.0f * S), D - 22.0f * S, overallGrade, gc);
+			// the badge pops in when a rep opens: from 80% of its size, over a quarter of a second
+			if (uiAnimRep != watching) { uiAnimRep = watching; uiAnimRepAt = ImGui::GetTime(); }
+			const float full = D - 22.0f * S, bsz = full * (0.8f + 0.2f * EaseSince(uiAnimRepAt, 0.25f));
+			GradeBadge(dl, ImVec2(p0.x + 6.0f * S + (full - bsz) * 0.5f, p0.y + 8.0f * S + (full - bsz) * 0.5f), bsz, overallGrade, gc);
 
 			// Keep and close, top right
 			const float bs = 30.0f * S;
@@ -1487,18 +1511,46 @@ void RLCoach::RenderWindow()
 			// Transport: back to start, play, step, time, speed, loop
 			ImGui::SetCursorScreenPos(ImVec2(x0, barY + barH + 12.0f * S));
 			const ImVec2 sq(32 * S, 28 * S);
-			if (QuietButton("|<", sq)) onGame([this]() { ViewerSeek(0.0f); });
+			// (Nov 11) drawn icons in place of "|<", ">", "<": 0 to start, 1 play, 2 pause, 3 step back, 4 step forward
+			auto icon = [&](int kind, ImVec4 col) {
+				const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+				const ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+				const float r = 5.5f * S;
+				const ImU32 u = U32(col);
+				if (kind == 0)
+				{
+					dl->AddRectFilled(ImVec2(c.x - r, c.y - r), ImVec2(c.x - r + 2.5f * S, c.y + r), u);
+					dl->AddTriangleFilled(ImVec2(c.x + r, c.y - r), ImVec2(c.x + r, c.y + r), ImVec2(c.x - r + 3.5f * S, c.y), u);
+				}
+				else if (kind == 1) dl->AddTriangleFilled(ImVec2(c.x - r * 0.7f, c.y - r), ImVec2(c.x - r * 0.7f, c.y + r), ImVec2(c.x + r, c.y), u);
+				else if (kind == 2)
+				{
+					dl->AddRectFilled(ImVec2(c.x - r * 0.8f, c.y - r), ImVec2(c.x - r * 0.2f, c.y + r), u);
+					dl->AddRectFilled(ImVec2(c.x + r * 0.2f, c.y - r), ImVec2(c.x + r * 0.8f, c.y + r), u);
+				}
+				else
+				{
+					const float d = kind == 3 ? -1.0f : 1.0f;
+					const ImVec2 pts[3] = { ImVec2(c.x - d * r * 0.4f, c.y - r * 0.85f), ImVec2(c.x + d * r * 0.45f, c.y), ImVec2(c.x - d * r * 0.4f, c.y + r * 0.85f) };
+					dl->AddPolyline(pts, 3, u, false, 2.2f * S);
+				}
+			};
+			if (QuietButton("##tostart", sq)) onGame([this]() { ViewerSeek(0.0f); });
+			icon(0, kSub);
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back to the start");
 			ImGui::SameLine(0, 6 * S);
 			const bool playing = uiViewerPlaying;
-			if (AccentButton(playing ? "||" : ">", ImVec2(44 * S, 28 * S)))
+			if (AccentButton("##play", ImVec2(44 * S, 28 * S)))
 				onGame([this]() { viewerPlaying = !viewerPlaying; uiViewerPlaying = viewerPlaying; });
+			icon(playing ? 2 : 1, kOnAccent);
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip(playing ? "Pause" : "Play");
 			ImGui::SameLine(0, 6 * S);
-			if (QuietButton("<", sq)) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) - 1.0f); });
+			if (QuietButton("##stepback", sq)) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) - 1.0f); });
+			icon(3, kSub);
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back 1 tick");
 			ImGui::SameLine(0, 6 * S);
-			if (QuietButton(">##step", sq)) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) + 1.0f); });
+			if (QuietButton("##step", sq)) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) + 1.0f); });
+			icon(4, kSub);
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forward 1 tick");
 			ImGui::SameLine(0, 12 * S);
 			{
@@ -1565,7 +1617,7 @@ void RLCoach::RenderWindow()
 			case WhatIfStatus::Found:
 				gradeText = std::to_string(v.grade);
 				gradeCol = GradeColor(v.grade);
-				sub = slot == kFixLine ? "found" : (v.grade >= 5 ? "a 5" : v.grade == overallGrade ? "cleaner" : "found");
+				sub = slot == kFixLine ? "found" : improving ? "improving" : (v.grade >= 5 ? "a 5" : v.grade == overallGrade ? "cleaner" : "found");
 				return;
 			case WhatIfStatus::CleanerWayIn: gradeText = "~"; gradeCol = kAccent; sub = "cleaner way in"; return;
 			case WhatIfStatus::NotNeeded: gradeText = "-"; sub = "nothing to beat"; return;
@@ -1735,17 +1787,22 @@ void RLCoach::RenderWindow()
 				ImGui::Dummy(ImVec2(0, 4));
 				tiles(stats);
 				ImGui::Dummy(ImVec2(0, 4));
-				if (AccentButton("Watch your rep", btn)) onGame([this]() { ViewerShowLine(-1, false); });
-				ImGui::SameLine(0, 10 * S);
+				// (Nov 11) all three side by side: watch it, practice the fix, practice from where the playhead is
+				// ("Practice from here" used to sit inside the folded breakdown, where nobody found it)
 				const int practiceSeg = rootSeg >= 0 ? rootSeg : fixSeg;
-				if (practiceSeg >= 0 && practiceSeg < static_cast<int>(segs.size()))
+				const bool hasFix = practiceSeg >= 0 && practiceSeg < static_cast<int>(segs.size());
+				const ImVec2 b3(hasFix ? (innerW - 16.0f * S) / 3.0f : btn.x, btn.y);
+				if (AccentButton("Watch your rep", b3)) onGame([this]() { ViewerShowLine(-1, false); });
+				if (hasFix)
 				{
-					if (OutlineButton(rootSeg >= 0 ? "Practice the root cause" : "Practice the biggest fix", btn, kRoot))
-						onGame([this, practiceSeg]() { PracticeStart(practiceSeg); });
-					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Drops you into %s in free play, as many tries as you want.", Segmenter::Name(segs[practiceSeg].kind));
+					ImGui::SameLine(0, 8 * S);
+					if (OutlineButton("Practice the fix", b3, kRoot)) onGame([this, practiceSeg]() { PracticeStart(practiceSeg); });
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("%s: drops you into %s in free play, as many tries as you want.", rootSeg >= 0 ? "The root cause" : "The biggest fix", Segmenter::Name(segs[practiceSeg].kind));
 				}
-				else if (OutlineButton(std::format("Practice from here ({:.2f}s)", head / 120.0f).c_str(), btn))
-					onGame([this, head]() { PracticeStartAt(head); });
+				ImGui::SameLine(0, (hasFix ? 8 : 10) * S);
+				if (OutlineButton("Practice from here", b3)) onGame([this, head]() { PracticeStartAt(head); });
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Starts you at %.2f s, where the playhead is. Scrub the bar to pick the moment; the lead-in still applies.", head / 120.0f);
 			}
 			else
 			{
@@ -1760,10 +1817,10 @@ void RLCoach::RenderWindow()
 				{
 					std::string t = busySlot == slot
 						? (fixTab ? (whatIfRunningPoint == static_cast<int>(WhatIfPoint::KeyMoment) ? "Trying different ways into " + keyWhat + "..." : "Trying small changes to your shot...")
-							: (whatIfDepth >= 2 ? "Thinking harder..." : "Thinking..."))
+							: (whatIfDepth >= 2 ? "Thinking harder..." : whatIfRound == 2 ? "Nothing in the first look. Searching deeper..." : "Thinking..."))
 						: "Waiting for the smallest fix to finish...";
 					emptyState(0, t, fixTab ? "A few seconds. You can keep watching your rep meanwhile."
-						: whatIfDepth >= 2 ? "Up to a minute, in the background." : "Up to about 15 seconds, in the background.");
+						: whatIfDepth >= 2 ? "Up to a minute, in the background." : "A first answer in about 3 seconds, then it keeps improving for up to 15.");
 				}
 				else if (!v.mine || v.status == WhatIfStatus::None)
 				{
@@ -1785,7 +1842,21 @@ void RLCoach::RenderWindow()
 					{
 						label(fixTab ? (v.point == WhatIfPoint::KeyMoment ? ("A DIFFERENT WAY INTO " + Upper(v.what)).c_str() : "THE LEAST YOU COULD CHANGE")
 							: v.simplified ? "THE ENGINE'S LINE, SIMPLIFIED" : "THE ENGINE'S LINE", kMuted);
-						headline(v.cue);
+						// (Nov 11) "Engine (how it got there): what to do" was one long shouted heading: the how goes small, the advice big
+						std::string how, cue = v.cue;
+						if (cue.rfind("Engine (", 0) == 0)
+						{
+							const size_t e2 = cue.find("): ");
+							if (e2 != std::string::npos) { how = cue.substr(8, e2 - 8); cue = cue.substr(e2 + 3); }
+						}
+						if (!how.empty())
+						{
+							how[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(how[0])));
+							ImGui::PushStyleColor(ImGuiCol_Text, kAccentText);
+							ImGui::TextWrapped("%s", how.c_str());
+							ImGui::PopStyleColor();
+						}
+						headline(cue);
 						subline(std::format("{}. It scored from {} of {} slightly different starts.", v.gradeWhy, v.held, v.heldOf));
 						if (!fixTab && v.simplified)
 						{
@@ -2023,10 +2094,6 @@ void RLCoach::RenderWindow()
 						"Everything after the press moves with it. Info only: it never changes a grade. Click to jump there.", full.c_str(), w.what.c_str());
 			}
 			ImGui::Spacing();
-			if (OutlineButton(std::format("Practice from here ({:.2f}s)", head / 120.0f).c_str()))
-				onGame([this, head]() { PracticeStartAt(head); });
-			ImGui::SameLine();
-			ImGui::TextDisabled("scrub to pick the moment; the lead-in still applies");
 
 			if (cur)
 			{
@@ -2304,6 +2371,7 @@ void RLCoach::RenderWindow()
 	ImGui::EndChild();
 	if (!toggleKeep.empty()) ToggleKeep(toggleKeep);
 
+	ImGui::Dummy(ImVec2(0, 4.0f * S));   // (Nov 11) the buttons sat on the list's bottom edge
 	bool canWatchSelected = selectedRep >= 0 && selectedRep < static_cast<int>(repList.size()) && repList[selectedRep].hasRecording;
 	if (canWatchSelected && AccentButton("Watch selected", ImVec2(150 * S, 34 * S)))
 	{

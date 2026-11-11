@@ -71,6 +71,10 @@
     <ClCompile Include="Data.cpp" />
     <!-- Shared with the plugin (same files, not copies) -->
     <ClCompile Include="..\Engine.cpp" />
+    <ClCompile Include="..\EngineCore.cpp" />
+    <ClCompile Include="..\EngineSkills.cpp" />
+    <ClCompile Include="..\EngineSteps.cpp" />
+    <ClCompile Include="..\EnginePlans.cpp" />
     <ClCompile Include="..\Grader.cpp" />
     <ClCompile Include="..\Mechanics.cpp" />
     <ClCompile Include="..\ShotGeometry.cpp" />

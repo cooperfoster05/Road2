@@ -302,6 +302,9 @@ void RLCoach::BotFind()
 {
 	const uintptr_t prevBot = botCarAddr;
 	botCarAddr = 0;
+	// (Nov 11) free play only. This adopts a car and removes any extras, and it can run half a second after a spawn:
+	// if you'd left for an offline match by then, it must not touch that match's cars.
+	if (!gameWrapper->IsInFreeplay()) return;
 	ServerWrapper server = gameWrapper->GetGameEventAsServer();
 	if (server.IsNull()) return;
 	CarWrapper local = gameWrapper->GetLocalCar();

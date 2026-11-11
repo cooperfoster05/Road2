@@ -14,6 +14,9 @@ namespace fs = std::filesystem;
 namespace
 {
 	constexpr char kMagic[4] = { 'R', 'L', 'C', '1' };
+	// (Nov 11) the most one rep's CSV can be. A long rep is about 1 MB; a chunk that claims more than this is damaged
+	// or doctored (a shared file from someone else), and unpacking it would try to grab gigabytes of memory.
+	constexpr uint32_t kMaxRawLen = 64u * 1024u * 1024u;
 
 	struct Loc
 	{
@@ -69,6 +72,7 @@ namespace
 			c.packLen = GetU(lens + 4, 4);
 			c.offset = pos + 6 + nameLen + 8;
 			if (c.offset + c.packLen > size) break;   // cut off by a crash
+			if (c.rawLen > kMaxRawLen) break;         // not a real rep
 			out.push_back(c);
 			pos = c.offset + c.packLen;
 			validEnd = pos;
@@ -126,6 +130,7 @@ namespace
 
 	bool Unpack(const std::string& packed, uint32_t rawLen, std::string& out)
 	{
+		if (rawLen > kMaxRawLen) return false;
 		out.resize(rawLen);
 		mz_ulong len = rawLen;
 		int rc = mz_uncompress(reinterpret_cast<unsigned char*>(out.data()), &len,
@@ -209,7 +214,13 @@ bool RepStore::Append(const fs::path& root, const fs::path& bundle, const std::s
 	uint64_t end = 0;
 	if (ve != s.validEnd.end()) end = ve->second;
 	else if (size > 0) ScanBundle(bundle, end);
-	if (size != end) { fs::resize_file(bundle, end, ec); size = end; }
+	if (size != end)
+	{
+		// (Nov 11) look at the file itself before cutting anything: only a half-written chunk is ever removed, even if
+		// what was remembered about this bundle is out of date
+		ScanBundle(bundle, end);
+		if (size != end) { fs::resize_file(bundle, end, ec); size = end; }
+	}
 
 	std::ofstream out(bundle, std::ios::binary | std::ios::app);
 	if (!out) { err = "Couldn't open " + bundle.filename().string(); return false; }

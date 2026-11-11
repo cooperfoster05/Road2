@@ -76,7 +76,9 @@ namespace UiStyle
 			auto v2 = [&](ImGuiStyleVar idx, ImVec2 v) { ImGui::PushStyleVar(idx, v); vars++; };
 			if (windowToo)
 			{
-				c(ImGuiCol_WindowBg, Hex(0x0B0F1A, 0.98f));
+				// (Nov 11) fully solid: BakkesMod's own style is see-through, and free play's bind list showed through the panel
+				f(ImGuiStyleVar_Alpha, 1.0f);
+				c(ImGuiCol_WindowBg, Hex(0x0B0F1A, 1.0f));
 				c(ImGuiCol_TitleBg, Hex(0x0E1322));
 				c(ImGuiCol_TitleBgActive, Hex(0x0E1322));
 				c(ImGuiCol_TitleBgCollapsed, Hex(0x0E1322, 0.9f));
@@ -303,6 +305,13 @@ namespace UiStyle
 		kGood = on ? Hex(0x56B4E9) : Hex(0x3DDC84);
 		kWarn = on ? Hex(0xF0E442) : Hex(0xFFB020);
 		kBad = on ? Hex(0xCC79A7) : Hex(0xFF5A5A);
+	}
+
+	// 0..1 over `seconds` since `start` (ImGui time), easing out: fast at first, settling at the end
+	inline float EaseSince(double start, float seconds)
+	{
+		const float k = std::clamp(static_cast<float>((ImGui::GetTime() - start) / seconds), 0.0f, 1.0f);
+		return 1.0f - (1.0f - k) * (1.0f - k) * (1.0f - k);
 	}
 
 	inline ImVec4 GradeColor(int overall)

@@ -132,6 +132,18 @@
     <ClCompile Include="Engine.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
+    <ClCompile Include="EngineCore.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
+    <ClCompile Include="EngineSkills.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
+    <ClCompile Include="EngineSteps.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
+    <ClCompile Include="EnginePlans.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
     <ClCompile Include="Mechanics.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
@@ -273,6 +285,9 @@
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="Engine.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="EngineInternal.h">
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="Mechanics.h">

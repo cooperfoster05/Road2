@@ -14,6 +14,7 @@
 #include <chrono>
 #include <fstream>
 #include <random>
+#include <set>
 #include <sstream>
 
 namespace
@@ -141,6 +142,11 @@ namespace
 		SlantText(c, sz.X * 0.5f, sz.Y * 0.205f, Upper(text), 2.0f, kOrangeA, HudDraw::Rgba{ 11, 15, 26, 255 }, 18.0f);
 	}
 
+	// Today's set: one code a day by the UTC date, the event by the day of the week
+	long long DailyDay() { return std::chrono::duration_cast<std::chrono::hours>(std::chrono::system_clock::now().time_since_epoch()).count() / 24; }
+	const char* DailyEvent(long long day) { static const char* k[7] = { "SV", "KON", "SG", "FFN", "SDN", "RD", "FT" }; return k[day % 7]; }
+	uint32_t DailySeed(long long day) { return static_cast<uint32_t>(day) * 2654435761u + 20261110u; }
+
 	std::string ReadAllText(const std::filesystem::path& p)
 	{
 		std::ifstream f(p, std::ios::binary);
@@ -157,6 +163,8 @@ int RLCoach::CombineMedal(int points, int maxPoints)
 	return r >= 0.85f ? 3 : r >= 0.70f ? 2 : r >= 0.50f ? 1 : 0;
 }
 
+static std::string ReviewNote(const std::string& csv);
+
 void RLCoach::CombineLoadBests()
 {
 	combineBest.clear();
@@ -169,6 +177,94 @@ void RLCoach::CombineLoadBests()
 		if (c == std::string::npos) continue;
 		try { combineBest[line.substr(0, c)] = std::stoi(line.substr(c + 1)); } catch (...) {}
 	}
+	combineDailyDays.clear();
+	std::stringstream ds(ReadAllText(writer->Folder() / "combine" / "daily.csv"));
+	while (std::getline(ds, line)) { try { combineDailyDays.push_back(std::stoll(line)); } catch (...) {} }
+	// (Nov 11) only re-read when the file has changed: it's half a megabyte, and this runs on the game thread each
+	// time the Combine opens
+	{
+		static std::filesystem::file_time_type seenAt{};
+		static uintmax_t seenSize = static_cast<uintmax_t>(-1);
+		const std::filesystem::path g = writer->Folder() / "auto_grades.csv";
+		std::error_code ec;
+		const auto at = std::filesystem::last_write_time(g, ec);
+		const uintmax_t size = ec ? 0 : std::filesystem::file_size(g, ec);
+		if (ec) combineReviewNote.clear();
+		else if (at != seenAt || size != seenSize)
+		{
+			combineReviewNote = ReviewNote(ReadAllText(g));
+			seenAt = at;
+			seenSize = size;
+		}
+	}
+}
+
+// The plan's line from your own reps (Nov 11): of your last 150 graded reps, the kind of shot with the lowest average
+// grade (8 or more reps of it), and the part of the rep that most often cost you on it. Read from auto_grades.csv,
+// so it works for reps whose recordings are gone. Empty until there are enough reps.
+static std::string ReviewNote(const std::string& csv)
+{
+	struct Row { std::string file; int overall = 0, type = 0; std::string segs; };
+	std::vector<Row> rows;
+	std::stringstream ss(csv);
+	std::string line;
+	std::getline(ss, line);
+	while (std::getline(ss, line))
+	{
+		if (!line.empty() && line.back() == '\r') line.pop_back();
+		std::vector<std::string> p;
+		std::stringstream ls(line);
+		std::string cell;
+		while (std::getline(ls, cell, ',')) p.push_back(cell);
+		if (p.size() < 12) continue;
+		Row r;
+		r.file = p[0];
+		try { r.overall = std::stoi(p[1]); r.type = std::stoi(p[11]); } catch (...) { continue; }
+		r.segs = p[9];
+		if (r.overall >= 1 && r.overall <= 5 && r.type >= 0 && r.type < 7 && r.file.rfind("rep_", 0) == 0) rows.push_back(std::move(r));
+	}
+	// file names start with the date and time, so sorting by name is oldest to newest
+	std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.file < b.file; });
+	if (rows.size() > 150) rows.erase(rows.begin(), rows.end() - 150);
+	int n[7] = {}, sum[7] = {};
+	for (const Row& r : rows) { n[r.type]++; sum[r.type] += r.overall; }
+	int worst = -1;
+	for (int t = 0; t < 7; t++)
+		if (n[t] >= 8 && (worst < 0 || sum[t] * n[worst] < sum[worst] * n[t])) worst = t;
+	if (worst < 0) return {};
+	std::map<std::string, int> lost;   // segment name -> times it was Costly (2 points) or Sloppy (1)
+	for (const Row& r : rows)
+	{
+		if (r.type != worst) continue;
+		std::stringstream sg(r.segs);
+		std::string part;
+		while (std::getline(sg, part, ';'))
+		{
+			const size_t eq = part.find('=');
+			if (eq == std::string::npos) continue;
+			const std::string name = part.substr(0, eq), g = part.substr(eq + 1);
+			if (name == "Result") continue;
+			if (g == "Costly") lost[name] += 2;
+			else if (g == "Sloppy") lost[name] += 1;
+		}
+	}
+	std::string where;
+	int most = 0;
+	for (const auto& [name, v] : lost) if (v > most) { most = v; where = name; }
+	static const char* kNames[7] = { "aerials", "ground shots", "double taps", "dribbles", "air dribbles", "flip resets", "ceiling shots" };
+	std::string out = std::format("From your reps: {} are your lowest lately (average grade {:.1f} over {}).", kNames[worst],
+		static_cast<float>(sum[worst]) / n[worst], n[worst]);
+	if (!where.empty()) out += std::format(" It's most often lost at: {}.", where);
+	return out;
+}
+
+// A finished daily set (any level) counts for its day
+static void SaveDailyDays(const std::filesystem::path& folder, const std::vector<long long>& days)
+{
+	std::error_code ec;
+	std::filesystem::create_directories(folder / "combine", ec);
+	std::ofstream f(folder / "combine" / "daily.csv", std::ios::trunc);
+	for (long long d : days) f << d << "\n";
 }
 
 void RLCoach::CombineSaveBests()
@@ -221,6 +317,14 @@ void RLCoach::CombinePublish()
 	{
 		static const char* kMedal[4] = { "", "Bronze", "Silver", "Gold" };
 		u.medal = kMedal[CombineMedal(u.points, u.maxPoints)];
+	}
+	{
+		// the streak: days in a row up to today (or up to yesterday, if today's isn't done yet)
+		const long long today = DailyDay();
+		auto has = [this](long long d) { return std::find(combineDailyDays.begin(), combineDailyDays.end(), d) != combineDailyDays.end(); };
+		long long d = has(today) ? today : today - 1;
+		while (has(d)) { u.streak++; d--; }
+		u.reviewNote = combineReviewNote;
 	}
 	std::lock_guard<std::mutex> lock(uiCombineMutex);
 	uiCombine = std::move(u);
@@ -578,7 +682,7 @@ void RLCoach::CombineTick(CarWrapper& car)
 			combinePhaseTicks = 1;
 			++combineBotWait;
 			if (combineBotWait % 60 == 0) BotFind();
-			if (combineBotWait == 240 && BotCar().IsNull()) BotSpawn();
+			if ((combineBotWait == 240 || combineBotWait == 720) && BotCar().IsNull()) BotSpawn();   // (Nov 11) a second try at 6 s
 			if (combineBotWait > 1200) { combineStatus = "Couldn't spawn the bot (open free play and try again)"; CombineExit(); }
 			if (BotCar().IsNull()) return;
 			botMode = 4;
@@ -691,6 +795,15 @@ void RLCoach::CombineTick(CarWrapper& car)
 				if (it == combineBest.end() || pts > it->second) { combineBest[k] = pts; better = true; }
 			}
 			if (better) CombineSaveBests();
+			{
+				const long long today = DailyDay();
+				if (combineSeed == DailySeed(today) && CombineCodeEvent() == DailyEvent(today)
+					&& std::find(combineDailyDays.begin(), combineDailyDays.end(), today) == combineDailyDays.end() && writer)
+				{
+					combineDailyDays.push_back(today);
+					SaveDailyDays(writer->Folder(), combineDailyDays);
+				}
+			}
 			CombinePublish();
 			return;
 		}
@@ -980,7 +1093,7 @@ void RLCoach::CombineTick(CarWrapper& car)
 		const bool inOrange = p.Y >= 5120.0f + 92.75f && std::fabs(p.X) < 893.0f && p.Z < 643.0f;
 		if (r.kind == 0)
 		{
-			if (inBlue) { CombineEndShot(0, "Goal"); return; }
+			if (inBlue) { CombineEndShot(0, "Conceded"); return; }
 			if (inOrange) { CombineEndShot(3, "Cleared it into their net!"); return; }
 			const bool danger = Threatening(p, v);
 			if (combineTouched && !danger && combineLiveTicks - combineLastTouch >= kSettleTicks)
@@ -1007,7 +1120,7 @@ void RLCoach::CombineTick(CarWrapper& car)
 		return;
 	}
 	const Vector p = ball.GetLocation(), v = ball.GetVelocity();
-	if (p.Y <= -5120.0f - 92.75f && std::fabs(p.X) < 893.0f && p.Z < 643.0f) { CombineEndShot(0, "Goal"); return; }
+	if (p.Y <= -5120.0f - 92.75f && std::fabs(p.X) < 893.0f && p.Z < 643.0f) { CombineEndShot(0, "Conceded"); return; }
 	const bool danger = Threatening(p, v);
 	if (combineTouched && !danger && combineLiveTicks - combineLastTouch >= kSettleTicks)
 	{
@@ -1102,7 +1215,7 @@ void RLCoach::DrawCombineHud(CanvasWrapper& canvas)
 	if (combinePhase == CombinePhase::Building) top = "COMBINE  ·  building your set...";
 	else if (combinePhase == CombinePhase::Done) top = std::format("{}  ·  {}  ·  done: {} of {} points", EventName(combineEvent), Combine::SaveLevelName(combineLevel), pts, maxPts);
 	else top = std::format("{}{}  ·  {}  ·  {} {} of {}  ·  {} points", EventName(combineEvent), combineNexto && combineEvent != "SG" ? " vs NEXTO" : "", Combine::SaveLevelName(combineLevel),
-		combineEvent == "RC" ? "throw" : combineEvent == "RD" ? "read" : combineEvent == "FT" ? "pass" : combineEvent == "FF" ? "50" : combineEvent == "SD" || combineEvent == "SG" ? "attack" : combineEvent == "KO" ? "kickoff" : "shot", combineIndex + 1, CombineCount(), pts);
+		combineEvent == "RC" ? "throw" : combineEvent == "RD" ? "read" : combineEvent == "FT" ? "pass" : combineEvent == "FF" ? "challenge" : combineEvent == "SD" || combineEvent == "SG" ? "attack" : combineEvent == "KO" ? "kickoff" : "shot", combineIndex + 1, CombineCount(), pts);
 	if (combinePhase == CombinePhase::Building) top = "building your set...";
 	HudTopBar(canvas, sz, top);
 	std::string mid;
@@ -1132,6 +1245,7 @@ void RLCoach::SaveResultCard(const UiCombine& u)
 	d.points = u.points;
 	d.maxPoints = u.maxPoints;
 	d.each = u.pointsEach;
+	d.colorBlind = *colorBlind;
 	const std::filesystem::path folder = writer->Folder() / "cards", file = folder / ("Road2_" + u.code + ".png");
 	std::string error;
 	if (ResultCard::Save(file, writer->Folder() / "fonts", d, error))
@@ -1172,7 +1286,34 @@ void RLCoach::RenderCombine()
 	if (u.running)
 	{
 		// ---- A set in progress (style A, Nov 3): the level and code, the event big, the points, a pip per item ----
+		// (Nov 11) the header matches a rep's review: a slanted score badge (blue while you play, the medal's colour once
+		// it's done), then the level and code, the event's name, and where you stand
+		if (u.done && uiDoneCode != u.code) { uiDoneCode = u.code; uiDoneAt = ImGui::GetTime(); }
+		if (!u.done) uiDoneCode.clear();
+		const float reveal = u.done ? EaseSince(uiDoneAt, 0.8f) : 1.0f;
 		const ImVec2 top = ImGui::GetCursorScreenPos();
+		const float bsz = 78.0f * S;
+		{
+			const bool medalShown = u.done && reveal >= 1.0f;
+			const ImVec4 mc = !medalShown ? kAccent : u.medal == "GOLD" ? kGold : u.medal == "SILVER" ? Hex(0xC9D3E6) : u.medal == "BRONZE" ? Hex(0xD98B4A) : kChip;
+			const ImVec4 tc = medalShown && u.medal.empty() ? kText : OnFill(mc);
+			const float sh = bsz * 0.06f;
+			SlantQuad(dl, ImVec2(top.x + sh, top.y + sh), ImVec2(top.x + bsz + sh, top.y + bsz + sh), U32(ImVec4(mc.x * 0.25f, mc.y * 0.25f, mc.z * 0.25f, 1.0f)));
+			SlantQuad(dl, top, ImVec2(top.x + bsz, top.y + bsz), U32(mc));
+			ImFont* hf = gHero ? gHero : ImGui::GetFont();
+			ImFont* cf = gCaps ? gCaps : ImGui::GetFont();
+			const std::string n = std::to_string(static_cast<int>(std::lround(u.points * reveal)));
+			const float fs = bsz * (n.size() > 1 ? 0.62f : 0.72f);
+			const ImVec2 ns = hf->CalcTextSizeA(fs, 1e9f, 0.0f, n.c_str());
+			dl->AddText(hf, fs, ImVec2(top.x + (bsz - ns.x) * 0.5f, top.y + bsz * 0.08f), U32(tc), n.c_str());
+			const std::string of = std::format("OF {}", u.maxPoints);
+			const float cs = std::max(10.0f, bsz * 0.17f);
+			const ImVec2 os = cf->CalcTextSizeA(cs, 1e9f, 0.0f, of.c_str());
+			dl->AddText(cf, cs, ImVec2(top.x + (bsz - os.x) * 0.5f - bsz * kSlant * 0.25f, top.y + bsz - os.y - bsz * 0.07f), U32(tc, 0.8f), of.c_str());
+		}
+		const float hx = top.x + bsz + 20.0f * S;
+		ImGui::SetCursorScreenPos(ImVec2(hx, top.y));
+		ImGui::BeginGroup();
 		if (!u.levelName.empty()) { Pill(u.levelName, kOrange); ImGui::SameLine(0, 6.0f * S); }
 		if (!u.code.empty())
 		{
@@ -1182,18 +1323,20 @@ void RLCoach::RenderCombine()
 		}
 		{
 			FontPush f(fBig ? fBig : fHead);
+			ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 4.0f * S);
 			ImGui::TextColored(kText, "%s", Caps(u.event.c_str()).c_str());
 		}
-		// The points, big and blue, top right
+		ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 5.0f * S);
+		if (u.done && reveal >= 1.0f)
 		{
-			const std::string pts = std::to_string(u.points);
-			float pw, lw;
-			{ FontPush f(fBig ? fBig : fHead); pw = ImGui::CalcTextSize(pts.c_str()).x; }
-			{ CapsFont cf; lw = ImGui::CalcTextSize("POINTS").x; }
-			const float rx = top.x + W;
-			{ CapsFont cf; dl->AddText(ImVec2(rx - lw, top.y), U32(kMuted), "POINTS"); }
-			{ FontPush f(fBig ? fBig : fHead); dl->AddText(ImVec2(rx - pw - 4.0f * S, top.y + ImGui::GetTextLineHeight() * 0.1f + 14.0f * S), U32(kAccent), pts.c_str()); }
+			if (!u.medal.empty()) ImGui::TextColored(u.medal == "GOLD" ? kGold : u.medal == "SILVER" ? Hex(0xC9D3E6) : Hex(0xD98B4A), "%s", u.medal == "GOLD" ? "Gold medal" : u.medal == "SILVER" ? "Silver medal" : "Bronze medal");
+			else ImGui::TextColored(kSub, "No medal: bronze starts at %d", static_cast<int>(std::ceil(u.maxPoints * 0.5f)));
+			if (u.best >= 0) { ImGui::SameLine(0, 0); ImGui::TextColored(kMuted, u.points >= u.best ? ",  your best on this set" : ",  your best on this set: %d", u.best); }
 		}
+		else if (u.best >= 0) ImGui::TextColored(kMuted, "Your best on this set: %d", u.best);
+		else ImGui::TextColored(kMuted, "First time on this set");
+		ImGui::EndGroup();
+		ImGui::SetCursorScreenPos(ImVec2(top.x, std::max(ImGui::GetCursorScreenPos().y, top.y + bsz + bsz * 0.06f + 6.0f * S)));
 		if (u.building) ImGui::TextColored(kSub, "%s", u.status.c_str());
 		else
 		{
@@ -1202,7 +1345,7 @@ void RLCoach::RenderCombine()
 			{
 				CapsFont cf;
 				ImGui::TextColored(kMuted, "%s", Caps(u.item.c_str()).c_str());
-				const std::string n = u.done ? std::format("{} / {}", u.points, u.maxPoints) : std::format("{} / {}", u.shot, u.shots);
+				const std::string n = u.done ? std::string("DONE") : std::format("{} / {}", u.shot, u.shots);
 				ImGui::SameLine(ImGui::GetContentRegionMax().x - ImGui::CalcTextSize(n.c_str()).x - 4.0f * S);
 				ImGui::TextColored(kText, "%s", n.c_str());
 			}
@@ -1216,15 +1359,14 @@ void RLCoach::RenderCombine()
 					const bool scored = i < static_cast<int>(u.outcomes.size()) && !u.outcomes[i].empty();
 					const int pt = i < static_cast<int>(u.pointsEach.size()) ? u.pointsEach[i] : 0;
 					ImVec4 c = kTrack;
-					if (scored) c = pt < 0 ? kMuted : pt == 0 ? kBad : pt >= 3 ? kGood : kWarn;
+					const bool shown = !u.done || i < static_cast<int>(std::ceil(n * EaseSince(uiDoneAt, 0.8f)));
+					if (scored && shown) c = pt < 0 ? kMuted : pt == 0 ? kBad : pt >= 3 ? kGood : kWarn;
 					else if (!u.done && i == u.shot - 1) c = kText;
 					SlantQuad(dl, a, b, U32(c));
 					if (!scored && !u.done && i == u.shot - 1) SlantQuad(dl, ImVec2(a.x - 2, a.y - 2), ImVec2(b.x + 2, b.y + 2), U32(kAccent), false, 2.0f);
 				}
 				ImGui::Dummy(ImVec2(W, ph + 4.0f * S));
 			}
-			if (u.done && !u.medal.empty()) { ImGui::Spacing(); Pill(u.medal, kGold); }
-			if (u.best >= 0) ImGui::TextColored(kMuted, "Your best on this set: %d", u.best);
 
 			// This set so far: a row per item, its points on a slanted chip
 			Heading("THIS SET");
@@ -1256,7 +1398,7 @@ void RLCoach::RenderCombine()
 		const int lv = u.level;
 		const std::string code = u.code;
 		const float bw = (W - 20.0f * S) / 3.0f;
-		if (QuietButton(u.done ? "Play this set again" : "Restart set", ImVec2(bw, 36.0f * S)))
+		if (u.done ? AccentButton("Play this set again", ImVec2(bw, 36.0f * S)) : QuietButton("Restart set", ImVec2(bw, 36.0f * S)))
 		{
 			std::string ev; int l = lv; uint32_t sd = 0;
 			if (Combine::ParseSetCode(code, ev, l, sd)) onGame([this, ev, l, sd]() { CombineStart(ev, l, sd); });
@@ -1270,9 +1412,10 @@ void RLCoach::RenderCombine()
 		if (u.done)
 		{
 			ImGui::Spacing();
-			if (AccentButton("Save result card", ImVec2(bw, 36.0f * S))) SaveResultCard(u);
+			const float hw = (W - 10.0f * S) * 0.5f;
+			if (OutlineButton("Save result card", ImVec2(hw, 34.0f * S))) SaveResultCard(u);
 			ImGui::SameLine(0, 10.0f * S);
-			if (QuietButton("Copy the code", ImVec2(bw, 36.0f * S))) ImGui::SetClipboardText(u.code.c_str());
+			if (OutlineButton("Copy the code", ImVec2(hw, 34.0f * S))) ImGui::SetClipboardText(u.code.c_str());
 			if (!uiCardStatus.empty()) { ImGui::PushTextWrapPos(0.0f); ImGui::TextColored(kMuted, "%s", uiCardStatus.c_str()); ImGui::PopTextWrapPos(); }
 		}
 		else uiCardStatus.clear();
@@ -1292,15 +1435,12 @@ void RLCoach::RenderCombine()
 		};
 		static const char* kRank[Combine::kSaveLevels + 1] = { "UNRATED", "GOLD-PLAT", "DIAMOND", "CHAMPION", "GRAND CHAMP", "SSL" };
 		static const ImVec4 kRankCol[Combine::kSaveLevels + 1] = { kMuted, Hex(0xFFB020), Hex(0x7DB8FF), Hex(0xB98CFF), Hex(0xFF5A5A), Hex(0x2DE2E6) };
-		{
-			FontPush f(fBig ? fBig : fHead);
-			ImGui::TextColored(kText, "YOUR ROAD2 RATING");
-		}
-		const float tileW = 124.0f * S, x0 = ImGui::GetCursorPosX();
-		int rated = 0, sum = 0, col = 0;
+		// (Nov 11) the look: an overall banner, then a tile per skill with its level as five pips
+		struct Rated { const Skill* sk; int level; };
+		std::vector<Rated> ratedSkills;
+		int rated = 0, sum = 0;
 		const Skill* weakest = nullptr;      // for the plan below: the lowest-rated skill (the first of them, on a tie)
 		int weakestLevel = 99;
-		const int perRow = std::max(1, static_cast<int>((W + 8.0f * S) / (tileW + 8.0f * S)));
 		for (const Skill& sk : kSkills)
 		{
 			int level = 0;
@@ -1313,66 +1453,123 @@ void RLCoach::RenderCombine()
 				}
 			if (sk.byRank && level > 0) { rated++; sum += level; }
 			if (level < weakestLevel) { weakestLevel = level; weakest = &sk; }
-			if (col > 0) ImGui::SameLine(x0 + col * (tileW + 8.0f * S));
-			ImGui::BeginGroup();
-			{
-				FontPush f(fLabel);
-				ImGui::TextColored(kMuted, "%s", sk.name);
-			}
-			{
-				FontPush f(fHead);
-				const std::string label = level == 0 ? "UNRATED" : sk.byRank ? kRank[level] : Upper(Combine::SaveLevelName(level));
-				ImGui::TextColored(kRankCol[level], "%s", label.c_str());
-			}
-			ImGui::Dummy(ImVec2(tileW, 2.0f * S));
-			ImGui::EndGroup();
-			col = (col + 1) % perRow;
+			ratedSkills.push_back({ &sk, level });
 		}
-		ImGui::PushStyleColor(ImGuiCol_Text, kSub);
-		if (rated >= 3)
-			ImGui::TextWrapped("Overall: about %s (the average of your %d rank-measured skills). A skill's rating is the highest level where your "
-				"best set is a silver or better.", kRank[std::clamp((sum + rated / 2) / rated, 1, Combine::kSaveLevels)], rated);
-		else
-			ImGui::TextWrapped("Each skill is rated by the highest level where your best set is a silver or better (21 of 30; scoring: 12). "
-				"The levels are measured from ranked and pro replays, so a rating is the rank you play that skill at.");
-		ImGui::PopStyleColor();
+		const int overall = rated >= 3 ? std::clamp((sum + rated / 2) / rated, 1, Combine::kSaveLevels) : 0;
+		{
+			// the banner: a slanted block in the rank's colour, the rank's name large
+			const ImVec2 a = ImGui::GetCursorScreenPos();
+			const float bh = 74.0f * S;
+			const ImVec4 oc = overall > 0 ? kRankCol[overall] : kChip;
+			dl->AddRectFilled(a, ImVec2(a.x + W, a.y + bh), U32(kPanel), 6.0f * S);
+			dl->AddRectFilledMultiColor(a, ImVec2(a.x + W * 0.55f, a.y + bh), U32(oc, 0.20f), U32(oc, 0.0f), U32(oc, 0.0f), U32(oc, 0.20f));
+			SlantQuad(dl, ImVec2(a.x + 6.0f * S, a.y), ImVec2(a.x + 13.0f * S, a.y + bh), U32(oc));
+			ImFont* lf = fLabel ? fLabel : ImGui::GetFont();
+			ImFont* bf = fBig ? fBig : ImGui::GetFont();
+			const float ls = lf->FontSize * gUser, bs = bf->FontSize * gUser;
+			dl->AddText(lf, ls, ImVec2(a.x + 26.0f * S, a.y + 9.0f * S), U32(kMuted), "YOUR ROAD2 RATING");
+			dl->AddText(bf, bs, ImVec2(a.x + 25.0f * S, a.y + bh - bs - 7.0f * S), U32(overall > 0 ? oc : kMuted), overall > 0 ? kRank[overall] : "NOT RATED YET");
+			const std::string side = overall > 0 ? std::format("{} OF 5 RANKED SKILLS", rated) : "RATE 3 RANKED SKILLS";
+			const float sw = lf->CalcTextSizeA(ls, 1e9f, 0.0f, side.c_str()).x;
+			dl->AddText(lf, ls, ImVec2(a.x + W - sw - 14.0f * S, a.y + 9.0f * S), U32(kMuted), side.c_str());
+			// the five levels as pips, right side
+			const float pw = 26.0f * S, ph = 7.0f * S, pg = 4.0f * S;
+			float px = a.x + W - 14.0f * S - 5 * pw - 4 * pg;
+			for (int l = 1; l <= Combine::kSaveLevels; l++, px += pw + pg)
+				SlantQuad(dl, ImVec2(px, a.y + bh - ph - 14.0f * S), ImVec2(px + pw, a.y + bh - 14.0f * S), U32(l <= overall ? oc : kTrack));
+			ImGui::Dummy(ImVec2(W, bh));
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("The average of your rank-measured skills (saves, kickoffs, 50s, shadow, scoring).\nA skill's rating is the highest level where your best set is a silver or better (21 of 30; scoring: 12).\nThe levels are measured from ranked and pro replays, so a rating is the rank you play that skill at.");
+		}
+		{
+			const float gap = 6.0f * S, th = 62.0f * S;
+			const int perRow = W > 420.0f * S ? 4 : 2;
+			const float tw = (W - gap * (perRow - 1)) / perRow;
+			ImFont* lf = fLabel ? fLabel : ImGui::GetFont();
+			ImFont* hf = fHead ? fHead : ImGui::GetFont();
+			const float ls = lf->FontSize * gUser, hs = hf->FontSize * gUser;
+			const ImVec2 o = ImGui::GetCursorScreenPos();
+			int n = 0;
+			for (const Rated& r : ratedSkills)
+			{
+				const ImVec2 a(o.x + (n % perRow) * (tw + gap), o.y + gap + (n / perRow) * (th + gap));
+				const ImVec4 rc = kRankCol[r.level];
+				dl->AddRectFilled(a, ImVec2(a.x + tw, a.y + th), U32(kPanel), 4.0f * S);
+				dl->AddRectFilled(a, ImVec2(a.x + 3.0f * S, a.y + th), U32(r.level > 0 ? rc : kChip));
+				dl->AddText(lf, ls, ImVec2(a.x + 11.0f * S, a.y + 6.0f * S), U32(kMuted), r.sk->name);
+				std::string label = r.level == 0 ? "UNRATED" : r.sk->byRank ? kRank[r.level] : Upper(Combine::SaveLevelName(r.level));
+				float fs = hs;
+				const float lw = hf->CalcTextSizeA(hs, 1e9f, 0.0f, label.c_str()).x, room = tw - 20.0f * S;
+				if (lw > room) fs = hs * room / lw;
+				dl->AddText(hf, fs, ImVec2(a.x + 10.0f * S, a.y + 6.0f * S + ls + 1.0f * S + (hs - fs) * 0.5f), U32(rc), label.c_str());
+				const float pw = (tw - 22.0f * S - 4 * 3.0f * S) / 5.0f, ph = 4.0f * S;
+				float px = a.x + 11.0f * S;
+				for (int l = 1; l <= Combine::kSaveLevels; l++, px += pw + 3.0f * S)
+					SlantQuad(dl, ImVec2(px, a.y + th - ph - 6.0f * S), ImVec2(px + pw, a.y + th - 6.0f * S), U32(l <= r.level ? rc : kTrack));
+				n++;
+			}
+			const int rows = (n + perRow - 1) / perRow;
+			ImGui::Dummy(ImVec2(W, gap + rows * (th + gap)));
+		}
 		ImGui::Spacing();
 
 		// ---- Today's plan (Nov 10): about ten minutes, built from the ratings above. 1: your lowest-rated skill, one
 		// level above where you've cleared it (against Nexto where it can be). 2: today's set. 3: a lesson. ----
 		if (weakest)
 		{
-			{
-				FontPush f(fBig ? fBig : fHead);
-				ImGui::TextColored(kText, "TODAY'S PLAN");
-			}
 			const int target = std::clamp(weakestLevel + 1, 1, Combine::kSaveLevels);
 			const std::string ev = weakest->codes[1] ? weakest->codes[1] : weakest->codes[0];
+			dl->ChannelsSplit(2);
+			dl->ChannelsSetCurrent(1);
+			const ImVec2 p0 = ImGui::GetCursorScreenPos();
+			const float pad = 12.0f * S, inW = W - 2.0f * pad;
+			ImGui::SetCursorScreenPos(ImVec2(p0.x + pad, p0.y + pad));
+			ImGui::BeginGroup();
 			{
-				CapsFont f;
-				ImGui::TextColored(kOrange, "1");
+				FontPush f(fHead);
+				ImGui::TextColored(kText, "TODAY'S PLAN");
 			}
-			ImGui::SameLine(0, 10.0f * S);
-			ImGui::TextColored(kSub, "%s at %s: your lowest rating. A silver or better moves it up.", weakest->name, Combine::SaveLevelName(target));
-			ImGui::SameLine(0, 10.0f * S);
-			ImGui::PushID("plan1");
-			if (AccentButton("Start")) onGame([this, ev, target]() { CombineStart(ev, target, 0); });
-			ImGui::PopID();
+			ImGui::SameLine(0, 8.0f * S);
 			{
-				CapsFont f;
-				ImGui::TextColored(kOrange, "2");
+				FontPush f(fLabel);
+				ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.0f * S);
+				ImGui::TextColored(kMuted, "ABOUT 10 MINUTES");
 			}
-			ImGui::SameLine(0, 10.0f * S);
-			ImGui::TextColored(kSub, "Today's set, just below.");
-			{
-				CapsFont f;
-				ImGui::TextColored(kOrange, "3");
-			}
-			ImGui::SameLine(0, 10.0f * S);
-			ImGui::TextColored(kSub, "One lesson in Learn: the skill tree picks your next one.");
-			ImGui::SameLine(0, 10.0f * S);
-			ImGui::PushID("plan3");
-			if (QuietButton("Open Learn"))
+			// a numbered row: an orange slanted chip, the text, and (some rows) a button at the right edge
+			auto row = [&](const char* n, const std::string& text, const char* button, bool accent) {
+				const float fh = ImGui::GetFrameHeight();
+				const ImVec2 a = ImGui::GetCursorScreenPos();
+				const float cw = 20.0f * S, chh = 18.0f * S;
+				SlantQuad(dl, ImVec2(a.x, a.y + (fh - chh) * 0.5f), ImVec2(a.x + cw, a.y + (fh + chh) * 0.5f), U32(kOrange));
+				ImFont* cf = gCaps ? gCaps : ImGui::GetFont();
+				const float cs = cf->FontSize * gUser;
+				const ImVec2 ts = cf->CalcTextSizeA(cs, 1e9f, 0.0f, n);
+				dl->AddText(cf, cs, ImVec2(a.x + (cw - ts.x) * 0.5f, a.y + (fh - ts.y) * 0.5f), U32(Hex(0x1A0E02)), n);
+				float bw = 0.0f;
+				if (button) { CapsFont f; bw = ImGui::CalcTextSize(button).x + 34.0f * S; }
+				ImGui::SetCursorScreenPos(ImVec2(a.x + cw + 10.0f * S, a.y));
+				ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + inW - cw - 10.0f * S - (button ? bw + 10.0f * S : 0.0f));
+				ImGui::AlignTextToFramePadding();
+				ImGui::PushStyleColor(ImGuiCol_Text, kSub);
+				ImGui::TextWrapped("%s", text.c_str());
+				ImGui::PopStyleColor();
+				ImGui::PopTextWrapPos();
+				const float endY = std::max(ImGui::GetCursorScreenPos().y, a.y + fh);
+				bool hit = false;
+				if (button)
+				{
+					ImGui::SetCursorScreenPos(ImVec2(a.x + inW - bw, a.y));
+					ImGui::PushID(n);
+					hit = accent ? AccentButton(button, ImVec2(bw, 0)) : QuietButton(button, ImVec2(bw, 0));
+					ImGui::PopID();
+				}
+				ImGui::SetCursorScreenPos(ImVec2(a.x, endY + 3.0f * S));
+				return hit;
+			};
+			if (row("1", std::format("{} at {}: your lowest rating. A silver or better moves it up.", weakest->name, Combine::SaveLevelName(target)), "Start", true))
+				onGame([this, ev, target]() { CombineStart(ev, target, 0); });
+			row("2", "Today's set, just below.", nullptr, false);
+			if (row("3", "One lesson in Learn: the skill tree picks your next one.", "Open Learn", false))
 			{
 				uiCombineMode = false;
 				uiLearnMode = true;
@@ -1382,29 +1579,57 @@ void RLCoach::RenderCombine()
 				}
 				onGame([this]() { CombineClose(); LearnOpen(); });
 			}
-			ImGui::PopID();
-			ImGui::Spacing();
+			if (!u.reviewNote.empty()) row("4", u.reviewNote + " Review a few of those reps.", nullptr, false);
+			ImGui::EndGroup();
+			const ImVec2 p1(p0.x + W, ImGui::GetItemRectMax().y + pad - 3.0f * S);
+			dl->ChannelsSetCurrent(0);
+			dl->AddRectFilled(p0, p1, U32(kPanel), 6.0f * S);
+			dl->AddRectFilled(p0, ImVec2(p0.x + 3.0f * S, p1.y), U32(kOrange));
+			dl->ChannelsMerge();
+			ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y));
+			ImGui::Dummy(ImVec2(W, 6.0f * S));
 		}
 	}
 
 	// ---- The daily set (Nov 10): one code a day, the same for everyone (by the UTC date), a different event each day
 	// of the week, at the level you've picked below. Your best on it is kept like any other code. ----
 	{
-		const long long day = std::chrono::duration_cast<std::chrono::hours>(std::chrono::system_clock::now().time_since_epoch()).count() / 24;
-		static const char* kDaily[7] = { "SV", "KON", "SG", "FFN", "SDN", "RD", "FT" };
-		const std::string ev = kDaily[day % 7];
-		const uint32_t seed = static_cast<uint32_t>(day) * 2654435761u + 20261110u;
+		const long long day = DailyDay();
+		const std::string ev = DailyEvent(day);
+		const uint32_t seed = DailySeed(day);
 		const int lv = uiCombineLevel;
 		const std::string base = ev.size() == 3 ? ev.substr(0, 2) : ev;
+		dl->ChannelsSplit(2);
+		dl->ChannelsSetCurrent(1);
+		const ImVec2 p0 = ImGui::GetCursorScreenPos();
+		const float pad = 12.0f * S;
+		ImGui::SetCursorScreenPos(ImVec2(p0.x + pad, p0.y + pad));
+		ImGui::BeginGroup();
 		{
-			FontPush f(fBig ? fBig : fHead);
+			FontPush f(fHead);
 			ImGui::TextColored(kText, "TODAY'S SET");
 		}
-		ImGui::TextColored(kSub, "%s%s, %s: the same 10 for everyone today.", EventName(base), ev.size() == 3 ? " vs Nexto" : "", Combine::SaveLevelName(lv));
+		ImGui::SameLine(0, 8.0f * S);
+		{
+			FontPush f(fLabel);
+			ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.0f * S);
+			ImGui::TextColored(kAccentText, "%s%s  /  %s", Upper(EventName(base)).c_str(), ev.size() == 3 ? " VS NEXTO" : "", Upper(Combine::SaveLevelName(lv)).c_str());
+		}
+		ImGui::TextColored(kSub, "The same 10 for everyone today. A new set every day.");
 		if (AccentButton("Play today's set", ImVec2(170 * S, 32.0f * S))) onGame([this, ev, lv, seed]() { CombineStart(ev, lv, seed); });
+		const float endY = ImGui::GetCursorScreenPos().y;
+		const float pillY = ImGui::GetCursorPosY() - 32.0f * S + 2.0f * S;
 		auto it = u.bests.find(Combine::SetCode(ev.c_str(), lv, seed));
-		if (it != u.bests.end()) { ImGui::SameLine(0, 10.0f * S); ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.0f * S); Pill(std::format("Today's best {}", it->second), kChip); }
-		ImGui::Spacing();
+		if (it != u.bests.end()) { ImGui::SameLine(0, 10.0f * S); ImGui::SetCursorPosY(pillY); Pill(std::format("Today's best {}", it->second), kChip); }
+		if (u.streak > 0) { ImGui::SameLine(0, 10.0f * S); ImGui::SetCursorPosY(pillY); Pill(std::format("{} day{} in a row", u.streak, u.streak == 1 ? "" : "s"), kOrange); }
+		ImGui::EndGroup();
+		const ImVec2 p1(p0.x + W, endY + pad - ImGui::GetStyle().ItemSpacing.y);
+		dl->ChannelsSetCurrent(0);
+		dl->AddRectFilled(p0, p1, U32(kPanel), 6.0f * S);
+		dl->AddRectFilled(p0, ImVec2(p0.x + 3.0f * S, p1.y), U32(kAccent));
+		dl->ChannelsMerge();
+		ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y));
+		ImGui::Dummy(ImVec2(W, 8.0f * S));
 	}
 
 	{
@@ -1446,10 +1671,20 @@ void RLCoach::RenderCombine()
 			FontPush f(fHead);
 			ImGui::TextColored(kText, "%s", title);
 		}
+		// (Nov 11) the first sentence only; the rules open on a click (the full text made every card a wall of words)
+		static std::set<std::string> opened;
+		const bool isOpen = opened.count(code) > 0;
+		const std::string full = about;
+		const size_t cut = full.find(". ");
+		const bool hasMore = cut != std::string::npos && cut + 2 < full.size();
 		ImGui::PushStyleColor(ImGuiCol_Text, kSub);
-		ImGui::TextWrapped("%s", about);
+		ImGui::TextWrapped("%s", isOpen || !hasMore ? full.c_str() : full.substr(0, cut + 1).c_str());
 		ImGui::PopStyleColor();
 		ImGui::PushID(code);
+		if (hasMore && LinkButton(isOpen ? "Hide the rules" : "How it works and scores"))
+		{
+			if (isOpen) opened.erase(code); else opened.insert(code);
+		}
 		// 50s, kickoffs and shadow defense: the other car played back as the real player did, or by Nexto from there
 		bool& vsN = uiCombineNexto[code];
 		if (canNexto)

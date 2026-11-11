@@ -774,6 +774,7 @@ void RLCoach::RenderLearn()
 		ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + W - 2.0f * pad);
 		ImGui::TextColored(kSub, "You passed every stage, the whole %s included. Every stage stays open to keep it sharp, and the warm-up check still opens each session.", Lower(u.name).c_str());
 		ImGui::PopTextWrapPos();
+		ImGui::Dummy(ImVec2(1.0f, 4.0f * S));   // (Nov 11) the last line sat on the box's bottom edge
 		ImGui::EndGroup();
 		const ImVec2 p1(p0.x + W, ImGui::GetItemRectMax().y + pad);
 		dl->ChannelsSetCurrent(0);
@@ -856,32 +857,38 @@ void RLCoach::RenderLearn()
 	{
 		const bool locked = i > u.unlocked && !u.unlockAll && !(u.testOut && i == stage), current = i == stage, cleared = i < u.unlocked || (u.completed && i == nStages - 1);
 		ImVec2 p = ImGui::GetCursorScreenPos();
-		const float rowH = 22.0f * S;
+		// (Nov 11) rows like a Combine set's: a number, the name, and a slanted chip for where you stand
+		const float rowH = 28.0f * S;
 		ImGui::PushID(i);
 		if (ImGui::InvisibleButton("stage", ImVec2(W, rowH)) && !locked) onGame([this, i]() { LearnSelectStage(i); });
 		const bool hov = ImGui::IsItemHovered();
 		ImGui::PopID();
-		if (current) dl->AddRectFilled(p, ImVec2(p.x + W, p.y + rowH), U32(kPanel), 6.0f * S);
-		else if (hov && !locked) dl->AddRectFilled(p, ImVec2(p.x + W, p.y + rowH), U32(kPanel2), 6.0f * S);
-		// Status dot: cleared (green check-dot), current (accent ring), locked (dim)
-		ImVec2 c(p.x + 11.0f * S, p.y + rowH * 0.5f);
-		// Style A: a slanted pip, green when cleared, outlined blue for the one you're on
+		dl->AddRectFilled(p, ImVec2(p.x + W, p.y + rowH), U32(current ? kPanel : hov && !locked ? kChip : kPanel2));
+		if (current) dl->AddRectFilled(p, ImVec2(p.x + 3.0f * S, p.y + rowH), U32(kAccent));
 		{
-			const ImVec2 a(c.x - 6.0f * S, c.y - 5.0f * S), b(c.x + 6.0f * S, c.y + 5.0f * S);
-			SlantQuad(dl, a, b, U32(cleared ? kGood : kTrack));
-			if (current) SlantQuad(dl, ImVec2(a.x - 2, a.y - 2), ImVec2(b.x + 2, b.y + 2), U32(kAccent), false, 2.0f);
+			ImFont* hf = fHead ? fHead : ImGui::GetFont();
+			const float hs = hf->FontSize * gUser;
+			dl->AddText(hf, hs, ImVec2(p.x + 12.0f * S, p.y + (rowH - hs) * 0.5f), U32(cleared ? kGood : current ? kAccentText : kMuted), std::to_string(i + 1).c_str());
 		}
 		const bool together = u.stageFirst[i] != u.stageLast[i];
 		ImVec4 tc = locked ? kMuted : current ? kText : kSub;
-		dl->AddText(ImVec2(p.x + 24.0f * S + (together ? 10.0f * S : 0.0f), p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f), U32(tc),
-			u.stageNames[i].c_str());
-		// Right side: best score at full speed, or the lock
-		std::string right = locked ? "locked" : u.best[i] > 0 ? std::format("best {}", u.best[i]) : "";
-		if (!right.empty())
+		dl->AddText(ImVec2(p.x + 38.0f * S, p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f), U32(tc), u.stageNames[i].c_str());
+		// Right side: your best at full speed, cleared, the one you're on, or locked
 		{
-			ImVec2 ts = ImGui::CalcTextSize(right.c_str());
-			dl->AddText(ImVec2(p.x + W - ts.x - 8.0f * S, p.y + (rowH - ts.y) * 0.5f), U32(locked ? kMuted : GradeColor(u.best[i])), right.c_str());
+			const std::string right = locked ? "LOCKED" : u.best[i] > 0 ? std::format("BEST {}", u.best[i]) : cleared ? "CLEARED" : current ? "UP NEXT" : "";
+			if (!right.empty())
+			{
+				ImFont* cf = gCaps ? gCaps : ImGui::GetFont();
+				const float cs = cf->FontSize * gUser;
+				const ImVec2 ts = cf->CalcTextSizeA(cs, 1e9f, 0.0f, right.c_str());
+				const float ch = ts.y + 3.0f * S, cw = ts.x + 14.0f * S;
+				const ImVec2 a(p.x + W - cw - 10.0f * S, p.y + (rowH - ch) * 0.5f);
+				const ImVec4 col = locked ? kChip : u.best[i] > 0 ? GradeColor(u.best[i]) : cleared ? kGood : kChip;
+				SlantQuad(dl, a, ImVec2(a.x + cw, a.y + ch), U32(col));
+				dl->AddText(cf, cs, ImVec2(a.x + 7.0f * S, a.y + 1.5f * S), U32(locked || col.x == kChip.x ? kSub : OnFill(col)), right.c_str());
+			}
 		}
+		ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rowH + 3.0f * S));
 		if (hov && locked) ImGui::SetTooltip("Clear the stage before it first (3 of your last 5 at full speed scoring 4-5)");
 	}
 
@@ -1472,9 +1479,15 @@ void RLCoach::RenderSkillTree(const UiLearn& u)
 			const size_t sp = name.rfind(' ');
 			if (sp != std::string::npos) { line2 = name.substr(sp + 1); name = name.substr(0, sp); }
 		}
+		// (Nov 11) a long single word (POWERSLIDE, OFF-CENTRE) ran under the grade badge: shrink the name to fit
+		float fsN = fsName;
+		{
+			const float widest = std::max(fName->CalcTextSizeA(fsName, 1e9f, 0.0f, name.c_str()).x, line2.empty() ? 0.0f : fName->CalcTextSizeA(fsName, 1e9f, 0.0f, line2.c_str()).x);
+			if (widest > maxW && widest > 0) fsN = std::max(fsName * 0.7f, fsName * maxW / widest);
+		}
 		float ty = nd.a.y + (line2.empty() ? 8.0f * S : 4.0f * S);
-		dl->AddText(fName, fsName, ImVec2(tx, ty), U32(nameCol), name.c_str());
-		if (!line2.empty()) { ty += fsName * 0.95f; dl->AddText(fName, fsName, ImVec2(tx - fsName * kSlant * 0.2f, ty), U32(nameCol), line2.c_str()); }
+		dl->AddText(fName, fsN, ImVec2(tx, ty + (fsName - fsN) * 0.5f), U32(nameCol), name.c_str());
+		if (!line2.empty()) { ty += fsName * 0.95f; dl->AddText(fName, fsN, ImVec2(tx - fsName * kSlant * 0.2f, ty + (fsName - fsN) * 0.5f), U32(nameCol), line2.c_str()); }
 		ty += fsName + 2.0f * S;
 		dl->AddText(fCaps, fsStat, ImVec2(tx - 2.0f * S, ty), U32(statCol), status.c_str());
 		dl->PopClipRect();

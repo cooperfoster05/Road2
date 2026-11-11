@@ -548,6 +548,7 @@ void RLCoach::RegisterLookCvars()
 
 	cvarManager->registerCvar("road2_ghost_opacity", "0.7", "Learn: the controller ghost when practicing a line (0 = off, 1 = solid)", true, true, 0, true, 1).bindTo(ghostOpacity);
 	cvarManager->registerCvar("road2_window_size", "1", "Size of the Road2 window (rep viewer, Learn, the Combine)", true, true, 0.6f, true, 1.6f).bindTo(windowSize);
+	cvarManager->registerCvar("road2_line_ghost", "1", "Show the better line's car as a ghost while your rep plays", true, true, 0, true, 1).bindTo(lineGhost);
 	cvarManager->registerCvar("road2_target_hitbox", "1", "Target car outline: 0 off, 1 for your touch, 2 for the earliest intercept", true, true, 0, true, 2).bindTo(targetHitbox);
 
 	showUngraded = std::make_shared<bool>(false);
@@ -606,6 +607,10 @@ void RLCoach::RenderLookSettings()
 	int th = *targetHitbox;
 	const char* thNames[3] = { "Off", "Where your car needed to be for your touch", "Where it needed to be at the earliest intercept" };
 	if (UiStyle::Combo("Target car outline", &th, thNames, 3)) setCvar("road2_target_hitbox", static_cast<float>(th));
+	{
+		bool lg = *lineGhost;
+		if (UiStyle::Checkbox("Ghost car on the better line (while your rep plays)", &lg)) setCvar("road2_line_ghost", lg ? 1.0f : 0.0f);
+	}
 	ImGui::TextDisabled("A yellow outline of your car's hitbox, placed and aimed to make the ideal hit. Shows in replays and practice.");
 }
 

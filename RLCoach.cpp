@@ -157,7 +157,12 @@ void RLCoach::onLoad()
 
 	// Every physics tick, before the game reads the car's input (the viewer replaces it)
 	gameWrapper->HookEventWithCaller<CarWrapper>("Function TAGame.Car_TA.SetVehicleInput",
-		[this](CarWrapper car, void* params, std::string) { PerfTimer t(perfInput); BotInput(car, params); OverrideViewerInput(car, params); OverrideRideInput(car, params); });
+		[this](CarWrapper car, void* params, std::string) {
+			// (Nov 11) Road2 only ever replaces an input in free play. Each of these already stops itself a tick after
+			// you leave; this makes it zero ticks, so nothing of Road2's can touch a car's input in a match.
+			if (!gameWrapper->IsInFreeplay()) return;
+			PerfTimer t(perfInput); BotInput(car, params); OverrideViewerInput(car, params); OverrideRideInput(car, params);
+		});
 
 	// Every physics tick, after the car's input for that tick is set
 	gameWrapper->HookEventWithCallerPost<CarWrapper>("Function TAGame.Car_TA.SetVehicleInput",
@@ -362,6 +367,7 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 		{
 			frames.clear();
 			frames.reserve(static_cast<size_t>(kTickRate * 14));
+			livePred.clear();   // (Nov 11) a rep reset in its first 0.2 s left its predicted path up for the next one
 			touchCount = 0;
 			lastTouchTick = -1000;
 			goalPending = false;
