@@ -7,7 +7,7 @@
 
 std::string SettingsWindowBase::GetPluginName()
 {
-	return "RLCoach";
+	return "Road2";   // the F2 Plugins tab
 }
 
 void SettingsWindowBase::SetImGuiContext(uintptr_t ctx)
@@ -17,7 +17,7 @@ void SettingsWindowBase::SetImGuiContext(uintptr_t ctx)
 
 std::string PluginWindowBase::GetMenuName()
 {
-	return "RLCoach";
+	return "road2";
 }
 
 std::string PluginWindowBase::GetMenuTitle()
@@ -56,9 +56,9 @@ void PluginWindowBase::Render()
 		// Size-conscious (Nov 1). The width is yours to drag; the height always fits what the window is showing (a
 		// Combine set is short, the rep viewer with its list is tall), up to most of the screen, then it scrolls. The UI
 		// needs about 480 wide at the "Window size" you picked: drag it narrower and everything shrinks with it (down to
-		// 0.6), so nothing gets cut off. Changing "Window size" resizes the window to match.
+		// 0.7), so nothing gets cut off. Changing "Window size" resizes the window to match.
 		const float base = std::clamp(uiBaseSize_, 0.6f, 1.6f);
-		const float need = 480.0f * base, minW = need * 0.6f;
+		const float need = 480.0f * base, minW = need * 0.7f;   // (Nov 3) no smaller than 0.7: below that the text gets too small to read
 		const float screenH = ImGui::GetIO().DisplaySize.y > 0 ? ImGui::GetIO().DisplaySize.y : 1080.0f;
 		ImGui::SetNextWindowSize(ImVec2(540.0f * base, 600.0f), ImGuiCond_FirstUseEver);
 		if (ImGuiWindow* prev = ImGui::FindWindowByName(menuTitle_.c_str()); prev && std::fabs(base - lastBaseSize_) > 0.001f)
@@ -73,7 +73,7 @@ void PluginWindowBase::Render()
 			UiStyle::Scope style;   // RL Coach's look, only for this window
 			if (ImGui::Begin(menuTitle_.c_str(), &isWindowOpen_, ImGuiWindowFlags_None))
 			{
-				const float shrink = std::clamp(ImGui::GetWindowWidth() / need, 0.6f, 1.0f);
+				const float shrink = std::clamp(ImGui::GetWindowWidth() / need, 0.7f, 1.0f);
 				UiStyle::gUser = uiScaleNow_ = base * shrink;
 				ImGui::SetWindowFontScale(UiStyle::gUser);
 				RenderWindow();

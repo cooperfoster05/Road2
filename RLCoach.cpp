@@ -11,7 +11,7 @@
 #include <format>
 
 
-BAKKESMOD_PLUGIN(RLCoach, "RL Coach: chess.com-style review for your training reps", plugin_version, PLUGINTYPE_FREEPLAY | PLUGINTYPE_CUSTOM_TRAINING)
+BAKKESMOD_PLUGIN(RLCoach, "Road2: chess.com-style review for your Rocket League mechanics", plugin_version, PLUGINTYPE_FREEPLAY | PLUGINTYPE_CUSTOM_TRAINING)
 
 std::shared_ptr<CVarManagerWrapper> _globalCvarManager;
 
@@ -54,96 +54,101 @@ void RLCoach::onLoad()
 	livePrediction = std::make_shared<bool>(false);
 	postRollMaxSeconds = std::make_shared<float>(4.0f);
 
-	cvarManager->registerCvar("rlcoach_hud", "1", "Show the RL Coach panel", true, true, 0, true, 1)
+	cvarManager->registerCvar("road2_hud", "1", "Show the Road2 panel", true, true, 0, true, 1)
 		.bindTo(hudEnabled);
 
 	// Recording is never saved to config, so it starts OFF every session
-	CVarWrapper rec = cvarManager->registerCvar("rlcoach_recording", "0", "Record reps (data farming)", true, true, 0, true, 1, false);
+	CVarWrapper rec = cvarManager->registerCvar("road2_recording", "0", "Record reps", true, true, 0, true, 1, false);
 	rec.bindTo(recordingEnabled);
 	learnUnlockAll = std::make_shared<bool>(false);
-	cvarManager->registerCvar("rlcoach_learn_unlock_all", "0", "Learn: open every lesson and stage without the prerequisites (for practicing, not learning)", true, true, 0, true, 1)
+	cvarManager->registerCvar("road2_learn_unlock_all", "0", "Learn: open every lesson and stage without the prerequisites (for practicing, not learning)", true, true, 0, true, 1)
 		.bindTo(learnUnlockAll);
 	rec.addOnValueChanged([this](std::string, CVarWrapper cvar) { SetRecording(cvar.getBoolValue()); });
 
-	cvarManager->registerCvar("rlcoach_max_rep_seconds", "10", "Longest a rep runs before it ends as a timeout", true, true, 2, true, 60)
+	cvarManager->registerCvar("road2_max_rep_seconds", "10", "Longest a rep runs before it ends as a timeout", true, true, 2, true, 60)
 		.bindTo(maxRepSeconds);
 
-	cvarManager->registerCvar("rlcoach_postroll_seconds", "1.5", "Keep recording this long after the shot ends, to capture recovery and late goals", true, true, 0, true, 5)
+	cvarManager->registerCvar("road2_postroll_seconds", "1.5", "Keep recording this long after the shot ends, to capture recovery and late goals", true, true, 0, true, 5)
 		.bindTo(postRollSeconds);
 
-	cvarManager->registerCvar("rlcoach_postroll_max_seconds", "4", "After the shot, keep recording until you're back in control, up to this long", true, true, 1, true, 8)
+	cvarManager->registerCvar("road2_postroll_max_seconds", "4", "After the shot, keep recording until you're back in control, up to this long", true, true, 1, true, 8)
 		.bindTo(postRollMaxSeconds);
 
-	cvarManager->registerCvar("rlcoach_live_prediction", "0", "Draw the predicted ball path while you play", true, true, 0, true, 1)
+	cvarManager->registerCvar("road2_live_prediction", "0", "Draw the predicted ball path while you play", true, true, 0, true, 1)
 		.bindTo(livePrediction);
 
-	CVarWrapper mirror = cvarManager->registerCvar("rlcoach_pred_mirror", "0", "Mirror X when predicting (set from the accuracy test)", true, true, 0, true, 1);
+	CVarWrapper mirror = cvarManager->registerCvar("road2_pred_mirror", "0", "Mirror X when predicting (set from the accuracy test)", true, true, 0, true, 1);
 	mirror.addOnValueChanged([this](std::string, CVarWrapper c) { predictor.mirrorX = c.getBoolValue(); });
 
 	RegisterLookCvars();
 	showTiming = std::make_shared<bool>(false);
-	cvarManager->registerCvar("rlcoach_show_timing", "0", "Show how long RL Coach's own code takes each tick and frame", true, true, 0, true, 1)
+	cvarManager->registerCvar("road2_show_timing", "0", "Show how long Road2's own code takes each tick and frame", true, true, 0, true, 1)
 		.bindTo(showTiming);
+	cvarManager->registerCvar("road2_welcome_done", "0", "The first-run welcome card was dismissed", true, true, 0, true, 1)
+		.bindTo(welcomeDone);
+	cvarManager->registerCvar("road2_dev_tools", "0", "Show the developer tools in the settings (tests, timing)", true, true, 0, true, 1)
+		.bindTo(devTools);
 
 	keepDays = std::make_shared<float>(2.0f);
 	keepRatedDays = std::make_shared<float>(180.0f);
 	storageCapMb = std::make_shared<float>(1024.0f);
-	cvarManager->registerCvar("rlcoach_keep_days", "2", "Days to keep full recordings of reps you didn't rate or star", true, true, 1, true, 60)
+	cvarManager->registerCvar("road2_keep_days", "2", "Days to keep full recordings of reps you didn't rate or star", true, true, 1, true, 60)
 		.bindTo(keepDays);
-	cvarManager->registerCvar("rlcoach_keep_rated_days", "180", "Days to keep full recordings of reps you rated", true, true, 7, true, 730)
+	cvarManager->registerCvar("road2_keep_rated_days", "180", "Days to keep full recordings of reps you rated", true, true, 7, true, 730)
 		.bindTo(keepRatedDays);
-	cvarManager->registerCvar("rlcoach_storage_cap_mb", "1024", "Most disk space recordings can use (MB)", true, true, 100, true, 10240)
+	cvarManager->registerCvar("road2_storage_cap_mb", "1024", "Most disk space recordings can use (MB)", true, true, 100, true, 10240)
 		.bindTo(storageCapMb);
 
-	CVarWrapper numpad = cvarManager->registerCvar("rlcoach_rate_numpad", "0", "Rate reps with numpad 1-5 instead of the number row", true, true, 0, true, 1);
+	CVarWrapper numpad = cvarManager->registerCvar("road2_rate_numpad", "0", "Rate reps with numpad 1-5 instead of the number row", true, true, 0, true, 1);
 	numpad.bindTo(useNumpad);
 	numpad.addOnValueChanged([this](std::string, CVarWrapper) { LoadRatingKeys(); });
 
-	cvarManager->registerCvar("rlcoach_manual_grading", "1", "Rate reps with the number keys (1-5 shot, 6-8 recovery)", true, true, 0, true, 1)
+	cvarManager->registerCvar("road2_manual_grading", "1", "Rate reps with the number keys (1-5 shot, 6-8 recovery)", true, true, 0, true, 1)
 		.bindTo(manualGrading);
 
-	cvarManager->registerNotifier("rlcoach_toggle_recording", [this](std::vector<std::string>) {
-		cvarManager->getCvar("rlcoach_recording").setValue(*recordingEnabled ? 0 : 1);
+	cvarManager->registerNotifier("road2_toggle_recording", [this](std::vector<std::string>) {
+		cvarManager->getCvar("road2_recording").setValue(*recordingEnabled ? 0 : 1);
 	}, "Turn rep recording on or off", PERMISSION_ALL);
 
-	cvarManager->registerNotifier("rlcoach_rate", [this](std::vector<std::string> args) {
+	cvarManager->registerNotifier("road2_rate", [this](std::vector<std::string> args) {
 		if (args.size() < 2) return;
 		try { HandleRatingPress(std::stoi(args[1])); } catch (...) {}
 	}, "Rate the last rep 1-5", PERMISSION_ALL);
 
-	cvarManager->registerNotifier("rlcoach_rate_recovery", [this](std::vector<std::string> args) {
+	cvarManager->registerNotifier("road2_rate_recovery", [this](std::vector<std::string> args) {
 		if (args.size() < 2) return;
 		try { HandleRecoveryPress(std::stoi(args[1])); } catch (...) {}
 	}, "Rate the last rep's recovery: 1 poor, 2 eh, 3 good", PERMISSION_ALL);
 
-	cvarManager->registerNotifier("rlcoach_rearm", [this](std::vector<std::string>) {
+	cvarManager->registerNotifier("road2_rearm", [this](std::vector<std::string>) {
 		if (*recordingEnabled && state != RepState::Recording) EnterArmed();
 	}, "Arm the recorder without resetting the ball", PERMISSION_ALL);
 
-	cvarManager->registerNotifier("rlcoach_viewer", [this](std::vector<std::string>) {
+	cvarManager->registerNotifier("road2_viewer", [this](std::vector<std::string>) {
 		cvarManager->executeCommand("togglemenu " + GetMenuName());
-	}, "Open or close the rep viewer", PERMISSION_ALL);
+	}, "Open or close the Road2 window", PERMISSION_ALL);
 
-	cvarManager->registerNotifier("rlcoach_practice_retry", [this](std::vector<std::string>) { PracticeRetry(); },
-		"Practice: reset to the start of the segment", PERMISSION_ALL);
-	cvarManager->registerNotifier("rlcoach_practice_exit", [this](std::vector<std::string>) { PracticeExit(); },
+	cvarManager->registerNotifier("road2_practice_retry", [this](std::vector<std::string>) { PracticeRetry(); },
+		"Practice: go again from the start of the moment", PERMISSION_ALL);
+	cvarManager->registerNotifier("road2_practice_exit", [this](std::vector<std::string>) { PracticeExit(); },
 		"Practice: stop practicing", PERMISSION_ALL);
 
-	cvarManager->registerNotifier("rlcoach_test_setstate", [this](std::vector<std::string>) {
-		TestSetState();
-	}, "Test: move the car and ball to a fixed spot", PERMISSION_ALL);
-
-	RegisterBotTest();
-	cvarManager->registerCvar("rlcoach_combine_momentum_cam", "1", "Combine Recovery: point the camera the way you're travelling until you land", true, true, 0, true, 1)
+	// The developer commands (the set-state test, the bot test, the bot look capture) only exist while "Developer
+	// tools" is on in the settings (Nov 6, for v1): testers never see them in the console
+	cvarManager->getCvar("road2_dev_tools").addOnValueChanged([this](std::string, CVarWrapper cv) { SetDevCommands(cv.getBoolValue()); });
+	SetDevCommands(*devTools);
+	cvarManager->registerCvar("road2_combine_momentum_cam", "1", "Recovery (the Combine and the Learn lesson): point the camera the way you're travelling until you land", true, true, 0, true, 1)
 		.bindTo(combineMomentumCam);
 
-	menuTitle_ = "RL Coach - Rep Viewer";
+	menuTitle_ = "Road2";
 
-	writer = std::make_unique<RepWriter>(std::filesystem::path(gameWrapper->GetDataFolderW()) / "RLCoach");
+	const std::filesystem::path base(gameWrapper->GetDataFolderW());
+	bool movedData = false;
+	writer = std::make_unique<RepWriter>(DataRoot(base, movedData));
 
 	// Every physics tick, before the game reads the car's input (the viewer replaces it)
 	gameWrapper->HookEventWithCaller<CarWrapper>("Function TAGame.Car_TA.SetVehicleInput",
-		[this](CarWrapper car, void* params, std::string) { PerfTimer t(perfInput); BotInput(car, params); OverrideViewerInput(car, params); });
+		[this](CarWrapper car, void* params, std::string) { PerfTimer t(perfInput); BotInput(car, params); OverrideViewerInput(car, params); OverrideRideInput(car, params); });
 
 	// Every physics tick, after the car's input for that tick is set
 	gameWrapper->HookEventWithCallerPost<CarWrapper>("Function TAGame.Car_TA.SetVehicleInput",
@@ -159,12 +164,14 @@ void RLCoach::onLoad()
 
 	LoadRatingKeys();
 	LoadUiFonts();
-	predictor.mirrorX = cvarManager->getCvar("rlcoach_pred_mirror").getBoolValue();
+	predictor.mirrorX = cvarManager->getCvar("road2_pred_mirror").getBoolValue();
 	StartPredictor();
 
 	// In the background: tidy up storage, build the shot book and auto grades
 	StartHousekeeping();
-	LOG("RL Coach loaded. Reps save to {}", writer->Folder().string());
+	if (movedData) CarryOverOldSettings(base);
+	RetireOldPlugin(base);
+	LOG("Road2 loaded. Reps save to {}", writer->Folder().string());
 }
 
 // The viewer's fonts (UiFonts.h): copied into BakkesMod's font folder the first time, then queued for loading.
@@ -172,7 +179,7 @@ void RLCoach::onLoad()
 void RLCoach::LoadUiFonts()
 {
 	const std::filesystem::path data(gameWrapper->GetDataFolderW());
-	if (!UiFonts::Install(data)) LOG("RL Coach: the viewer's fonts aren't in {} (using the default font)", (data / "RLCoach" / "fonts").string());
+	if (!UiFonts::Install(data)) LOG("Road2: the viewer's fonts aren't in {} (using the default font)", (data / "Road2" / "fonts").string());
 	auto gui = gameWrapper->GetGUIManager();
 	for (int i = 0; i < UiFonts::kCount; i++)
 	{
@@ -184,6 +191,22 @@ void RLCoach::LoadUiFonts()
 void RLCoach::StartPredictor()
 {
 	if (writer) predictor.StartInit(writer->Folder() / "collision_meshes");
+}
+
+void RLCoach::SetDevCommands(bool on)
+{
+	if (on == devCommandsOn) return;
+	devCommandsOn = on;
+	if (on)
+	{
+		cvarManager->registerNotifier("road2_test_setstate", [this](std::vector<std::string>) {
+			TestSetState();
+		}, "Test: move the car and ball to a fixed spot", PERMISSION_ALL);
+		RegisterBotTest();
+	}
+	else
+		for (const char* n : { "road2_test_setstate", "road2_bot_spawn", "road2_bot_mode", "road2_bot_remove", "road2_bot_capture" })
+			cvarManager->removeNotifier(n);
 }
 
 void RLCoach::onUnload()
@@ -533,6 +556,7 @@ void RLCoach::OnBallTouch(CarWrapper car, void* params)
 		{
 			if (!combineBotTouched) combineBotFirstTouch = combineLiveTicks;
 			combineBotTouched = true;
+			combineBotLastTouch = combineLiveTicks;
 		}
 		return;
 	}
@@ -708,7 +732,7 @@ void RLCoach::FinishRep(const std::string& reason)
 	else
 	{
 		statusMessage = "Couldn't save the rep file";
-		LOG("RL Coach: failed to save rep to {}", writer ? writer->Folder().string() : "(no folder)");
+		LOG("Road2: failed to save rep to {}", writer ? writer->Folder().string() : "(no folder)");
 	}
 }
 
@@ -718,7 +742,7 @@ void RLCoach::FinishRep(const std::string& reason)
 
 void RLCoach::LoadRatingKeys()
 {
-	bool numpadKeys = cvarManager->getCvar("rlcoach_rate_numpad").getBoolValue();
+	bool numpadKeys = cvarManager->getCvar("road2_rate_numpad").getBoolValue();
 	const char* row[8] = { "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight" };
 	const char* pad[8] = { "NumPadOne", "NumPadTwo", "NumPadThree", "NumPadFour", "NumPadFive", "NumPadSix", "NumPadSeven", "NumPadEight" };
 	for (int i = 0; i < 8; i++)
@@ -813,10 +837,10 @@ void RLCoach::RateLastRep(int rating)
 void RLCoach::TestSetState()
 {
 	ServerWrapper server = gameWrapper->GetGameEventAsServer();
-	if (server.IsNull()) { LOG("RL Coach test: not in an offline game"); return; }
+	if (server.IsNull()) { LOG("Road2 test: not in an offline game"); return; }
 	CarWrapper car = gameWrapper->GetLocalCar();
 	BallWrapper ball = server.GetBall();
-	if (car.IsNull() || ball.IsNull()) { LOG("RL Coach test: no car or ball"); return; }
+	if (car.IsNull() || ball.IsNull()) { LOG("Road2 test: no car or ball"); return; }
 
 	// Car near the blue goal facing the ball, ball floating mid-field drifting toward it
 	car.SetLocation(Vector(0.0f, -2500.0f, 20.0f));
@@ -831,118 +855,258 @@ void RLCoach::TestSetState()
 	ball.SetAngularVelocity(Vector(0.0f, 0.0f, 0.0f), false);
 
 	statusMessage = "Test: car and ball moved (boost set to 33)";
-	LOG("RL Coach test: set state applied");
+	LOG("Road2 test: set state applied");
 }
 
 // ============================================================
-// Settings tab (F2 > Plugins > RLCoach)
+// Settings tab (F2 > Plugins > Road2). Style A (Nov 3, Coop: "more stylized, unique to us"): the wordmark, three status
+// tiles (recording, the simulator, this session), the three switches you use most, a setup card while the arena files
+// are missing, then the rest in sections that open and close.
 // ============================================================
 
 void RLCoach::RenderSettings()
 {
-	UiStyle::Scope style(false);   // RL Coach's look for the widgets in this tab
+	using namespace UiStyle;
+	Scope style(false);   // Road2's look for the widgets in this tab
+	FetchUiFonts();
+	const bool fontsIn = uiFonts[UiFonts::Body] != nullptr;
+	if (fontsIn) ImGui::PushFont(uiFonts[UiFonts::Body]);
+	const float S = Sc();
+	ImGui::PushItemWidth(std::min(ImGui::GetContentRegionAvail().x * 0.55f, 380.0f * S));   // sliders and dropdowns, not the full width
 
 	// This runs on the render thread, so cvar changes are handed to the game thread
 	auto setCvar = [this](const std::string& name, float value) {
 		gameWrapper->Execute([this, name, value](GameWrapper*) { cvarManager->getCvar(name).setValue(value); });
 	};
+	auto note = [](const char* t) { ImGui::PushStyleColor(ImGuiCol_Text, kMuted); ImGui::TextWrapped("%s", t); ImGui::PopStyleColor(); };
+	ImDrawList* dl = ImGui::GetWindowDrawList();
 
-	ImGui::TextColored(UiStyle::kAccent, "RL COACH");
-	ImGui::SameLine();
-	ImGui::TextDisabled("v%s   %d reps saved this session", plugin_version, repsThisSession);
-
-	bool rec = *recordingEnabled;
-	if (ImGui::Checkbox("Record reps", &rec)) setCvar("rlcoach_recording", rec ? 1.0f : 0.0f);
-	ImGui::SameLine();
-	bool manual = *manualGrading;
-	if (ImGui::Checkbox("Manual grading", &manual)) setCvar("rlcoach_manual_grading", manual ? 1.0f : 0.0f);
-	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Rate reps with the number keys: 1-5 the shot, 6-8 the recovery.\nTurn off to free up those keys.");
-	ImGui::SameLine();
-	bool hud = *hudEnabled;
-	if (ImGui::Checkbox("Show panel", &hud)) setCvar("rlcoach_hud", hud ? 1.0f : 0.0f);
-	ImGui::SameLine();
-	if (UiStyle::AccentButton("Open rep viewer"))
-		gameWrapper->Execute([this](GameWrapper*) { cvarManager->executeCommand("togglemenu " + GetMenuName()); });
-
-	if (ImGui::CollapsingHeader("Recording and rating"))
+	// ---- Header ----
+	Wordmark(uiFonts[UiFonts::Display], "Settings");
 	{
-		bool np = *useNumpad;
-		if (ImGui::Checkbox("Rate with the numpad instead of the number row", &np)) setCvar("rlcoach_rate_numpad", np ? 1.0f : 0.0f);
-		float maxS = *maxRepSeconds;
-		if (ImGui::SliderFloat("Max rep length (seconds)", &maxS, 2.0f, 30.0f, "%.0f")) setCvar("rlcoach_max_rep_seconds", maxS);
-		float post = *postRollSeconds;
-		if (ImGui::SliderFloat("Keep recording after the shot, at least (s)", &post, 0.0f, 5.0f, "%.1f")) setCvar("rlcoach_postroll_seconds", post);
-		float postMax = *postRollMaxSeconds;
-		if (ImGui::SliderFloat("...and until recovered, at most (s)", &postMax, 1.0f, 8.0f, "%.1f")) setCvar("rlcoach_postroll_max_seconds", postMax);
-		ImGui::TextDisabled("Rating keys: 1 Missed, 2 Close, 3 Bad shot went in, 4 Good shot went in, 5 Great shot went in.");
-		ImGui::TextDisabled("Recovery keys: 6 Poor, 7 Eh, 8 Good (rate how you got back in control after the shot).");
-		ImGui::TextDisabled("Pressing during a rep rates that rep; after, it rates the last saved rep.");
-		ImGui::TextDisabled("Controller: bind rlcoach_toggle_recording / rlcoach_viewer / rlcoach_rate 1-5 /");
-		ImGui::TextDisabled("rlcoach_rate_recovery 1-3 in BakkesMod's Bindings tab.");
+		// "v1.0" (the build number is for BakkesMod and the log, not for players)
+		const std::string v = VERSION_PATCH > 0 ? std::format("v{}.{}.{}", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH) : std::format("v{}.{}", VERSION_MAJOR, VERSION_MINOR);
+		ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize(v.c_str()).x);
+		ImGui::TextColored(kMuted, "%s", v.c_str());
+	}
+	ImGui::Spacing();
+
+	// ---- Status tiles ----
+	const bool rec = *recordingEnabled;
+	const bool simReady = predictor.Ready();
+	const bool simMissing = !simReady && predictor.Status().rfind("No arena files", 0) == 0;
+	{
+		struct Tile { const char* label; std::string value; ImVec4 color; std::string sub; };
+		const Tile tiles[3] = {
+			{ "RECORDING", rec ? "ON" : "OFF", rec ? kGood : kMuted, rec ? "every rep is saved" : "turn it on below" },
+			{ "SIMULATOR", simReady ? "READY" : simMissing ? "SETUP" : "LOADING", simReady ? kGood : simMissing ? kOrange : kWarn, simReady ? "fix, best line, Combine" : simMissing ? "arena files needed" : "a moment..." },
+			{ "THIS SESSION", std::to_string(repsThisSession), kAccent, repsThisSession == 1 ? "rep saved" : "reps saved" },
+		};
+		ImFont* cf = uiFonts[UiFonts::Caps] ? uiFonts[UiFonts::Caps] : ImGui::GetFont();
+		ImFont* bf = uiFonts[UiFonts::Hero] ? uiFonts[UiFonts::Hero] : ImGui::GetFont();
+		const float valSize = bf == ImGui::GetFont() ? ImGui::GetFontSize() * 1.6f : bf->FontSize * 0.42f, subSize = ImGui::GetFontSize() * 0.92f;
+		const float gap = 10.0f * S, w = (ImGui::GetContentRegionAvail().x - 2 * gap) / 3.0f;
+		const float pad = 7.0f * S, h = pad + cf->FontSize + valSize + subSize + pad + 6.0f * S;
+		const ImVec2 o = ImGui::GetCursorScreenPos();
+		for (int i = 0; i < 3; i++)
+		{
+			const ImVec2 a(o.x + i * (w + gap), o.y), b(a.x + w, a.y + h);
+			SlantQuad(dl, a, b, U32(kPanel));
+			SlantQuad(dl, ImVec2(a.x, b.y - 4.0f * S), b, U32(tiles[i].color));
+			const float lean = h * kSlant * 0.5f, x = a.x + lean + 6.0f * S;
+			float y = a.y + pad;
+			dl->AddText(cf, cf->FontSize, ImVec2(x, y), U32(kMuted), tiles[i].label);
+			y += cf->FontSize;
+			dl->AddText(bf, valSize, ImVec2(x - 2.0f * S, y), U32(tiles[i].color), tiles[i].value.c_str());
+			y += valSize;
+			dl->AddText(ImGui::GetFont(), subSize, ImVec2(x - lean * 0.6f, y), U32(kSub), tiles[i].sub.c_str());
+		}
+		ImGui::Dummy(ImVec2(0, h + 4.0f * S));
 	}
 
-	if (ImGui::CollapsingHeader("Panel and units")) RenderLookSettings();
-	if (ImGui::CollapsingHeader("Controller overlay")) RenderPadSettings();
-	if (ImGui::CollapsingHeader("Storage and sharing")) RenderStorageSettings();
-
-	if (ImGui::CollapsingHeader("Coaching checks"))
+	// ---- The switches you use most ----
 	{
-		ImGui::TextWrapped("Known mistakes for each mechanic, from how top players coach it. A check only shows up in your "
-			"notes once your rated reps back it: it has to happen clearly more on your misses than on your goals.");
+		bool r = rec;
+		if (Checkbox("Record reps", &r)) setCvar("road2_recording", r ? 1.0f : 0.0f);
+		ImGui::SameLine(0, 22.0f * S);
+		bool manual = *manualGrading;
+		if (Checkbox("Rate with the number keys", &manual)) setCvar("road2_manual_grading", manual ? 1.0f : 0.0f);
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("1-5 rate the shot, 6-8 the recovery.\nTurn off to free up those keys.");
+		ImGui::SameLine(0, 22.0f * S);
+		bool hud = *hudEnabled;
+		if (Checkbox("Show the panel", &hud)) setCvar("road2_hud", hud ? 1.0f : 0.0f);
+		ImGui::Spacing();
+		if (AccentButton("Open Road2", ImVec2(180.0f * S, 0)))
+			gameWrapper->Execute([this](GameWrapper*) { cvarManager->executeCommand("togglemenu " + GetMenuName()); });
+		ImGui::SameLine();
+		ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+		ImGui::TextWrapped("Bind road2_viewer to a key (BakkesMod's Bindings tab) to open it in game.");
+		ImGui::PopStyleColor();
+	}
+
+	// ---- One-time setup, until the arena files are in ----
+	if (!simReady)
+	{
+		ImGui::Spacing();
+		const ImVec2 a = ImGui::GetCursorScreenPos();
+		const float w = ImGui::GetContentRegionAvail().x;
+		dl->ChannelsSplit(2);
+		dl->ChannelsSetCurrent(1);
+		ImGui::Indent(16.0f * S);
+		ImGui::Dummy(ImVec2(0, 4.0f * S));
+		{
+			CapsFont f(uiFonts[UiFonts::Head]);
+			ImGui::TextColored(kOrange, "ONE-TIME SETUP: THE ARENA FILES");
+		}
+		ImGui::PushTextWrapPos(a.x + w - 16.0f * S - ImGui::GetWindowPos().x);
+		ImGui::TextColored(kSub, "The smallest fix, the best line, ball prediction and the Combine run in a physics sim that needs the arena's shapes. Two minutes, once:");
+		const char* steps[4] = {
+			"Download RLArenaCollisionDumper.exe: the button below copies the link (the .exe itself, not the green Code button's zip).",
+			"Put it in the data folder (the button below opens it).",
+			"Go into free play on a standard arena (DFH Stadium), and while you're in, run the exe.",
+			"Come back here and click Load arena files.",
+		};
+		for (int i = 0; i < 4; i++)
+		{
+			{
+				CapsFont f;
+				ImGui::TextColored(kOrange, "%d", i + 1);
+			}
+			ImGui::SameLine(0, 10.0f * S);
+			ImGui::TextWrapped("%s", steps[i]);
+		}
+		ImGui::PopTextWrapPos();
+		ImGui::Spacing();
+		if (AccentButton("Load arena files")) gameWrapper->Execute([this](GameWrapper*) { StartPredictor(); });
+		ImGui::SameLine();
+		if (QuietButton("Open the data folder")) OpenDataFolder();
+		ImGui::SameLine();
+		// (Nov 6, Coop's clean-install test) the GitHub page's big green button downloads the source, not the program
+		if (QuietButton("Copy the download link")) ImGui::SetClipboardText("https://github.com/ZealanL/RLArenaCollisionDumper/releases/download/v1.0.0/RLArenaCollisionDumper.exe");
+		if (!simMissing) { ImGui::SameLine(); ImGui::TextColored(kMuted, "%s", predictor.Status().c_str()); }   // loading, or why it failed
+		ImGui::Dummy(ImVec2(0, 6.0f * S));
+		ImGui::Unindent(16.0f * S);
+		const ImVec2 b(a.x + w, ImGui::GetCursorScreenPos().y);
+		dl->ChannelsSetCurrent(0);
+		dl->AddRectFilled(a, b, U32(kPanel), 6.0f * S);
+		dl->AddRectFilled(a, ImVec2(a.x + 4.0f * S, b.y), U32(kOrange));
+		dl->ChannelsMerge();
+	}
+
+	// ---- Sections ----
+	if (Section("Recording and rating"))
+	{
+		bool np = *useNumpad;
+		if (Checkbox("Rate with the numpad instead of the number row", &np)) setCvar("road2_rate_numpad", np ? 1.0f : 0.0f);
+		float maxS = *maxRepSeconds;
+		if (SliderFloat("Longest rep (seconds)", &maxS, 2.0f, 30.0f, "%.0f s")) setCvar("road2_max_rep_seconds", maxS);
+		float post = *postRollSeconds;
+		if (SliderFloat("Keep recording after the shot, at least", &post, 0.0f, 5.0f, "%.1f s")) setCvar("road2_postroll_seconds", post);
+		float postMax = *postRollMaxSeconds;
+		if (SliderFloat("...and until you've recovered, at most", &postMax, 1.0f, 8.0f, "%.1f s")) setCvar("road2_postroll_max_seconds", postMax);
+		ImGui::Spacing();
+		Heading("Rating keys");
+		const char* keys[8] = { "Missed", "Close", "Bad shot, went in", "Good shot, went in", "Great shot, went in", "Recovery: poor", "Recovery: eh", "Recovery: good" };
+		for (int i = 0; i < 8; i++)
+		{
+			{
+				CapsFont f;
+				ImGui::TextColored(i < 5 ? GradeColor(i + 1) : kAccentText, "%d", i + 1);
+			}
+			ImGui::SameLine(0, 8.0f * S);
+			ImGui::TextColored(kSub, "%s", keys[i]);
+			if (i != 4 && i != 7) ImGui::SameLine(0, 18.0f * S);
+		}
+		note("Press during a rep to rate that rep; after it, to rate the last one saved.");
+	}
+
+	if (Section("Panel and window")) RenderLookSettings();
+	if (Section("Controller overlay")) RenderPadSettings();
+	if (Section("Storage and sharing")) RenderStorageSettings();
+
+	if (Section("Simulator and ball prediction"))
+	{
+		ImGui::TextColored(simReady ? kGood : simMissing ? kOrange : kWarn, "%s", predictor.Status().c_str());
+		if (simReady)
+		{
+			bool lp = *livePrediction;
+			if (Checkbox("Show the predicted ball path while you play", &lp)) setCvar("road2_live_prediction", lp ? 1.0f : 0.0f);
+		}
+		else if (QuietButton("Load arena files")) gameWrapper->Execute([this](GameWrapper*) { StartPredictor(); });
+		if (simReady && *devTools)
+		{
+			if (QuietButton("Run accuracy test on saved reps")) predictor.StartAccuracyTest(writer->Folder());
+			std::string ts = predictor.TestStatus();
+			if (!ts.empty()) ImGui::TextWrapped("%s", ts.c_str());
+			bool mir = predictor.mirrorX;
+			if (Checkbox("Mirror X (only if the accuracy test says mirrored is better)", &mir)) setCvar("road2_pred_mirror", mir ? 1.0f : 0.0f);
+		}
+	}
+
+	if (Section("Coaching checks"))
+	{
+		note("Known mistakes for each mechanic, from how top players coach it. A check only shows up in your notes once your "
+			"rated reps back it: it has to happen clearly more on your misses than on your goals.");
 		std::vector<std::string> flicks = habitBook.FlickSummary();
 		if (!flicks.empty())
 		{
-			ImGui::TextDisabled("Your flicks off a dribble:");
+			Heading("Your flicks off a dribble");
 			for (const std::string& f : flicks) ImGui::BulletText("%s", f.c_str());
 		}
 		std::vector<std::string> lines = coachBook.Summary();
-		if (lines.empty()) ImGui::TextDisabled("Still measuring your reps...");
+		Heading("Checks");
+		if (lines.empty()) ImGui::TextColored(kMuted, "Still measuring your reps...");
 		for (const std::string& l : lines)
 		{
-			bool on = l.rfind("[on]", 0) == 0;
-			ImGui::PushStyleColor(ImGuiCol_Text, on ? ImVec4(0.55f, 0.85f, 0.55f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+			const bool on = l.rfind("[on]", 0) == 0;
+			ImGui::PushStyleColor(ImGuiCol_Text, on ? kGood : kMuted);
 			ImGui::TextWrapped("%s", l.c_str());
 			ImGui::PopStyleColor();
 		}
 	}
 
-	if (ImGui::CollapsingHeader("Ball prediction (RocketSim)"))
+	if (Section("Keys and commands"))
 	{
-		ImGui::Text("Status: %s", predictor.Status().c_str());
-		if (!predictor.Ready())
+		struct Cmd { const char* cmd; const char* what; };
+		const Cmd cmds[] = {
+			{ "road2_viewer", "open or close the Road2 window" },
+			{ "road2_toggle_recording", "recording on or off" },
+			{ "road2_rate 1-5", "rate the last rep (road2_rate_recovery 1-3: its recovery)" },
+			{ "road2_practice_retry", "practice: go again" },
+			{ "road2_practice_exit", "practice: stop" },
+			{ "road2_hud_toggle_compact", "full or compact panel" },
+		};
+		note("Bind these in BakkesMod's Bindings tab (a controller button works too).");
+		for (const Cmd& c : cmds)
 		{
-			ImGui::TextWrapped("Needs arena files: download RLArenaCollisionDumper.exe, put it in the folder below, "
-				"launch Rocket League without EAC, go into free play on a standard arena (like DFH Stadium), then run the exe. "
-				"It creates a collision_meshes folder next to itself. Then click Load.");
-			if (writer) ImGui::TextWrapped("Folder: %s", writer->Folder().string().c_str());
-			if (ImGui::Button("Load arena files")) gameWrapper->Execute([this](GameWrapper*) { StartPredictor(); });
-		}
-		else
-		{
-			bool lp = *livePrediction;
-			if (ImGui::Checkbox("Show predicted ball path while playing", &lp)) setCvar("rlcoach_live_prediction", lp ? 1.0f : 0.0f);
-			if (ImGui::Button("Run accuracy test on saved reps"))
-			{
-				auto root = writer->Folder();
-				predictor.StartAccuracyTest(root);
-			}
-			std::string ts = predictor.TestStatus();
-			if (!ts.empty()) ImGui::TextWrapped("%s", ts.c_str());
-			bool mir = predictor.mirrorX;
-			if (ImGui::Checkbox("Mirror X (only if the accuracy test says mirrored is better)", &mir)) setCvar("rlcoach_pred_mirror", mir ? 1.0f : 0.0f);
+			if (uiFonts[UiFonts::Mono]) ImGui::PushFont(uiFonts[UiFonts::Mono]);
+			ImGui::TextColored(kAccentText, "%s", c.cmd);
+			if (uiFonts[UiFonts::Mono]) ImGui::PopFont();
+			ImGui::SameLine(0, 10.0f * S);
+			ImGui::TextColored(kSub, "%s", c.what);
 		}
 	}
 
-	if (ImGui::CollapsingHeader("Tools"))
+	if (Section("Tools"))
 	{
-		bool st = *showTiming;
-		if (ImGui::Checkbox("Show plugin timing on the panel", &st)) setCvar("rlcoach_show_timing", st ? 1.0f : 0.0f);
-		ImGui::SameLine();
-		ImGui::TextDisabled("(how many milliseconds RL Coach adds; a 240 fps frame is 4.2 ms)");
-		if (writer) ImGui::TextWrapped("Data folder: %s", writer->Folder().string().c_str());
-		if (ImGui::Button("Test: move car and ball"))
-			gameWrapper->Execute([this](GameWrapper*) { TestSetState(); });
-		ImGui::SameLine();
-		ImGui::TextDisabled("(try it in free play and in a training pack)");
+		if (writer) ImGui::TextColored(kSub, "Data folder: %s", writer->Folder().string().c_str());
+		if (QuietButton("Open the data folder")) OpenDataFolder();
+		bool dev = *devTools;
+		if (Checkbox("Developer tools", &dev)) setCvar("road2_dev_tools", dev ? 1.0f : 0.0f);
+		if (dev)
+		{
+			bool st = *showTiming;
+			if (Checkbox("Show plugin timing on the panel", &st)) setCvar("road2_show_timing", st ? 1.0f : 0.0f);
+			ImGui::SameLine();
+			ImGui::TextColored(kMuted, "(how many milliseconds Road2 adds; a 240 fps frame is 4.2 ms)");
+			if (QuietButton("Test: move car and ball"))
+				gameWrapper->Execute([this](GameWrapper*) { TestSetState(); });
+			ImGui::SameLine();
+			ImGui::TextColored(kMuted, "(try it in free play and in a training pack)");
+		}
 	}
+	ImGui::Spacing();
+	note("Road2 is free and open source (MIT). A fan project: not official, and not endorsed by Epic Games or Psyonix.");
+	ImGui::PopItemWidth();
+	if (fontsIn) ImGui::PopFont();
 }

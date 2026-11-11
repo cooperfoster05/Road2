@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "RLCoach.h"
+#include "UiStyle.h"
 #include "Ratings.h"
 #include "HudDraw.h"
 #include "ControllerOverlay.h"
@@ -18,30 +19,33 @@ using namespace HudDraw;
 
 namespace
 {
-	// Panel colors: the rep viewer's look (Oct 24): navy, thin blue-grey outlines, cyan for the name
-	const Rgba kPanelBg{ 11, 18, 32, 226 };
-	const Rgba kHeaderBg{ 14, 23, 39, 238 };
-	const Rgba kBorder{ 35, 57, 90, 255 };
-	const Rgba kTitle{ 56, 189, 248, 255 };
-	const Rgba kSection{ 141, 160, 188, 255 };
-	const Rgba kDivider{ 35, 57, 90, 200 };
-	const Rgba kTrack{ 24, 38, 61, 255 };
+	// Panel colors: style A (Nov 4, the design canvas's panel mock): navy, the team blue and orange, slanted pieces.
+	// The panel draws with the game's own text (the canvas can't use the window's fonts), so the look is in the shapes.
+	const Rgba kPanelBg{ 11, 15, 26, 235 };
+	const Rgba kHeaderBg{ 14, 19, 34, 245 };
+	const Rgba kBorder{ 30, 42, 68, 255 };
+	const Rgba kTitle{ 238, 242, 248, 255 };
+	const Rgba kOrange{ 255, 138, 31, 255 };
+	const Rgba kSection{ 133, 146, 171, 255 };
+	const Rgba kDivider{ 30, 42, 68, 230 };
+	const Rgba kTrack{ 26, 36, 64, 255 };
+	const Rgba kCallout{ 18, 26, 44, 245 };
 
 	// The panel's lines come with colors from the old palette (here and in RLCoach.cpp); this maps them onto the new one
 	Rgba Restyle(unsigned char r, unsigned char g, unsigned char b)
 	{
 		struct Map { unsigned char r, g, b; Rgba to; };
 		static const Map kMap[] = {
-			{ 240, 244, 250, { 230, 237, 247, 255 } }, { 238, 242, 250, { 230, 237, 247, 255 } }, { 225, 230, 238, { 230, 237, 247, 255 } },
-			{ 220, 224, 232, { 230, 237, 247, 255 } }, { 200, 205, 215, { 200, 212, 228, 255 } }, { 190, 190, 190, { 169, 184, 207, 255 } },
-			{ 150, 160, 178, { 169, 184, 207, 255 } }, { 130, 138, 152, { 141, 160, 188, 255 } }, { 110, 118, 132, { 141, 160, 188, 255 } },
-			{ 115, 230, 115, { 74, 222, 128, 255 } }, { 120, 230, 120, { 74, 222, 128, 255 } },
-			{ 255, 204, 77, { 251, 191, 36, 255 } }, { 255, 200, 0, { 251, 191, 36, 255 } }, { 255, 200, 60, { 251, 191, 36, 255 } },
-			{ 200, 170, 60, { 251, 191, 36, 255 } }, { 255, 160, 80, { 251, 146, 60, 255 } }, { 255, 205, 130, { 253, 186, 116, 255 } },
-			{ 255, 115, 102, { 248, 113, 113, 255 } }, { 255, 120, 120, { 248, 113, 113, 255 } }, { 255, 90, 90, { 248, 113, 113, 255 } },
-			{ 153, 204, 255, { 94, 200, 229, 255 } }, { 160, 205, 255, { 125, 211, 252, 255 } }, { 120, 160, 255, { 56, 189, 248, 255 } },
-			{ 80, 200, 230, { 56, 189, 248, 255 } }, { 120, 200, 255, { 56, 189, 248, 255 } },
-			{ 200, 200, 200, { 169, 184, 207, 255 } }, { 160, 160, 160, { 141, 160, 188, 255 } },
+			{ 240, 244, 250, { 238, 242, 248, 255 } }, { 238, 242, 250, { 238, 242, 248, 255 } }, { 225, 230, 238, { 238, 242, 248, 255 } },
+			{ 220, 224, 232, { 238, 242, 248, 255 } }, { 200, 205, 215, { 200, 212, 228, 255 } }, { 190, 190, 190, { 167, 179, 200, 255 } },
+			{ 150, 160, 178, { 167, 179, 200, 255 } }, { 130, 138, 152, { 133, 146, 171, 255 } }, { 110, 118, 132, { 133, 146, 171, 255 } },
+			{ 115, 230, 115, { 61, 220, 132, 255 } }, { 120, 230, 120, { 61, 220, 132, 255 } },
+			{ 255, 204, 77, { 255, 176, 32, 255 } }, { 255, 200, 0, { 255, 176, 32, 255 } }, { 255, 200, 60, { 255, 176, 32, 255 } },
+			{ 200, 170, 60, { 255, 176, 32, 255 } }, { 255, 160, 80, { 255, 138, 31, 255 } }, { 255, 205, 130, { 253, 186, 116, 255 } },
+			{ 255, 115, 102, { 255, 90, 90, 255 } }, { 255, 120, 120, { 255, 90, 90, 255 } }, { 255, 90, 90, { 255, 90, 90, 255 } },
+			{ 153, 204, 255, { 94, 200, 229, 255 } }, { 160, 205, 255, { 125, 211, 252, 255 } }, { 120, 160, 255, { 125, 184, 255, 255 } },
+			{ 80, 200, 230, { 125, 184, 255, 255 } }, { 120, 200, 255, { 125, 184, 255, 255 } },
+			{ 200, 200, 200, { 167, 179, 200, 255 } }, { 160, 160, 160, { 133, 146, 171, 255 } },
 		};
 		for (const Map& m : kMap) if (m.r == r && m.g == g && m.b == b) return m.to;
 		return Rgba{ r, g, b, 255 };
@@ -50,12 +54,12 @@ namespace
 	// The grade color (as in the rep viewer: 5 cyan, 4 green, 3 amber, 2 orange, 1 red)
 	Rgba GradeRgba(int o)
 	{
-		if (o >= 5) return { 34, 211, 238, 255 };
-		if (o == 4) return { 74, 222, 128, 255 };
-		if (o == 3) return { 251, 191, 36, 255 };
-		if (o == 2) return { 251, 146, 60, 255 };
-		if (o == 1) return { 248, 113, 113, 255 };
-		return { 141, 160, 188, 255 };
+		if (o >= 5) return { 45, 226, 230, 255 };
+		if (o == 4) return { 61, 220, 132, 255 };
+		if (o == 3) return { 255, 176, 32, 255 };
+		if (o == 2) return { 255, 138, 31, 255 };
+		if (o == 1) return { 255, 90, 90, 255 };
+		return { 133, 146, 171, 255 };
 	}
 }
 
@@ -69,6 +73,7 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 	if (car.IsNull()) return;
 	DrawBotStatus(canvas);
 	DrawCombineHud(canvas);
+	DrawLearnRecoveryHud(canvas);
 	if (combinePhase != CombinePhase::Off) return;   // the Combine shows its own line only
 
 	// World overlays first, so the panel draws on top of them
@@ -140,11 +145,12 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 	// One line on the panel. Detail lines are hidden in compact mode.
 	struct HudLine
 	{
-		enum Kind { Text, Section } kind = Text;
+		enum Kind { Text, Section, Callout, Keys, RecoveryKeys } kind = Text;   // Callout: the thing to fix (orange edge); Keys: the rating keys as chips
 		std::vector<PanelChunk> chunks;
 		float scale = 1.0f;
 		bool detail = false;
-		int grade = 0;      // 1-5: a small grade gauge leads the line
+		int grade = 0;      // 1-5: a slanted grade badge leads the line
+		int picked = 0;     // Keys / RecoveryKeys: the one you pressed (0 none)
 	};
 	std::vector<HudLine> lines;
 	auto add = [&](std::string text, unsigned char r = 225, unsigned char g = 230, unsigned char b = 238, bool detail = false, float scale = 1.0f) {
@@ -187,12 +193,12 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 
 	// Mode tag in the header
 	std::string tag;
-	Rgba tagCol{ 141, 160, 188, 255 };
+	Rgba tagCol{ 133, 146, 171, 255 };
 
 	if (practiceState != PracticeState::Off)
 	{
 		tag = "PRACTICE";
-		tagCol = { 74, 222, 128, 255 };
+		tagCol = { 61, 220, 132, 255 };
 		int pct = static_cast<int>(practiceSpeed * 100.0f + 0.5f);
 		add(practiceLabel, 240, 244, 250);
 		add(std::format("{}% speed   {:.2f}s lead-in{}", pct, practiceLeadIn, practiceAutoRamp ? "   auto-ramp" : ""), 150, 160, 178, true);
@@ -200,7 +206,7 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 		else add("GO", 115, 230, 115);
 		if (learnActive)
 		{
-			tag = "LEARN";
+			tag = "LEARN"; tagCol = { 255, 138, 31, 255 };
 			const bool lastStage = learnStage + 1 >= static_cast<int>(learnLesson.stages.size());
 			if (lastStage && learnProgress.completed) add("Lesson complete", 74, 222, 128);
 			else if (!learnWarmup && learnStage == learnProgress.unlocked)
@@ -222,12 +228,12 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 			for (const PanelGradeLine& gl : practiceResultLines) addChunks(gl.chunks, false, gl.grade);
 		}
 		if (!practiceRefLabel.empty()) add(practiceRefLabel, 130, 138, 152, true);
-		add("Retry: rlcoach_practice_retry   Stop: rlcoach_practice_exit", 110, 118, 132, true);
+		add("Retry: road2_practice_retry   Stop: road2_practice_exit", 110, 118, 132, true);
 	}
 	else if (viewerActive && !viewerFrames.empty())
 	{
 		tag = "REPLAY";
-		tagCol = { 56, 189, 248, 255 };
+		tagCol = { 46, 139, 255, 255 };
 		int i = std::min(static_cast<int>(viewerPlayhead), static_cast<int>(viewerFrames.size()) - 1);
 		const Frame& f = viewerFrames[i];
 		std::string when = viewerRep.savedAt.size() >= 19 ? viewerRep.savedAt.substr(5, 11) : viewerRep.savedAt;
@@ -294,14 +300,14 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 	else
 	{
 		float speed = car.GetVelocity().magnitude();
-		if (!*recordingEnabled) { tag = "OFF"; add("Recording off  (F2 > Plugins > RLCoach)", 150, 160, 178); }
+		if (!*recordingEnabled) { tag = "OFF"; add("Recording off  (F2 > Plugins > Road2)", 150, 160, 178); }
 		else if (state == RepState::Recording && !pendingEndReason.empty())
 		{
-			tag = "REC"; tagCol = { 248, 113, 113, 255 };
+			tag = "REC"; tagCol = { 255, 90, 90, 255 };
 			add(std::format("Shot over ({}), catching your recovery", pendingEndReason), 240, 244, 250);
 		}
-		else if (state == RepState::Recording) { tag = "REC"; tagCol = { 248, 113, 113, 255 }; add("Recording rep", 240, 244, 250); }
-		else if (state == RepState::Armed) { tag = "ARMED"; tagCol = { 251, 191, 36, 255 }; add("Rep starts when you move", 240, 244, 250); }
+		else if (state == RepState::Recording) { tag = "REC"; tagCol = { 255, 90, 90, 255 }; add("Recording rep", 240, 244, 250); }
+		else if (state == RepState::Armed) { tag = "ARMED"; tagCol = { 255, 176, 32, 255 }; add("Rep starts when you move", 240, 244, 250); }
 		else { tag = "READY"; add("Reset the shot or ball to start", 200, 205, 215); }
 
 		if (*recordingEnabled) add(std::format("{} rep{} this session", repsThisSession, repsThisSession == 1 ? "" : "s"), 150, 160, 178, true);
@@ -322,24 +328,25 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 			for (const PanelGradeLine& gl : lastRepGradeLines) addChunks(gl.chunks, false, gl.grade);
 			if (*manualGrading)
 			{
-				if (lastRating == 0) add("Rate it: 1 Missed  2 Close  3 Bad-in  4 Good-in  5 Great-in", 255, 200, 0);
-				else add(std::format("You rated it {}: {}", lastRating, RatingName(lastRating)), 120, 230, 120);
-				if (lastRecovery == 0) add("Recovery: 6 Poor  7 Eh  8 Good", 200, 170, 60, true);
-				else
-				{
-					unsigned char rr, rg, rb;
-					RecoveryRgb(lastRecovery, rr, rg, rb);
-					add(std::format("Recovery: {}", RecoveryName(lastRecovery)), rr, rg, rb, true);
-				}
+				// (style A) the keys as chips, the one you pressed lit up
+				section(lastRating == 0 ? "RATE IT" : "YOU RATED IT");
+				HudLine k; k.kind = HudLine::Keys; k.picked = lastRating; lines.push_back(k);
+				HudLine rk; rk.kind = HudLine::RecoveryKeys; rk.picked = lastRecovery; rk.detail = true; lines.push_back(rk);
 			}
 			else if (lastRating > 0) add(std::format("You rated it {}: {}", lastRating, RatingName(lastRating)), 120, 230, 120);
 		}
 		if (!statusMessage.empty()) add(statusMessage, 130, 138, 152, true);
 	}
 
-	if (*showTiming)
+	if (*showTiming && *devTools)
 		add(std::format("Plugin cost  tick {:.3f} ms (peak {:.2f})   draw {:.2f} ms (peak {:.2f})",
 			perfTick.avgMs + perfInput.avgMs, perfTick.peakMs + perfInput.peakMs, perfDraw.avgMs, perfDraw.peakMs), 130, 200, 160);
+
+	// The thing to fix (the replay's Fix line, the last rep's Fix and coaching cue) as an orange-edged callout
+	for (HudLine& l : lines)
+		if (l.kind == HudLine::Text && !l.chunks.empty() && l.grade == 0 &&
+			(l.chunks[0].text.rfind("Fix", 0) == 0 || (l.chunks[0].r == 255 && l.chunks[0].g == 205 && l.chunks[0].b == 130)))
+			l.kind = HudLine::Callout;
 
 	// Compact mode drops the detail lines (and any section left empty)
 	if (*hudCompact)
@@ -369,38 +376,47 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 	const float gaugeR = 10.0f * S, gaugeW = gaugeR * 2.0f + 10.0f * S;   // the small grade gauge and the room it takes
 
 	auto lineHeight = [&](const HudLine& l) {
-		if (l.kind == HudLine::Section) return lineH * 0.8f + 9.0f * S;
-		return l.grade > 0 ? std::max(lineH * l.scale, gaugeR * 2.0f + 6.0f * S) : lineH * l.scale;
+		if (l.kind == HudLine::Section) return lineH * 0.8f + 11.0f * S;
+		if (l.kind == HudLine::Callout) return lineH + 10.0f * S;
+		if (l.kind == HudLine::Keys || l.kind == HudLine::RecoveryKeys) return lineH + 9.0f * S;
+		return l.grade > 0 ? std::max(lineH * l.scale, gaugeR * 2.0f + 8.0f * S) : lineH * l.scale;
 	};
 	float bodyH = 0.0f, width = 260.0f * S;
 	for (const HudLine& l : lines)
 	{
 		bodyH += lineHeight(l);
-		float w = l.grade > 0 ? gaugeW : 0.0f;
+		float w = l.grade > 0 ? gaugeW : l.kind == HudLine::Callout ? 14.0f * S : 0.0f;
+		if (l.kind == HudLine::Keys) w = 330.0f * S;
 		for (const PanelChunk& c : l.chunks) w += TextSize(canvas, c.text, l.scale * textScale).X;
 		width = std::max(width, w + padding * 2);
 	}
-	float tagW = TextSize(canvas, tag, 0.75f * textScale).X + (tag == "REC" ? 28.0f : 20.0f) * S;
-	width = std::max(width, TextSize(canvas, "ROAD2", 1.0f * textScale).X + tagW + padding * 3);
+	float tagW = TextSize(canvas, tag, 0.75f * textScale).X + (tag == "REC" ? 30.0f : 22.0f) * S;
+	width = std::max(width, TextSize(canvas, "ROAD2", 1.1f * textScale).X + tagW + padding * 3);
 	const float height = headerH + padding * 0.7f + bodyH + padding * 0.7f;
 
 	// ---- Draw ----
-	RoundBox(canvas, x, y, width, height, radius, kPanelBg);
-	RoundBox(canvas, x, y, width, headerH, radius, kHeaderBg);
-	Box(canvas, x, y + headerH - radius, width, radius, kHeaderBg);   // square off the header's bottom corners
+	const float rr = 5.0f * S;   // style A: nearly square corners
+	RoundBox(canvas, x, y, width, height, rr, kPanelBg);
+	RoundBox(canvas, x, y, width, headerH, rr, kHeaderBg);
+	Box(canvas, x, y + headerH - rr, width, rr, kHeaderBg);   // square off the header's bottom corners
 	Box(canvas, x + 1.0f, y + headerH, width - 2.0f, 1.0f, kDivider);
-	RoundOutline(canvas, x, y, width, height, radius, kBorder);
+	RoundOutline(canvas, x, y, width, height, rr, kBorder);
+	(void)radius;
 
-	float titleH = TextSize(canvas, "ROAD2", textScale).Y;
-	Text(canvas, x + padding, y + (headerH - titleH) * 0.5f, "ROAD2", textScale, kTitle);
+	// The wordmark: ROAD in white, the 2 in team orange
+	const float ts = 1.1f * textScale;
+	float titleH = TextSize(canvas, "ROAD", ts).Y;
+	Text(canvas, x + padding, y + (headerH - titleH) * 0.5f, "ROAD", ts, kTitle);
+	Text(canvas, x + padding + TextSize(canvas, "ROAD", ts).X, y + (headerH - titleH) * 0.5f, "2", ts, kOrange);
 
-	// Mode tag pill
-	float pillH = headerH - 11.0f * S;
+	// The mode tag: a slanted chip filled with its color, dark capitals (a quiet dark chip when off)
+	float pillH = headerH - 10.0f * S;
 	float pillX = x + width - padding - tagW, pillY = y + (headerH - pillH) * 0.5f;
-	RoundBox(canvas, pillX, pillY, tagW, pillH, pillH * 0.5f, Rgba{ tagCol.r, tagCol.g, tagCol.b, 40 });
-	RoundOutline(canvas, pillX, pillY, tagW, pillH, pillH * 0.5f, Rgba{ tagCol.r, tagCol.g, tagCol.b, 150 });
-	if (tag == "REC") Disc(canvas, pillX + 9.0f * S, pillY + pillH * 0.5f, 3.0f * S, tagCol);
-	TextCentered(canvas, pillX + tagW * 0.5f + (tag == "REC" ? 4.0f * S : 0.0f), pillY + pillH * 0.5f, tag, 0.75f * textScale, tagCol);
+	const bool quietTag = tag == "OFF" || tag == "READY";
+	SlantFill(canvas, pillX, pillY, tagW, pillH, quietTag ? kTrack : tagCol);
+	const Rgba tagText = quietTag ? Rgba{ 167, 179, 200, 255 } : Rgba{ 10, 14, 24, 255 };
+	if (tag == "REC") Disc(canvas, pillX + 10.0f * S, pillY + pillH * 0.5f, 3.0f * S, tagText);
+	TextCentered(canvas, pillX + tagW * 0.5f + (tag == "REC" ? 5.0f * S : 0.0f), pillY + pillH * 0.5f, tag, 0.75f * textScale, tagText);
 
 	float cy = y + headerH + padding * 0.7f;
 	bool first = true;
@@ -410,21 +426,64 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 		const float lh = lineHeight(l);
 		if (l.kind == HudLine::Section)
 		{
-			if (!first) Box(canvas, cx, cy + 3.0f * S, width - padding * 2, 1.0f, kDivider);
-			Text(canvas, cx, cy + 7.0f * S, l.chunks[0].text, l.scale * textScale, kSection, false);
+			// the name in small capitals with a rule after it
+			const float sy = cy + 7.0f * S;
+			const Vector2F tsz = TextSize(canvas, l.chunks[0].text, l.scale * textScale);
+			Text(canvas, cx, sy, l.chunks[0].text, l.scale * textScale, kSection, false);
+			Box(canvas, cx + tsz.X + 8.0f * S, sy + tsz.Y * 0.5f, width - padding * 2 - tsz.X - 8.0f * S, 1.0f, kDivider);
+		}
+		else if (l.kind == HudLine::Callout)
+		{
+			// the thing to fix: a dark row with an orange edge
+			Box(canvas, cx, cy + 3.0f * S, width - padding * 2, lh - 6.0f * S, kCallout);
+			Box(canvas, cx, cy + 3.0f * S, 3.0f * S, lh - 6.0f * S, kOrange);
+			float tx = cx + 10.0f * S;
+			const float ty = cy + (lh - lineH) * 0.5f;
+			for (size_t k = 0; k < l.chunks.size(); k++)
+			{
+				const PanelChunk& c = l.chunks[k];
+				const Rgba col = k == 0 ? Rgba{ 255, 170, 90, 255 } : Restyle(c.r, c.g, c.b);
+				Text(canvas, tx, ty, c.text, l.scale * textScale, col);
+				tx += TextSize(canvas, c.text, l.scale * textScale).X;
+			}
+		}
+		else if (l.kind == HudLine::Keys || l.kind == HudLine::RecoveryKeys)
+		{
+			// the rating keys as slanted chips: each with its grade color along the bottom, the one you pressed filled
+			const bool rec = l.kind == HudLine::RecoveryKeys;
+			const char* labels5[5] = { "1 Missed", "2 Close", "3 Bad-in", "4 Good-in", "5 Great-in" };
+			const char* labels3[3] = { "6 Poor", "7 Eh", "8 Good" };
+			const int n = rec ? 3 : 5;
+			float kx = cx;
+			const float ch = lh - 7.0f * S, cyy = cy + 3.0f * S, sc = 0.72f * textScale;
+			if (rec)
+			{
+				Text(canvas, kx, cyy + (ch - TextSize(canvas, "RECOVERY", sc).Y) * 0.5f, "RECOVERY", sc, kSection, false);
+				kx += TextSize(canvas, "RECOVERY", sc).X + 10.0f * S;
+			}
+			const float gap = 4.0f * S, cw = (x + width - padding - kx - gap * (n - 1)) / n;
+			for (int k = 0; k < n; k++)
+			{
+				const int v = k + 1;
+				const Rgba gc = rec ? (v == 1 ? Rgba{ 255, 90, 90, 255 } : v == 2 ? Rgba{ 255, 176, 32, 255 } : Rgba{ 61, 220, 132, 255 }) : GradeRgba(v);
+				const bool on = l.picked == v;
+				const float bx = kx + k * (cw + gap);
+				SlantFill(canvas, bx, cyy, cw, ch, on ? gc : kTrack);
+				if (!on) Box(canvas, bx - ch * 0.106f + 1.0f, cyy + ch - 2.0f * S, cw, 2.0f * S, gc);
+				TextCentered(canvas, bx + cw * 0.5f, cyy + ch * 0.5f, rec ? labels3[k] : labels5[k], sc, on ? Rgba{ 10, 14, 24, 255 } : Rgba{ 200, 210, 226, 255 });
+			}
 		}
 		else
 		{
 			float ty = cy;
 			if (l.grade > 0)
 			{
-				// The grade as a small gauge, like the rep viewer's: a 270 degree ring filled from 1 to 5
-				const float gcx = cx + gaugeR, gcy = cy + lh * 0.5f - 1.0f * S;
-				const float pi = 3.14159265f, a0 = 0.75f * pi, sweep = 1.5f * pi;
+				// The grade as a slanted badge in its color with a hard shadow (style A, like the viewer's)
+				const float bs = gaugeR * 2.0f + 2.0f * S, bx = cx + 1.0f * S, by = cy + (lh - bs) * 0.5f;
 				const Rgba gc = GradeRgba(l.grade);
-				Arc(canvas, gcx, gcy, gaugeR, a0, a0 + sweep, 3.0f * S, kTrack);
-				Arc(canvas, gcx, gcy, gaugeR, a0, a0 + sweep * std::min(1.0f, l.grade / 5.0f), 3.0f * S, gc);
-				TextCentered(canvas, gcx, gcy, std::to_string(l.grade), 0.95f * textScale, Rgba{ 230, 237, 247, 255 });
+				SlantFill(canvas, bx + 3.0f * S, by + 3.0f * S, bs, bs, Rgba{ static_cast<unsigned char>(gc.r / 4), static_cast<unsigned char>(gc.g / 4), static_cast<unsigned char>(gc.b / 4), 255 });
+				SlantFill(canvas, bx, by, bs, bs, gc);
+				TextCentered(canvas, bx + bs * 0.5f, by + bs * 0.5f, std::to_string(l.grade), 1.05f * textScale, Rgba{ 10, 14, 24, 255 });
 				cx += gaugeW;
 				ty = cy + (lh - lineH * l.scale) * 0.5f - 1.0f * S;
 			}
@@ -466,42 +525,42 @@ void RLCoach::RegisterLookCvars()
 	ghostOpacity = std::make_shared<float>(0.7f);
 	windowSize = std::make_shared<float>(1.0f);
 
-	cvarManager->registerCvar("rlcoach_hud_compact", "0", "Panel shows only the essentials", true, true, 0, true, 1).bindTo(hudCompact);
-	cvarManager->registerCvar("rlcoach_hud_scale", "1", "Panel size", true, true, 0.6f, true, 2.0f).bindTo(hudScale);
-	cvarManager->registerCvar("rlcoach_hud_x", "0.016", "Panel left edge (fraction of the screen width)", true, true, 0, true, 1).bindTo(hudX);
-	cvarManager->registerCvar("rlcoach_hud_y", "0.165", "Panel top edge (fraction of the screen height)", true, true, 0, true, 1).bindTo(hudY);
-	cvarManager->registerCvar("rlcoach_speed_units", "0", "Speed units: 0 uu/s, 1 km/h, 2 mph", true, true, 0, true, 2).bindTo(speedUnits);
-	cvarManager->registerCvar("rlcoach_input_display", "2", "Inputs: 0 none, 1 text on the panel, 2 PS4 controller, 3 Xbox controller", true, true, 0, true, 3).bindTo(inputDisplay);
-	cvarManager->registerCvar("rlcoach_pad_x", "0.016", "Controller overlay left edge (fraction of the screen width)", true, true, 0, true, 1).bindTo(padX);
-	cvarManager->registerCvar("rlcoach_pad_y", "0.80", "Controller overlay top edge (fraction of the screen height)", true, true, 0, true, 1).bindTo(padY);
-	cvarManager->registerCvar("rlcoach_pad_scale", "1", "Controller overlay size", true, true, 0.5f, true, 2.5f).bindTo(padScale);
-	cvarManager->registerCvar("rlcoach_pad_theme", "0", "Controller overlay color: 0 dark, 1 light", true, true, 0, true, 1).bindTo(padTheme);
-	cvarManager->registerCvar("rlcoach_pad_jump", "1", "Controller button for jump", true, true, 0, true, PB_Count - 1).bindTo(padJump);
-	cvarManager->registerCvar("rlcoach_pad_boost", "2", "Controller button for boost", true, true, 0, true, PB_Count - 1).bindTo(padBoost);
-	cvarManager->registerCvar("rlcoach_pad_slide", "3", "Controller button for powerslide / air roll", true, true, 0, true, PB_Count - 1).bindTo(padSlide);
-	cvarManager->registerCvar("rlcoach_pad_roll_left", "0", "Controller button for air roll left", true, true, 0, true, PB_Count - 1).bindTo(padRollLeft);
-	cvarManager->registerCvar("rlcoach_pad_roll_right", "0", "Controller button for air roll right", true, true, 0, true, PB_Count - 1).bindTo(padRollRight);
+	cvarManager->registerCvar("road2_hud_compact", "0", "Panel shows only the essentials", true, true, 0, true, 1).bindTo(hudCompact);
+	cvarManager->registerCvar("road2_hud_scale", "1", "Panel size", true, true, 0.6f, true, 2.0f).bindTo(hudScale);
+	cvarManager->registerCvar("road2_hud_x", "0.016", "Panel left edge (fraction of the screen width)", true, true, 0, true, 1).bindTo(hudX);
+	cvarManager->registerCvar("road2_hud_y", "0.165", "Panel top edge (fraction of the screen height)", true, true, 0, true, 1).bindTo(hudY);
+	cvarManager->registerCvar("road2_speed_units", "0", "Speed units: 0 uu/s, 1 km/h, 2 mph", true, true, 0, true, 2).bindTo(speedUnits);
+	cvarManager->registerCvar("road2_input_display", "2", "Inputs: 0 none, 1 text on the panel, 2 PS4 controller, 3 Xbox controller", true, true, 0, true, 3).bindTo(inputDisplay);
+	cvarManager->registerCvar("road2_pad_x", "0.016", "Controller overlay left edge (fraction of the screen width)", true, true, 0, true, 1).bindTo(padX);
+	cvarManager->registerCvar("road2_pad_y", "0.80", "Controller overlay top edge (fraction of the screen height)", true, true, 0, true, 1).bindTo(padY);
+	cvarManager->registerCvar("road2_pad_scale", "1", "Controller overlay size", true, true, 0.5f, true, 2.5f).bindTo(padScale);
+	cvarManager->registerCvar("road2_pad_theme", "0", "Controller overlay color: 0 dark, 1 light", true, true, 0, true, 1).bindTo(padTheme);
+	cvarManager->registerCvar("road2_pad_jump", "1", "Controller button for jump", true, true, 0, true, PB_Count - 1).bindTo(padJump);
+	cvarManager->registerCvar("road2_pad_boost", "2", "Controller button for boost", true, true, 0, true, PB_Count - 1).bindTo(padBoost);
+	cvarManager->registerCvar("road2_pad_slide", "3", "Controller button for powerslide / air roll", true, true, 0, true, PB_Count - 1).bindTo(padSlide);
+	cvarManager->registerCvar("road2_pad_roll_left", "0", "Controller button for air roll left", true, true, 0, true, PB_Count - 1).bindTo(padRollLeft);
+	cvarManager->registerCvar("road2_pad_roll_right", "0", "Controller button for air roll right", true, true, 0, true, PB_Count - 1).bindTo(padRollRight);
 
-	cvarManager->registerCvar("rlcoach_ghost_opacity", "0.7", "Learn: the controller ghost when practicing a line (0 = off, 1 = solid)", true, true, 0, true, 1).bindTo(ghostOpacity);
-	cvarManager->registerCvar("rlcoach_window_size", "1", "Size of the Road2 window (rep viewer, Learn, the Combine)", true, true, 0.6f, true, 1.6f).bindTo(windowSize);
-	cvarManager->registerCvar("rlcoach_target_hitbox", "1", "Target car outline: 0 off, 1 for your touch, 2 for the earliest intercept", true, true, 0, true, 2).bindTo(targetHitbox);
+	cvarManager->registerCvar("road2_ghost_opacity", "0.7", "Learn: the controller ghost when practicing a line (0 = off, 1 = solid)", true, true, 0, true, 1).bindTo(ghostOpacity);
+	cvarManager->registerCvar("road2_window_size", "1", "Size of the Road2 window (rep viewer, Learn, the Combine)", true, true, 0.6f, true, 1.6f).bindTo(windowSize);
+	cvarManager->registerCvar("road2_target_hitbox", "1", "Target car outline: 0 off, 1 for your touch, 2 for the earliest intercept", true, true, 0, true, 2).bindTo(targetHitbox);
 
 	showUngraded = std::make_shared<bool>(false);
-	cvarManager->registerCvar("rlcoach_viewer_show_ungraded", "0", "Rep viewer: also list reps with no grade (bailed or reset)", true, true, 0, true, 1).bindTo(showUngraded);
+	cvarManager->registerCvar("road2_viewer_show_ungraded", "0", "Rep viewer: also list reps with no grade (bailed or reset)", true, true, 0, true, 1).bindTo(showUngraded);
 
 	viewerRange = std::make_shared<int>(0);
-	cvarManager->registerCvar("rlcoach_viewer_range", "0", "Rep viewer list: 0 today, 1 last 7 days, 2 starred, 3 all", true, true, 0, true, 3).bindTo(viewerRange);
+	cvarManager->registerCvar("road2_viewer_range", "0", "Rep viewer list: 0 today, 1 last 7 days, 2 starred, 3 all", true, true, 0, true, 3).bindTo(viewerRange);
 
 	// The rep viewer's Filter button (Nov 1)
 	viewerGradeFrom = std::make_shared<int>(0);
-	cvarManager->registerCvar("rlcoach_viewer_grade_from", "0", "Rep viewer filter: whose grade counts: 0 yours or auto, 1 yours, 2 auto", true, true, 0, true, 2).bindTo(viewerGradeFrom);
+	cvarManager->registerCvar("road2_viewer_grade_from", "0", "Rep viewer filter: whose grade counts: 0 yours or auto, 1 yours, 2 auto", true, true, 0, true, 2).bindTo(viewerGradeFrom);
 	viewerGrades = std::make_shared<int>(31);
-	cvarManager->registerCvar("rlcoach_viewer_grades", "31", "Rep viewer filter: which grades show (1 = grade 1, 2 = grade 2, 4 = grade 3, 8 = grade 4, 16 = grade 5; add them up)", true, true, 1, true, 31).bindTo(viewerGrades);
+	cvarManager->registerCvar("road2_viewer_grades", "31", "Rep viewer filter: which grades show (1 = grade 1, 2 = grade 2, 4 = grade 3, 8 = grade 4, 16 = grade 5; add them up)", true, true, 1, true, 31).bindTo(viewerGrades);
 	viewerShotFilter = std::make_shared<int>(0);
-	cvarManager->registerCvar("rlcoach_viewer_shot", "0", "Rep viewer filter: 0 all shots, 1 aerials, 2 ground, 3 double taps, 4 dribbles, 5 air dribbles, 6 flip resets, 7 ceiling shots", true, true, 0, true, 7).bindTo(viewerShotFilter);
+	cvarManager->registerCvar("road2_viewer_shot", "0", "Rep viewer filter: 0 all shots, 1 aerials, 2 ground, 3 double taps, 4 dribbles, 5 air dribbles, 6 flip resets, 7 ceiling shots", true, true, 0, true, 7).bindTo(viewerShotFilter);
 
-	cvarManager->registerNotifier("rlcoach_hud_toggle_compact", [this](std::vector<std::string>) {
-		cvarManager->getCvar("rlcoach_hud_compact").setValue(*hudCompact ? 0 : 1);
+	cvarManager->registerNotifier("road2_hud_toggle_compact", [this](std::vector<std::string>) {
+		cvarManager->getCvar("road2_hud_compact").setValue(*hudCompact ? 0 : 1);
 	}, "Switch the panel between full and compact", PERMISSION_ALL);
 }
 
@@ -512,29 +571,32 @@ void RLCoach::RenderLookSettings()
 	};
 
 	// Panel
+	UiStyle::Heading("The panel");
 	bool compact = *hudCompact;
-	if (ImGui::Checkbox("Compact panel (just the essentials)", &compact)) setCvar("rlcoach_hud_compact", compact ? 1.0f : 0.0f);
+	if (UiStyle::Checkbox("Compact panel (just the essentials)", &compact)) setCvar("road2_hud_compact", compact ? 1.0f : 0.0f);
 	ImGui::SameLine();
-	ImGui::TextDisabled("bind rlcoach_hud_toggle_compact to switch in game");
+	ImGui::TextDisabled("bind road2_hud_toggle_compact to switch in game");
 	float sc = *hudScale;
-	if (ImGui::SliderFloat("Panel size", &sc, 0.6f, 2.0f, "%.2fx")) setCvar("rlcoach_hud_scale", sc);
+	if (UiStyle::SliderFloat("Panel size", &sc, 0.6f, 2.0f, "%.2fx")) setCvar("road2_hud_scale", sc);
 	float px = *hudX * 100.0f, py = *hudY * 100.0f;
-	if (ImGui::SliderFloat("Panel left/right", &px, 0.0f, 90.0f, "%.0f%%")) setCvar("rlcoach_hud_x", px / 100.0f);
-	if (ImGui::SliderFloat("Panel up/down", &py, 0.0f, 90.0f, "%.0f%%")) setCvar("rlcoach_hud_y", py / 100.0f);
+	if (UiStyle::SliderFloat("Panel left/right", &px, 0.0f, 90.0f, "%.0f%%")) setCvar("road2_hud_x", px / 100.0f);
+	if (UiStyle::SliderFloat("Panel up/down", &py, 0.0f, 90.0f, "%.0f%%")) setCvar("road2_hud_y", py / 100.0f);
 
 	// The Road2 window (Nov 1): its height always fits what it shows; this sets the size of everything in it. Dragging
 	// the window narrower also shrinks it, so you can make it small without losing anything.
+	UiStyle::Heading("The Road2 window");
 	float ws = *windowSize;
-	if (ImGui::SliderFloat("Road2 window size", &ws, 0.6f, 1.6f, "%.2fx")) setCvar("rlcoach_window_size", std::round(ws * 20.0f) / 20.0f);
+	if (UiStyle::SliderFloat("Road2 window size", &ws, 0.6f, 1.6f, "%.2fx")) setCvar("road2_window_size", std::round(ws * 20.0f) / 20.0f);
 	ImGui::TextDisabled("The window always fits what it shows. Drag it narrower to shrink everything in it too.");
 
+	UiStyle::Heading("Units and outlines");
 	int units = *speedUnits;
 	const char* unitNames[3] = { "uu/s (game units)", "km/h", "mph" };
-	if (ImGui::Combo("Speed units", &units, unitNames, 3)) setCvar("rlcoach_speed_units", static_cast<float>(units));
+	if (UiStyle::Combo("Speed units", &units, unitNames, 3)) setCvar("road2_speed_units", static_cast<float>(units));
 
 	int th = *targetHitbox;
 	const char* thNames[3] = { "Off", "Where your car needed to be for your touch", "Where it needed to be at the earliest intercept" };
-	if (ImGui::Combo("Target car outline", &th, thNames, 3)) setCvar("rlcoach_target_hitbox", static_cast<float>(th));
+	if (UiStyle::Combo("Target car outline", &th, thNames, 3)) setCvar("road2_target_hitbox", static_cast<float>(th));
 	ImGui::TextDisabled("A yellow outline of your car's hitbox, placed and aimed to make the ideal hit. Shows in replays and practice.");
 }
 
@@ -546,40 +608,42 @@ void RLCoach::RenderPadSettings()
 
 	int mode = *inputDisplay;
 	const char* modes[4] = { "Off", "Text on the panel", "PS4 controller", "Xbox controller" };
-	if (ImGui::Combo("Show inputs", &mode, modes, 4)) setCvar("rlcoach_input_display", static_cast<float>(mode));
+	if (UiStyle::Combo("Show inputs", &mode, modes, 4)) setCvar("road2_input_display", static_cast<float>(mode));
 	if (mode < 2) return;
 
 	int theme = *padTheme;
 	const char* themes[2] = { "Dark", "Light" };
-	if (ImGui::Combo("Controller color", &theme, themes, 2)) setCvar("rlcoach_pad_theme", static_cast<float>(theme));
+	if (UiStyle::Combo("Controller color", &theme, themes, 2)) setCvar("road2_pad_theme", static_cast<float>(theme));
 	float sc = *padScale;
-	if (ImGui::SliderFloat("Controller size", &sc, 0.5f, 2.5f, "%.2fx")) setCvar("rlcoach_pad_scale", sc);
+	if (UiStyle::SliderFloat("Controller size", &sc, 0.5f, 2.5f, "%.2fx")) setCvar("road2_pad_scale", sc);
 	float px = *padX * 100.0f, py = *padY * 100.0f;
-	if (ImGui::SliderFloat("Controller left/right", &px, 0.0f, 95.0f, "%.0f%%")) setCvar("rlcoach_pad_x", px / 100.0f);
-	if (ImGui::SliderFloat("Controller up/down", &py, 0.0f, 95.0f, "%.0f%%")) setCvar("rlcoach_pad_y", py / 100.0f);
+	if (UiStyle::SliderFloat("Controller left/right", &px, 0.0f, 95.0f, "%.0f%%")) setCvar("road2_pad_x", px / 100.0f);
+	if (UiStyle::SliderFloat("Controller up/down", &py, 0.0f, 95.0f, "%.0f%%")) setCvar("road2_pad_y", py / 100.0f);
 
 	// Learn: the line you're practicing, shown on the controller (a cyan ring where its stick is, rings on its buttons)
 	ImGui::Spacing();
-	ImGui::TextDisabled("Learn: when you practice a line from the rep viewer, its inputs show on the controller");
+	UiStyle::Heading("The ghost");
+	ImGui::TextDisabled("When you practice a line or a lesson, its inputs show on the controller");
 	int ghost = static_cast<int>(std::lround(*ghostOpacity * 100.0f));
-	if (ImGui::SliderInt("Controller ghost", &ghost, 0, 100, ghost == 0 ? "off" : "%d%%")) setCvar("rlcoach_ghost_opacity", ghost / 100.0f);
+	if (UiStyle::SliderInt("Controller ghost", &ghost, 0, 100, ghost == 0 ? "off" : "%d%%")) setCvar("road2_ghost_opacity", ghost / 100.0f);
 
 	ImGui::Spacing();
-	ImGui::TextDisabled("Your button layout: match your in-game binds (Settings > Controls)");
+	UiStyle::Heading("Your button layout");
+	ImGui::TextDisabled("Match your in-game binds (Settings > Controls)");
 	PadStyle style = mode == 3 ? PadStyle::Xbox : PadStyle::PS4;
 	const char* names[PB_Count];
 	for (int b = 0; b < PB_Count; b++) names[b] = ControllerOverlay::ButtonName(b, style);
 	struct Row { const char* label; const char* cvar; std::shared_ptr<int>* value; };
 	Row rows[5] = {
-		{ "Jump", "rlcoach_pad_jump", &padJump },
-		{ "Boost", "rlcoach_pad_boost", &padBoost },
-		{ "Powerslide / air roll", "rlcoach_pad_slide", &padSlide },
-		{ "Air roll left", "rlcoach_pad_roll_left", &padRollLeft },
-		{ "Air roll right", "rlcoach_pad_roll_right", &padRollRight },
+		{ "Jump", "road2_pad_jump", &padJump },
+		{ "Boost", "road2_pad_boost", &padBoost },
+		{ "Powerslide / air roll", "road2_pad_slide", &padSlide },
+		{ "Air roll left", "road2_pad_roll_left", &padRollLeft },
+		{ "Air roll right", "road2_pad_roll_right", &padRollRight },
 	};
 	for (Row& r : rows)
 	{
 		int v = **r.value;
-		if (ImGui::Combo(r.label, &v, names, PB_Count)) setCvar(r.cvar, static_cast<float>(v));
+		if (UiStyle::Combo(r.label, &v, names, PB_Count)) setCvar(r.cvar, static_cast<float>(v));
 	}
 }

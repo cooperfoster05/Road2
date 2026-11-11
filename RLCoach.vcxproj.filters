@@ -144,6 +144,12 @@
     <ClCompile Include="RLCoachCombine.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
+    <ClCompile Include="Nexto.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
+    <ClCompile Include="RLCoachNexto.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
     <ClCompile Include="RLCoachLearn.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
@@ -276,6 +282,9 @@
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="Combine.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="Nexto.h">
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="logging.h">

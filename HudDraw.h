@@ -106,6 +106,17 @@ namespace HudDraw
 		c.DrawString(s, scale, scale, shadow);
 	}
 
+	// Style A (Nov 4): a parallelogram leaning right 12 degrees, its middle where the box's middle is
+	inline void SlantFill(CanvasWrapper& c, float x, float y, float w, float h, Rgba col)
+	{
+		if (w <= 0 || h <= 0) return;
+		const float o = h * 0.2126f * 0.5f;
+		SetColor(c, col);
+		const Vector2F a{ x + o, y }, b{ x + w + o, y }, d{ x + w - o, y + h }, e{ x - o, y + h };
+		c.FillTriangle(a, b, d);
+		c.FillTriangle(a, d, e);
+	}
+
 	// Text centered on (cx, cy)
 	inline void TextCentered(CanvasWrapper& c, float cx, float cy, const std::string& s, float scale, Rgba col, bool shadow = false)
 	{

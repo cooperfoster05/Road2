@@ -171,6 +171,7 @@ void RLCoach::PracticeBegin(int targetTick, SegKind kind, int segStart, const st
 	practiceSegStart = segStart;
 	practiceTargetTick = targetTick;
 	practiceRideUntil = -1;
+	practiceRideByInput = false;
 	practiceLabel = label;
 	practiceShot = ShotGeometry::Analyze(practiceRep);
 	practiceBallStartTick = practiceShot.startTick;
@@ -311,6 +312,29 @@ void RLCoach::PracticeApplyFrame(CarWrapper& car, BallWrapper& ball, const Frame
 	ball.SetAngularVelocity(Vector(f.ballAVX * v, f.ballAVY * v, f.ballAVZ * v), false);
 }
 
+// A lesson's running start played as inputs (Lesson::StageRideByInput): the model's controller on your car until the
+// step begins, so the game itself jumps and flips (a flip put back frame by frame can't be cancelled)
+void RLCoach::OverrideRideInput(CarWrapper& car, void* params)
+{
+	if (!practiceRideByInput || practiceRideUntil < 0 || !learnActive || practiceState != PracticeState::Live || !params || car.IsNull()) return;
+	CarWrapper local = gameWrapper->GetLocalCar();
+	if (local.IsNull() || local.memory_address != car.memory_address) return;
+	const int rt = practiceStartTick + static_cast<int>(practiceLive.size());
+	if (rt >= practiceRideUntil || rt >= static_cast<int>(practiceRep.size())) return;
+	const Frame& f = practiceRep[rt];
+	ControllerInput in{};
+	in.Throttle = f.throttle; in.Steer = f.steer; in.Pitch = f.pitch; in.Yaw = f.yaw; in.Roll = f.roll;
+	// the flip's direction (the game works these out from the stick before this point, so set them too)
+	in.DodgeForward = -f.pitch;
+	in.DodgeStrafe = std::fabs(f.yaw) > 0.01f ? f.yaw : f.steer;
+	in.Handbrake = f.handbrake ? 1 : 0;
+	in.Jump = f.jump ? 1 : 0;
+	in.Jumped = in.Jump;
+	in.ActivateBoost = f.boost ? 1 : 0;
+	in.HoldingBoost = in.ActivateBoost;
+	*reinterpret_cast<ControllerInput*>(params) = in;
+}
+
 // No unlimited boost (kickoff lessons: the model starts on 33 and picks up pads). Free play's setting goes back when
 // practice ends.
 void RLCoach::PracticeLimitBoost(CarWrapper& car)
@@ -353,11 +377,8 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 		// First input: restore the full moment, with real speeds, and go
 		PracticeApplyStart(car, ball, false);
 		// Kickoff lessons: every boost pad back, as at a real kickoff (the model picks up the small pads on the way)
-		if (learnActive && learnLesson.kind == LessonKind::Kickoff)
-		{
-			server.ResetPickups();
-			PracticeLimitBoost(car);
-		}
+		if (learnActive && learnLesson.kind == LessonKind::Kickoff) server.ResetPickups();
+		if (learnActive && (learnLesson.kind == LessonKind::Kickoff || learnLesson.kind == LessonKind::Move)) PracticeLimitBoost(car);
 		practiceLive.clear();
 		practicePending.clear();
 		practiceEventTick = -1;
@@ -398,10 +419,12 @@ void RLCoach::PracticeTick(CarWrapper& car, const ControllerInput& in)
 	// ---- Live attempt ----
 	// Kickoff lessons: free play turns unlimited boost back on after its own resets (a goal, the reset button), so
 	// keep it off for the whole attempt (Coop, Nov 2: it came back on partway through his reps)
-	if (learnActive && learnLesson.kind == LessonKind::Kickoff) PracticeLimitBoost(car);
-	if (learnActive && practiceRideUntil >= 0)
+	// (and the movement lessons: a wavedash is free speed, a speedflip starts on the model's boost)
+	if (learnActive && (learnLesson.kind == LessonKind::Kickoff || learnLesson.kind == LessonKind::Move)) PracticeLimitBoost(car);
+	if (learnActive && practiceRideUntil >= 0 && !practiceRideByInput)
 	{
 		// The running start: the model drives (its frame put back every tick) until the step begins
+		// (played as inputs instead, OverrideRideInput, the car is recorded like any live tick below)
 		const int rt = practiceStartTick + static_cast<int>(practiceLive.size());
 		if (rt < practiceRideUntil && rt < static_cast<int>(practiceRep.size()))
 		{
@@ -644,6 +667,7 @@ void RLCoach::PracticeExit()
 	}
 	practiceSavedUnlimited = -1;
 	practiceRideUntil = -1;
+	practiceRideByInput = false;
 	havePrev = false;
 	// If a rep is open in the viewer it picks back up (paused); otherwise the recorder re-arms
 	state = (*recordingEnabled && !viewerActive && !learnActive) ? RepState::WaitReset : RepState::Idle;

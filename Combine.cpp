@@ -8,6 +8,9 @@
 #include <format>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <iterator>
 
 using namespace RocketSim;
 
@@ -1056,6 +1059,86 @@ namespace
 			most = std::max(most, std::hypot(f.pos.x - c.bot.front().pos.x, f.pos.y - c.bot.front().pos.y));
 		return most < 300.0f;
 	}
+}
+
+// ---- LoadChallengesCached: <csv>.bin = "R2C1", the CSV's size and date, a count, then each moment's numbers as they
+// sit in memory (the frames are plain floats) ----
+std::vector<Combine::Challenge> Combine::LoadChallengesCached(const std::filesystem::path& csv)
+{
+	namespace fs = std::filesystem;
+	static_assert(sizeof(PathFrame) == 14 * sizeof(float) && sizeof(BallFrame) == 10 * sizeof(float), "frames are plain floats");
+	std::error_code ec;
+	const uint64_t size = fs::file_size(csv, ec);
+	if (ec) return {};
+	const int64_t stamp = fs::last_write_time(csv, ec).time_since_epoch().count();
+	fs::path bin = csv;
+	bin += ".bin";
+	std::vector<Challenge> out;
+	{
+		std::ifstream in(bin, std::ios::binary);
+		char magic[4] = {};
+		uint64_t s2 = 0; int64_t t2 = 0; uint32_t n = 0;
+		in.read(magic, 4);
+		in.read(reinterpret_cast<char*>(&s2), 8); in.read(reinterpret_cast<char*>(&t2), 8); in.read(reinterpret_cast<char*>(&n), 4);
+		if (in && std::memcmp(magic, "R2C1", 4) == 0 && s2 == size && t2 == stamp && n < 1000000u)
+		{
+			out.resize(n);
+			bool ok = true;
+			for (Challenge& c : out)
+			{
+				uint32_t nb = 0, nl = 0;
+				in.read(&c.kind, 1); in.read(&c.source, 1);
+				in.read(reinterpret_cast<char*>(&c.boost), 4); in.read(reinterpret_cast<char*>(&c.tContact), 4);
+				in.read(reinterpret_cast<char*>(&c.ballEnd), 4); in.read(reinterpret_cast<char*>(&c.botEnd), 4);
+				in.read(reinterpret_cast<char*>(&c.you), sizeof(PathFrame));
+				in.read(reinterpret_cast<char*>(&nb), 4); in.read(reinterpret_cast<char*>(&nl), 4);
+				if (!in || nb > 100000u || nl > 100000u) { ok = false; break; }
+				c.bot.resize(nb); c.ball.resize(nl);
+				in.read(reinterpret_cast<char*>(c.bot.data()), static_cast<std::streamsize>(nb * sizeof(PathFrame)));
+				in.read(reinterpret_cast<char*>(c.ball.data()), static_cast<std::streamsize>(nl * sizeof(BallFrame)));
+				if (!in) { ok = false; break; }
+			}
+			if (ok) return out;
+			out.clear();
+		}
+	}
+	// No cache, or it's for another version of the CSV: parse the text, then write the cache (to a temp name first, so
+	// a half-written file is never read)
+	{
+		std::ifstream f(csv, std::ios::binary);
+		std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+		out = LoadChallenges(text);
+	}
+	if (out.empty()) return out;
+	fs::path tmp = bin;
+	tmp += ".tmp";
+	{
+		std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
+		const uint32_t n = static_cast<uint32_t>(out.size());
+		o.write("R2C1", 4);
+		o.write(reinterpret_cast<const char*>(&size), 8); o.write(reinterpret_cast<const char*>(&stamp), 8); o.write(reinterpret_cast<const char*>(&n), 4);
+		for (const Challenge& c : out)
+		{
+			const uint32_t nb = static_cast<uint32_t>(c.bot.size()), nl = static_cast<uint32_t>(c.ball.size());
+			o.write(&c.kind, 1); o.write(&c.source, 1);
+			o.write(reinterpret_cast<const char*>(&c.boost), 4); o.write(reinterpret_cast<const char*>(&c.tContact), 4);
+			o.write(reinterpret_cast<const char*>(&c.ballEnd), 4); o.write(reinterpret_cast<const char*>(&c.botEnd), 4);
+			o.write(reinterpret_cast<const char*>(&c.you), sizeof(PathFrame));
+			o.write(reinterpret_cast<const char*>(&nb), 4); o.write(reinterpret_cast<const char*>(&nl), 4);
+			o.write(reinterpret_cast<const char*>(c.bot.data()), static_cast<std::streamsize>(nb * sizeof(PathFrame)));
+			o.write(reinterpret_cast<const char*>(c.ball.data()), static_cast<std::streamsize>(nl * sizeof(BallFrame)));
+		}
+		if (!o) { o.close(); fs::remove(tmp, ec); return out; }
+	}
+	fs::rename(tmp, bin, ec);
+	if (ec) fs::remove(tmp, ec);
+	return out;
+}
+
+float Combine::BotArrival(const Challenge& c)
+{
+	for (const PathFrame& f : c.bot) if (std::hypot(f.pos.x, f.pos.y) < 250.0f) return f.t;
+	return 99.0f;
 }
 
 std::vector<Combine::Challenge> Combine::MakeChallengeSet(uint32_t seed, int level, int count, char kind, const std::vector<Challenge>& all)

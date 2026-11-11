@@ -43,11 +43,13 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>true</LinkIncremental>
     <OutDir>$(SolutionDir)plugins\</OutDir>
+    <TargetName>Road2</TargetName>
     <IntDir>$(SolutionDir)build\.intermediates\$(Configuration)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
     <OutDir>$(SolutionDir)plugins\</OutDir>
+    <TargetName>Road2</TargetName>
     <IntDir>$(SolutionDir)build\.intermediates\$(Configuration)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -150,6 +152,10 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="RLCoachCombine.cpp" />
+    <ClCompile Include="Nexto.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="RLCoachNexto.cpp" />
     <ClCompile Include="Mechanics.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -184,6 +190,7 @@
     <ClInclude Include="RLCoach.h" />
     <ClInclude Include="Lesson.h" />
     <ClInclude Include="Combine.h" />
+    <ClInclude Include="Nexto.h" />
     <ClInclude Include="RepData.h" />
     <ClInclude Include="RepWriter.h" />
     <ClInclude Include="RepLibrary.h" />

@@ -5,6 +5,7 @@
 // Plain C++ plus RocketSim (already loaded by the ball predictor). No BakkesMod code.
 #include "RepData.h"
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -61,7 +62,7 @@ namespace Combine
 		float tCross = 0;         // how long until it would cross the line
 		bool real = false;        // built from a real save in a match replay
 	};
-	// A real save situation (data/RLCoach/combine/save_situations.csv): the shot just after it was hit, and the
+	// A real save situation (data/Road2/combine/save_situations.csv): the shot just after it was hit, and the
 	// defender who saved it, turned so the ball heads for the blue goal
 	struct SaveSituation
 	{
@@ -164,9 +165,15 @@ namespace Combine
 		std::vector<BallFrame> ball;
 	};
 	std::vector<Challenge> LoadChallenges(const std::string& text);
+	// The same, fast (Nov 10): the big CSVs (27 MB and 18 MB of text) took seconds to parse the first time a set was
+	// built. The parsed moments are kept next to the CSV as <name>.bin and read back in one go; the .bin is rebuilt
+	// whenever the CSV's size or date changes (an update's new file).
+	std::vector<Challenge> LoadChallengesCached(const std::filesystem::path& csv);
 	int ChallengeLevel(char source);   // 1-5 by the game's rank; 0 = not used
 	const char* ChallengeLevelNote(int level);
 	std::vector<Challenge> MakeChallengeSet(uint32_t seed, int level, int count, char kind, const std::vector<Challenge>& all);
+	// When the bot's path first gets to the ball on the centre spot (s from the start; 99 if it never does): kickoffs
+	float BotArrival(const Challenge& c);
 	// Unreal pitch / yaw / roll (radians) from a rotation quaternion (w, x, y, z)
 	void QuatToPYR(const float q[4], float& pitch, float& yaw, float& roll);
 	// The bot's pose at time t (positions and speeds blended, rotation slerped); past its end, its last frame

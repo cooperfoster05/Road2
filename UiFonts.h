@@ -1,7 +1,8 @@
 #pragma once
-// Fonts for the rep viewer (Oct 24 redesign): Inter for text, JetBrains Mono for numbers. Both are under the SIL
-// Open Font License (the OFL files sit next to them), so they can ship with the plugin. The plugin keeps them in
-// data/RLCoach/fonts; BakkesMod only loads fonts from data/fonts, so they're copied there (with an RLCoach_ prefix)
+// Fonts for the rep viewer (Oct 24 redesign): Inter for text, JetBrains Mono for numbers, and (style A, Nov 3) Barlow
+// Condensed for labels, titles and big numbers. All three are under the SIL Open Font License (the OFL files sit next
+// to them), so they can ship with the plugin. The plugin keeps them in
+// data/Road2/fonts; BakkesMod only loads fonts from data/fonts, so they're copied there (with a Road2_ prefix)
 // the first time. If anything fails, the window keeps ImGui's default font: ImGui::PushFont(nullptr) is safe.
 
 #include "IMGUI/imgui.h"
@@ -10,17 +11,20 @@
 
 namespace UiFonts
 {
-	enum Face { Body, Bold, Label, Head, Mono, Big, kCount };
+	enum Face { Body, Bold, Label, Head, Mono, Big, Caps, Display, Hero, kCount };
 	struct Spec { const char* name; const char* source; const char* file; int size; };
-	// Sizes are for UiStyle::kScale = 0.8 (16, 16, 12, 20, 19, 44 at full size); the names carry the size, so a
+	// Sizes are for UiStyle::kScale = 0.8; the names carry the size, so a
 	// changed size loads as a new font instead of reusing one BakkesMod already loaded at the old size
 	inline const Spec kSpecs[kCount] = {
-		{ "rlcoach_body13",  "Inter-Regular.ttf",       "RLCoach_Inter-Regular.ttf",       13 },
-		{ "rlcoach_bold13",  "Inter-SemiBold.ttf",      "RLCoach_Inter-SemiBold.ttf",      13 },
-		{ "rlcoach_label10", "Inter-Bold.ttf",          "RLCoach_Inter-Bold.ttf",          10 },
-		{ "rlcoach_head16",  "Inter-SemiBold.ttf",      "RLCoach_Inter-SemiBold.ttf",      16 },
-		{ "rlcoach_mono15",  "JetBrainsMono-Bold.ttf",  "RLCoach_JetBrainsMono-Bold.ttf",  15 },
-		{ "rlcoach_big35",   "JetBrainsMono-Bold.ttf",  "RLCoach_JetBrainsMono-Bold.ttf",  35 },
+		{ "road2_body13",  "Inter-Regular.ttf",       "Road2_Inter-Regular.ttf",       13 },
+		{ "road2_bold13",  "Inter-SemiBold.ttf",      "Road2_Inter-SemiBold.ttf",      13 },
+		{ "road2_bclabel12", "BarlowCondensed-Bold.ttf", "Road2_BarlowCondensed-Bold.ttf", 12 },                 // small capitals
+		{ "road2_bchead20",  "BarlowCondensed-ExtraBoldItalic.ttf", "Road2_BarlowCondensed-ExtraBoldItalic.ttf", 20 },   // card titles
+		{ "road2_mono15",  "JetBrainsMono-Bold.ttf",  "Road2_JetBrainsMono-Bold.ttf",  15 },
+		{ "road2_bcbig36",   "BarlowCondensed-ExtraBoldItalic.ttf", "Road2_BarlowCondensed-ExtraBoldItalic.ttf", 36 },   // big numbers
+		{ "road2_bccaps14",  "BarlowCondensed-Bold.ttf", "Road2_BarlowCondensed-Bold.ttf", 14 },                 // buttons, chips
+		{ "road2_bcdisp27",  "BarlowCondensed-ExtraBoldItalic.ttf", "Road2_BarlowCondensed-ExtraBoldItalic.ttf", 27 },   // screen titles
+		{ "road2_bchero72",  "BarlowCondensed-ExtraBoldItalic.ttf", "Road2_BarlowCondensed-ExtraBoldItalic.ttf", 72 },   // the grade badge
 	};
 
 	// Latin, plus the few symbols the review uses: dashes, bullet, ellipsis, arrows, minus
@@ -30,12 +34,12 @@ namespace UiFonts
 		return r;
 	}
 
-	// Copies data/RLCoach/fonts/<source> to data/fonts/<file> where it's missing. Returns false if any is missing after.
+	// Copies data/Road2/fonts/<source> to data/fonts/<file> where it's missing. Returns false if any is missing after.
 	inline bool Install(const std::filesystem::path& dataFolder)
 	{
 		namespace fs = std::filesystem;
 		std::error_code ec;
-		const fs::path from = dataFolder / "RLCoach" / "fonts", to = dataFolder / "fonts";
+		const fs::path from = dataFolder / "Road2" / "fonts", to = dataFolder / "fonts";
 		fs::create_directories(to, ec);
 		bool ok = true;
 		for (const Spec& s : kSpecs)

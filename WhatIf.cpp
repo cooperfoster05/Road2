@@ -1118,7 +1118,7 @@ WhatIfResult WhatIf::Search(const std::vector<Frame>& fr, bool realIn, bool floo
 			out.eventTick = r.eventTick;
 			for (int c : *fixChecks)
 				out.fixes += std::format("{}{} -> {}", out.fixes.empty() ? "" : "\n", Coach::DetailOf(c, realV[c]), Coach::DetailOf(c, v[c]));
-			out.detail = std::format("{}{}\nWith your own shot inputs after it, it's still a {} ({}): the shot itself needs work too (try the What if? on it).\n"
+			out.detail = std::format("{}{}\nWith your own shot inputs after it, it's still a {} ({}): the shot itself needs work too (try the smallest fix on it).\n"
 				"It kept the fix from {} of {} slightly different starts.",
 				lines, out.fixes, out.grade, out.gradeWhy, held, kNudges);
 			out.frames = std::move(r.frames);

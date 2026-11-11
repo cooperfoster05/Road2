@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "RLCoach.h"
+#include <fstream>
 #include "Ratings.h"
 #include "bakkesmod/wrappers/includes.h"
 #include "bakkesmod/wrappers/GuiManagerWrapper.h"
@@ -345,6 +346,86 @@ void RLCoach::ViewerTick(CarWrapper& car)
 	uiViewerPlaying = viewerPlaying;
 }
 
+// First run (Nov 3): what to set up, each with its state and a button, until you click Got it. Shows at the top of the
+// rep viewer, the first place a new tester lands.
+void RLCoach::RenderWelcome()
+{
+	using namespace UiStyle;
+	const float S = Sc();
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	auto setCvar = [this](const std::string& name, float value) {
+		gameWrapper->Execute([this, name, value](GameWrapper*) { cvarManager->getCvar(name).setValue(value); });
+	};
+	const bool rec = *recordingEnabled, sim = predictor.Ready();
+	const bool reps = !repList.empty();
+	ImGui::Spacing();
+	const ImVec2 a = ImGui::GetCursorScreenPos();
+	const float W = ImGui::GetContentRegionAvail().x, pad = 14.0f * S;
+	dl->ChannelsSplit(2);
+	dl->ChannelsSetCurrent(1);
+	ImGui::SetCursorScreenPos(ImVec2(a.x + pad, a.y + pad));
+	ImGui::BeginGroup();
+	{
+		CapsFont f(uiFonts[UiFonts::Head]);
+		ImGui::TextColored(kText, "WELCOME TO ROAD");
+		ImGui::SameLine(0, 0);
+		ImGui::TextColored(kOrange, "2");
+	}
+	ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + W - 2 * pad);
+	ImGui::TextColored(kSub, "Three things and you're set. Then play some reps in free play or a training pack and come back here.");
+	ImGui::PopTextWrapPos();
+	ImGui::Spacing();
+	struct Step { bool done; const char* title; const char* detail; };
+	const Step steps[3] = {
+		{ rec, "Turn on recording", "Every rep gets saved and graded. It starts off each time you launch the game." },
+		{ sim, "Make the arena files", "For the smallest fix, the best line and the Combine. Two minutes, once: the steps are on the setup card in the settings (F2, Plugins, Road2)." },
+		{ reps, "Play a few reps", "Free play or any training pack. A rep starts when you move and ends on a goal, a miss or a timeout." },
+	};
+	for (int i = 0; i < 3; i++)
+	{
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		const float bs = 22.0f * S;
+		SlantQuad(dl, p, ImVec2(p.x + bs, p.y + bs), U32(steps[i].done ? kGood : kChip));
+		{
+			CapsFont f;
+			const char* t = steps[i].done ? "OK" : (i == 0 ? "1" : i == 1 ? "2" : "3");
+			const ImVec2 ts = ImGui::CalcTextSize(t);
+			dl->AddText(ImVec2(p.x + (bs - ts.x) * 0.5f, p.y + (bs - ts.y) * 0.5f), U32(steps[i].done ? kOnAccent : kText), t);
+		}
+		ImGui::SetCursorScreenPos(ImVec2(p.x + bs + 10.0f * S, p.y));
+		ImGui::BeginGroup();
+		ImGui::TextColored(steps[i].done ? kSub : kText, "%s", steps[i].title);
+		ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + W - 2 * pad - bs - 10.0f * S - 120.0f * S);
+		ImGui::TextColored(kMuted, "%s", steps[i].detail);
+		ImGui::PopTextWrapPos();
+		ImGui::EndGroup();
+		const float rowBottom = std::max(ImGui::GetItemRectMax().y, p.y + bs);
+		if (!steps[i].done && i < 2)
+		{
+			ImGui::SetCursorScreenPos(ImVec2(a.x + W - pad - 110.0f * S, p.y));
+			ImGui::PushID(i);
+			if (i == 0 ? AccentButton("Turn it on", ImVec2(110.0f * S, 0)) : QuietButton("Load them", ImVec2(110.0f * S, 0)))
+			{
+				if (i == 0) setCvar("road2_recording", 1.0f);
+				else gameWrapper->Execute([this](GameWrapper*) { StartPredictor(); });
+			}
+			ImGui::PopID();
+		}
+		ImGui::SetCursorScreenPos(ImVec2(p.x, rowBottom + 8.0f * S));
+	}
+	if (OutlineButton("Got it")) setCvar("road2_welcome_done", 1.0f);
+	ImGui::SameLine();
+	ImGui::TextColored(kMuted, "Keys for everything: settings, Keys and commands.");
+	ImGui::EndGroup();
+	const ImVec2 b(a.x + W, ImGui::GetItemRectMax().y + pad);
+	dl->ChannelsSetCurrent(0);
+	dl->AddRectFilled(a, b, U32(kPanel), 10.0f * S);
+	dl->AddRectFilled(a, ImVec2(a.x + 4.0f * S, b.y), U32(kOrange));
+	dl->ChannelsMerge();
+	ImGui::SetCursorScreenPos(ImVec2(a.x, b.y + 12.0f * S));
+	ImGui::Dummy(ImVec2(W, 0));
+}
+
 void RLCoach::OverrideViewerInput(CarWrapper& car, void* params)
 {
 	if (practiceState != PracticeState::Off) return;   // practice: your controller drives
@@ -606,6 +687,12 @@ void RLCoach::StartReview()
 	}
 	if (whatIfBusy || !predictor.Ready()) return;   // the viewer window asks again once it can
 	if (whatIfThread.joinable()) whatIfThread.join();
+	// (Nov 4, retention) a rep you've reviewed keeps its recording 30 days, rated or not (TrimStorage)
+	if (writer && !file.empty())
+	{
+		std::ofstream rv(writer->Folder() / "reviewed.csv", std::ios::app);
+		if (rv) rv << file << "\n";
+	}
 	// A 5 needs no searches, but still gets its timing windows
 	const bool five = viewerGrade.overall >= 5;
 	if (five)
@@ -943,10 +1030,15 @@ void RLCoach::FetchUiFonts()
 {
 	bool missing = false;
 	for (ImFont* f : uiFonts) missing = missing || !f;
-	if (!missing) return;
-	auto gui = gameWrapper->GetGUIManager();
-	for (int i = 0; i < UiFonts::kCount; i++)
-		if (!uiFonts[i]) uiFonts[i] = gui.GetFont(UiFonts::kSpecs[i].name);
+	if (missing)
+	{
+		auto gui = gameWrapper->GetGUIManager();
+		for (int i = 0; i < UiFonts::kCount; i++)
+			if (!uiFonts[i]) uiFonts[i] = gui.GetFont(UiFonts::kSpecs[i].name);
+	}
+	// The faces UiStyle's slanted pieces draw with (style A)
+	UiStyle::gCaps = uiFonts[UiFonts::Caps];
+	UiStyle::gHero = uiFonts[UiFonts::Hero];
 }
 
 namespace
@@ -1020,6 +1112,7 @@ void RLCoach::RenderWindow()
 	ImFont* fHead = uiFonts[UiFonts::Head];
 	ImFont* fMono = uiFonts[UiFonts::Mono];
 	ImFont* fBig = uiFonts[UiFonts::Big];
+	ImFont* fDisplay = uiFonts[UiFonts::Display];
 
 	auto onGame = [this](std::function<void()> fn) {
 		gameWrapper->Execute([fn](GameWrapper*) { fn(); });
@@ -1032,13 +1125,8 @@ void RLCoach::RenderWindow()
 		ImGui::PopStyleColor();
 	};
 
-	// ---- Title row ----
-	{
-		FontScope f(fLabel);
-		ImGui::TextColored(kAccent, "ROAD2");
-		ImGui::SameLine();
-		ImGui::TextColored(kMuted, "REP VIEWER");
-	}
+	// ---- Title row: the wordmark, then the links on the right ----
+	Wordmark(fDisplay, "Rep viewer");
 	{
 		std::string info = std::format("{} reps", repList.size());
 		float w = ImGui::CalcTextSize(info.c_str()).x + ImGui::CalcTextSize("Refresh").x + ImGui::CalcTextSize("Learn").x + ImGui::CalcTextSize("Combine").x + 76.0f * S;
@@ -1063,6 +1151,7 @@ void RLCoach::RenderWindow()
 			onGame([this]() { CombineOpen(); });
 		}
 	}
+	if (!*welcomeDone) RenderWelcome();
 
 	gradeBook.TryCopy(uiAutoGrades, &uiAutoGradesSeen);   // only when a grade changed; keeps the last copy if a refresh is busy
 	std::string watchingFile;
@@ -1077,7 +1166,7 @@ void RLCoach::RenderWindow()
 		Heading("PRACTICE");
 		ImGui::PushItemWidth(260 * S);
 		int pct = static_cast<int>(std::lround(uiPracticeSpeed.load() * 100.0f));
-		if (ImGui::SliderInt("Game speed", &pct, 10, 100, "%d%%"))
+		if (UiStyle::SliderInt("Game speed", &pct, 10, 100, "%d%%"))
 		{
 			pct = std::max(10, std::min(100, static_cast<int>(std::lround(pct / 5.0)) * 5));
 			float sp = pct / 100.0f;
@@ -1085,7 +1174,7 @@ void RLCoach::RenderWindow()
 			onGame([this, sp]() { PracticeSetSpeed(sp); });
 		}
 		float lead = uiPracticeLeadIn.load();
-		if (ImGui::SliderFloat("Lead-in before the moment", &lead, 0.0f, 2.0f, "%.2fs"))
+		if (UiStyle::SliderFloat("Lead-in before the moment", &lead, 0.0f, 2.0f, "%.2fs"))
 		{
 			lead = std::round(lead * 20.0f) / 20.0f;
 			uiPracticeLeadIn = lead;
@@ -1093,7 +1182,7 @@ void RLCoach::RenderWindow()
 		}
 		ImGui::PopItemWidth();
 		bool ramp = uiPracticeAutoRamp;
-		if (ImGui::Checkbox("Auto-ramp (3 hits in a row = +10% speed)", &ramp))
+		if (UiStyle::Checkbox("Auto-ramp (3 hits in a row = +10% speed)", &ramp))
 		{
 			uiPracticeAutoRamp = ramp;
 			onGame([this, ramp]() { practiceAutoRamp = ramp; practiceStreak = 0; });
@@ -1157,6 +1246,7 @@ void RLCoach::RenderWindow()
 		const int busySlot = busy ? whatIfRunningSlot.load() : -1;
 		const bool pending = uiReviewPending;
 		const bool simReady = predictor.Ready();
+		const bool simMissing = !simReady && predictor.Status().rfind("No arena files", 0) == 0;   // (Nov 3) a fresh install: say so, not "loading" forever
 		if (pending && simReady && !busy) onGame([this]() { StartReview(); });
 
 		// A new rep opens on Your shot
@@ -1199,18 +1289,8 @@ void RLCoach::RenderWindow()
 			const float D = 112.0f * S;
 			const ImVec2 c(p0.x + D * 0.5f + 2.0f * S, p0.y + D * 0.5f);
 			const ImVec4 gc = GradeColor(overallGrade);
-			Gauge(dl, c, D * 0.5f - 12.0f * S, 9.0f * S, overallGrade, gc);
-			{
-				FontScope f(fBig);
-				std::string n = overallGrade > 0 ? std::to_string(overallGrade) : "-";
-				ImVec2 ts = ImGui::CalcTextSize(n.c_str());
-				dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f - 5.0f * S), U32(kText), n.c_str());
-			}
-			{
-				FontScope f(fLabel);
-				ImVec2 ts = ImGui::CalcTextSize("OF 5");
-				dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y + 18.0f * S), U32(kMuted), "OF 5");
-			}
+			(void)c;
+			GradeBadge(dl, ImVec2(p0.x + 6.0f * S, p0.y + 8.0f * S), D - 22.0f * S, overallGrade, gc);
 
 			// Keep and close, top right
 			const float bs = 30.0f * S;
@@ -1241,19 +1321,20 @@ void RLCoach::RenderWindow()
 			ImGui::BeginGroup();
 			ImGui::PushTextWrapPos(p0.x + W - 2 * bs - 16.0f * S - (ImGui::GetWindowPos().x) + ImGui::GetScrollX());
 			{
-				FontScope f(fLabel);
-				ImGui::TextColored(kAccent, "%s", mechanic.c_str());
+				// The mechanic on a team-blue chip, the when / how long / your rating on a quiet one
+				if (!mechanic.empty()) Pill(mechanic, kAccent);
 				if (cur)
 				{
 					std::string when = cur->savedAt.size() >= 16 ? cur->savedAt.substr(11, 5) : cur->savedAt;
-					ImGui::SameLine();
-					ImGui::TextColored(kMuted, "%s", std::format("\xC2\xB7  {}  \xC2\xB7  {:.1f} S", when, cur->duration).c_str());
-					if (cur->rating > 0) { ImGui::SameLine(); ImGui::TextColored(kMuted, "%s", std::format("\xC2\xB7  YOU RATED IT {}", cur->rating).c_str()); }
+					std::string meta = std::format("{}  \xC2\xB7  {:.1f} s", when, cur->duration);
+					if (cur->rating > 0) meta += std::format("  \xC2\xB7  you rated it {}", cur->rating);
+					if (!mechanic.empty()) ImGui::SameLine(0, 6.0f * S);
+					Pill(meta, kChip);
 				}
 			}
 			{
-				FontScope f(fHead);
-				ImGui::TextWrapped("%s", overallName.empty() ? "Not graded" : overallName.c_str());
+				FontScope f(fDisplay ? fDisplay : fHead);
+				ImGui::TextWrapped("%s", Caps(overallName.empty() ? "Not graded" : overallName.c_str()).c_str());
 			}
 			ImGui::PushStyleColor(ImGuiCol_Text, kSub);
 			if (!overallWhy.empty()) ImGui::TextWrapped("%s", overallWhy.c_str());
@@ -1268,7 +1349,24 @@ void RLCoach::RenderWindow()
 		if (!segs.empty() && segTotal > 1)
 		{
 			const ImVec2 p0 = ImGui::GetCursorScreenPos();
-			const float pad = 14.0f * S, markerH = 24.0f * S, barH = 30.0f * S, transportH = 32.0f * S;
+			const float pad = 14.0f * S, markerH = 24.0f * S, barH = 30.0f * S;
+			// (Nov 3, tighter layouts) the speed buttons and Loop go on a second row when the window's too narrow for one
+			const float speeds[4] = { 0.1f, 0.25f, 0.5f, 1.0f };
+			const char* speedNames[4] = { "0.1x", "0.25x", "0.5x", "1x" };
+			float segW = 0.0f, timeW = 0.0f;
+			{
+				const ImGuiStyle& st = ImGui::GetStyle();
+				{
+					CapsFont cf;
+					for (const char* n : speedNames) segW += ImGui::CalcTextSize(n).x + st.FramePadding.x * 2.0f + 8.0f * S + 28.0f * S * kSlant + 2.0f;
+				}
+				FontScope f(fHead);
+				timeW = ImGui::CalcTextSize(std::format("{:.2f}", total / 120.0f).c_str()).x + 4.0f * S + ImGui::CalcTextSize(std::format("/ {:.2f} S", total / 120.0f).c_str()).x;
+			}
+			const float loopW = ImGui::GetFrameHeight() * 1.5f + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize("Loop").x + 10.0f;
+			const float leftW = (32.0f * 3 + 44.0f + 6.0f * 3 + 12.0f) * S + timeW;
+			const bool speedsBelow = leftW + 10.0f * S + segW + 10.0f * S + loopW > W - 2 * pad;
+			const float transportH = speedsBelow ? 66.0f * S : 32.0f * S;
 			const float cardH = pad + markerH + barH + 10.0f * S + transportH + pad;
 			dl->AddRectFilled(p0, ImVec2(p0.x + W, p0.y + cardH), U32(kPanel2), 12.0f * S);
 			dl->AddRect(p0, ImVec2(p0.x + W, p0.y + cardH), U32(kLineSoft), 12.0f * S);
@@ -1319,16 +1417,18 @@ void RLCoach::RenderWindow()
 					dl->AddRectFilled(ImVec2(sx0, barY + barH + 3.0f * S), ImVec2(sx1, barY + barH + 6.0f * S), U32(Hex(0xA78BFA), 0.55f), 2.0f);
 					continue;
 				}
-				const ImVec4 col = gradeName.empty() ? kMuted : SegGradeColor(gradeName);
+				// Style A: slanted blocks in the step's grade color, dimmed; the root cause (and the one under the mouse) bright
+				const ImVec4 col = gradeName.empty() ? kChip : SegGradeColor(gradeName);
 				const bool hovered = mouse.x >= sx0 && mouse.x < sx1 && mouse.y >= barY && mouse.y < barY + barH;
 				if (hovered) hoverSeg = si;
-				dl->AddRectFilled(ImVec2(sx0, barY), ImVec2(sx1, barY + barH), U32(col, gradeName.empty() ? 0.10f : (hovered ? 0.34f : 0.22f)), 5.0f * S);
-				dl->AddRectFilled(ImVec2(sx0, barY), ImVec2(sx1, barY + 2.0f), U32(col, gradeName.empty() ? 0.35f : 1.0f), 2.0f);
+				const bool bright = !gradeName.empty() && (hovered || si == rootSeg);
+				const ImVec4 fill = gradeName.empty() ? kChip : bright ? col : ImVec4(col.x * 0.5f, col.y * 0.5f, col.z * 0.5f, 1.0f);
+				SlantQuad(dl, ImVec2(sx0 + 1.0f * S, barY), ImVec2(sx1 - 1.0f * S, barY + barH), U32(fill));
 				FontScope f(fLabel);
-				std::string name = Segmenter::Name(sg.kind);
+				std::string name = Caps(Segmenter::Name(sg.kind));
 				ImVec2 ts = ImGui::CalcTextSize(name.c_str());
-				if (sx1 - sx0 > ts.x + 12.0f * S)
-					dl->AddText(ImVec2(sx0 + 7.0f * S, barY + (barH - ts.y) * 0.5f + 1.0f), U32(gradeName.empty() ? kMuted : kText, 0.92f), name.c_str());
+				if (sx1 - sx0 > ts.x + 14.0f * S)
+					dl->AddText(ImVec2(sx0 + 8.0f * S, barY + (barH - ts.y) * 0.5f), U32(gradeName.empty() ? kSub : bright ? OnFill(fill) : kText), name.c_str());
 			}
 			// The bar scrubs: click or drag to move through the rep
 			ImGui::SetCursorScreenPos(ImVec2(x0, barY));
@@ -1365,7 +1465,7 @@ void RLCoach::RenderWindow()
 			// Transport: back to start, play, step, time, speed, loop
 			ImGui::SetCursorScreenPos(ImVec2(x0, barY + barH + 12.0f * S));
 			const ImVec2 sq(32 * S, 28 * S);
-			if (ImGui::Button("|<", sq)) onGame([this]() { ViewerSeek(0.0f); });
+			if (QuietButton("|<", sq)) onGame([this]() { ViewerSeek(0.0f); });
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back to the start");
 			ImGui::SameLine(0, 6 * S);
 			const bool playing = uiViewerPlaying;
@@ -1373,45 +1473,43 @@ void RLCoach::RenderWindow()
 				onGame([this]() { viewerPlaying = !viewerPlaying; uiViewerPlaying = viewerPlaying; });
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip(playing ? "Pause" : "Play");
 			ImGui::SameLine(0, 6 * S);
-			if (ImGui::Button("<", sq)) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) - 1.0f); });
+			if (QuietButton("<", sq)) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) - 1.0f); });
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back 1 tick");
 			ImGui::SameLine(0, 6 * S);
-			if (ImGui::Button(">##step", sq)) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) + 1.0f); });
+			if (QuietButton(">##step", sq)) onGame([this]() { viewerPlaying = false; ViewerSeek(std::floor(viewerPlayhead) + 1.0f); });
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forward 1 tick");
 			ImGui::SameLine(0, 12 * S);
 			{
-				FontScope f(fMono);
-				ImGui::AlignTextToFramePadding();
-				ImGui::TextColored(kSub, "%s", std::format("{:.2f} / {:.2f} s", headF / 120.0f, total / 120.0f).c_str());
+				FontScope f(fHead);
+				ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (28.0f * S - ImGui::GetTextLineHeight()) * 0.5f);
+				ImGui::TextColored(kText, "%s", std::format("{:.2f}", headF / 120.0f).c_str());
+				ImGui::SameLine(0, 4.0f * S);
+				ImGui::TextColored(kMuted, "%s", std::format("/ {:.2f} S", total / 120.0f).c_str());
 			}
 			// Speed, as a small segmented control on the right
 			{
-				const float speeds[4] = { 0.1f, 0.25f, 0.5f, 1.0f };
-				const char* names[4] = { "0.1x", "0.25x", "0.5x", "1x" };
-				float segW = 0.0f;
-				const ImGuiStyle& st = ImGui::GetStyle();
-				for (const char* n : names) segW += ImGui::CalcTextSize(n).x + st.FramePadding.x * 2.0f + 2.0f;
-				const float loopW = ImGui::GetFrameHeight() + st.ItemInnerSpacing.x + ImGui::CalcTextSize("Loop").x + 10.0f;
-				ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 8.0f * S, (x1 - ImGui::GetWindowPos().x) - segW - loopW));
+				const char* const* names = speedNames;
+				const float timeEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+				const float rowY = ImGui::GetItemRectMin().y;
+				if (speedsBelow) ImGui::SetCursorScreenPos(ImVec2(x0, barY + barH + 12.0f * S + 34.0f * S));
+				else ImGui::SameLine(std::max(timeEnd + 10.0f * S, (x1 - ImGui::GetWindowPos().x) - segW - loopW));
+				(void)rowY;
 				ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2, 6));
 				for (int i = 0; i < 4; i++)
 				{
 					if (i > 0) ImGui::SameLine();
 					const bool on = std::fabs(uiViewerSpeed.load() - speeds[i]) < 0.001f;
-					ImGui::PushStyleColor(ImGuiCol_Button, on ? Hex(0x1F3350) : ImVec4(0, 0, 0, 0));
-					ImGui::PushStyleColor(ImGuiCol_Text, on ? kText : kMuted);
-					if (ImGui::Button(names[i], ImVec2(0, 28 * S)))
+					if (on ? AccentButton(names[i], ImVec2(0, 28 * S)) : SlantButton(names[i], ImVec2(0, 28 * S), kPanel2, true, kMuted))
 					{
 						const float sp = speeds[i];
 						uiViewerSpeed = sp;
 						onGame([this, sp]() { viewerSpeed = sp; });
 					}
-					ImGui::PopStyleColor(2);
 				}
 				ImGui::PopStyleVar();
 				ImGui::SameLine(0, 10 * S);
 				ImGui::AlignTextToFramePadding();
-				if (ImGui::Checkbox("Loop", &uiLoop))
+				if (UiStyle::Checkbox("Loop", &uiLoop))
 				{
 					const bool loop = uiLoop;
 					onGame([this, loop]() { viewerLoop = loop; });
@@ -1436,10 +1534,10 @@ void RLCoach::RenderWindow()
 			{
 				gradeText = busySlot == slot ? "" : "...";
 				sub = busySlot == slot ? "thinking" : "waiting";
-				if (!simReady) sub = "loading";
+				if (!simReady) sub = simMissing ? "setup" : "loading";
 				return;
 			}
-			if (!v.mine || v.status == WhatIfStatus::None) { gradeText = "-"; sub = simReady ? "" : "loading"; return; }
+			if (!v.mine || v.status == WhatIfStatus::None) { gradeText = "-"; sub = simReady ? "" : simMissing ? "setup" : "loading"; return; }
 			switch (v.status)
 			{
 			case WhatIfStatus::Found:
@@ -1468,21 +1566,22 @@ void RLCoach::RenderWindow()
 				const bool hov = ImGui::IsItemHovered();
 				ImGui::PopID();
 				const bool on = uiTab == t;
-				dl->AddRectFilled(a, b, U32(on ? kPanel : (hov ? kPanel2 : kBg)), 12.0f * S, ImDrawCornerFlags_Top);
-				dl->AddRect(a, ImVec2(b.x, b.y + (on ? 1.0f : 0.0f)), U32(on ? kLine : kLineSoft), 12.0f * S, ImDrawCornerFlags_Top);
+				dl->AddRectFilled(a, b, U32(on ? kPanel : (hov ? kPanel2 : kBg)), 3.0f * S, ImDrawCornerFlags_Top);
+				dl->AddRect(a, ImVec2(b.x, b.y + (on ? 1.0f : 0.0f)), U32(on ? kLine : kLineSoft), 3.0f * S, ImDrawCornerFlags_Top);
 				if (on) dl->AddRectFilled(ImVec2(a.x + 1, b.y - 1), ImVec2(b.x - 1, b.y + 2), U32(kPanel));   // open into the panel below
+				if (on) dl->AddRectFilled(a, ImVec2(b.x, a.y + 3.0f * S), U32(kAccent));                       // style A: the open tab's blue top
 				std::string gText, sub;
 				ImVec4 gCol;
 				tabStatus(t, gText, gCol, sub);
 				{
 					FontScope f(fLabel);
-					dl->AddText(ImVec2(a.x + 14 * S, a.y + 10 * S), U32(on ? kAccent : kMuted), names[t]);
+					dl->AddText(ImVec2(a.x + 14 * S, a.y + 9 * S), U32(on ? kAccentText : kMuted), names[t]);
 				}
 				float gx = a.x + 14 * S;
 				{
-					FontScope f(fMono);
+					FontScope f(fHead);
 					const ImVec2 ts = ImGui::CalcTextSize(gText.c_str());
-					dl->AddText(ImVec2(gx, a.y + 26 * S), U32(gCol), gText.c_str());
+					dl->AddText(ImVec2(gx, a.y + 24 * S), U32(gCol), gText.c_str());
 					gx += ts.x + 8.0f * S;
 				}
 				const int slot = t - 1;
@@ -1519,18 +1618,20 @@ void RLCoach::RenderWindow()
 				const ImVec2 q = ImGui::GetCursorScreenPos();
 				for (size_t i = 0; i < ts.size(); i++)
 				{
+					// Style A: a stat block with a colored edge (blue, green, orange in turn) and the value big and condensed
 					const ImVec2 a(q.x + i * (tw + g), q.y), b(a.x + tw, a.y + th);
-					dl->AddRectFilled(a, b, U32(kPanel2), 10.0f * S);
-					dl->AddRect(a, b, U32(kLineSoft), 10.0f * S);
-					{ FontScope f(fLabel); dl->AddText(ImVec2(a.x + 12 * S, a.y + 10 * S), U32(kMuted), Upper(ts[i].label).c_str()); }
-					{ FontScope f(fMono); dl->AddText(ImVec2(a.x + 12 * S, a.y + 25 * S), U32(kText), ts[i].value.c_str()); }
+					static const ImVec4 kEdge[3] = { kAccent, kGood, kOrange };
+					dl->AddRectFilled(a, b, U32(kPanel2), 2.0f * S);
+					dl->AddRectFilled(a, ImVec2(a.x + 3.0f * S, b.y), U32(kEdge[i % 3]));
+					{ FontScope f(fLabel); dl->AddText(ImVec2(a.x + 12 * S, a.y + 8 * S), U32(kMuted), Upper(ts[i].label).c_str()); }
+					{ FontScope f(fHead); dl->AddText(ImVec2(a.x + 12 * S, a.y + 23 * S), U32(kText), Caps(ts[i].value.c_str()).c_str()); }
 					dl->AddText(ImVec2(a.x + 12 * S, a.y + 49 * S), U32(kMuted), ts[i].sub.c_str());
 				}
 				ImGui::Dummy(ImVec2(innerW, th));
 			};
 			auto headline = [&](const std::string& text) {
 				FontScope f(fHead);
-				ImGui::TextWrapped("%s", text.c_str());
+				ImGui::TextWrapped("%s", Caps(text.c_str()).c_str());
 			};
 			auto subline = [&](const std::string& text) {
 				if (text.empty()) return;
@@ -1629,7 +1730,9 @@ void RLCoach::RenderWindow()
 				const int slot = uiTab - 1;
 				const LineView& v = line[slot];
 				const bool fixTab = slot == kFixLine;
-				if (!simReady)
+				if (simMissing)
+					emptyState(0, "Needs the arena files", "A one-time setup: open the settings (F2, Plugins, Road2) and follow the setup card.");
+				else if (!simReady)
 					emptyState(0, "Loading the simulator...", "The searches start as soon as it's ready.");
 				else if (busySlot == slot || ((pending || busy) && (!v.mine || v.status == WhatIfStatus::None)))
 				{
@@ -1688,7 +1791,7 @@ void RLCoach::RenderWindow()
 							ImGui::SameLine(92.0f * S);
 							ImGui::TextColored(st.yours > 0 ? SegGradeColor(yn) : kMuted, "%s", yn);
 							ImGui::SameLine(0, 4.0f * S);
-							ImGui::TextColored(kMuted, "->");
+							ImGui::TextColored(kMuted, "\xE2\x86\x92");
 							ImGui::SameLine(0, 4.0f * S);
 							ImGui::TextColored(st.line > 0 ? SegGradeColor(ln) : kMuted, "%s", ln);
 							if (st.root) { ImGui::SameLine(); Pill("ROOT CAUSE", kRoot); }
@@ -1714,7 +1817,7 @@ void RLCoach::RenderWindow()
 					if (ImGui::IsItemHovered())
 						ImGui::SetTooltip("Plays it with your car from just before it changes. Your real path shows in grey while it plays.");
 					ImGui::SameLine(0, 10 * S);
-					if (OutlineButton("Practice it", btn)) onGame([this, slot]() { PracticeLine(slot); });
+					if (OutlineButton("Practice it", btn, kOrange)) onGame([this, slot]() { PracticeLine(slot); });
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Practice from where it takes over, with its path drawn faintly to follow.");
 				}
 				else
@@ -1820,7 +1923,7 @@ void RLCoach::RenderWindow()
 			auto practiceButton = [&](int si) {
 				const bool root = si == rootSeg;
 				ImGui::PushID(si + 2000);
-				const bool clicked = root ? OutlineButton("Practice", ImVec2(84 * S, 0), kRoot) : ImGui::Button("Practice", ImVec2(84 * S, 0));
+				const bool clicked = root ? OutlineButton("Practice", ImVec2(84 * S, 0), kRoot) : QuietButton("Practice", ImVec2(84 * S, 0));
 				ImGui::PopID();
 				if (clicked) onGame([this, si]() { PracticeStart(si); });
 				if (root && ImGui::IsItemHovered() && !notes.empty()) ImGui::SetTooltip("The root cause is in this part: %s", notes[0].cue.c_str());
@@ -1926,7 +2029,7 @@ void RLCoach::RenderWindow()
 				// Mark the whole shot as a double-tap drill: a goal without a double tap (or triple, quad...) counts as a 1
 				bool drill = shotBook.IsDoubleTapDrill(cur->shotKey);
 				ImGui::SameLine(0, 18 * S);
-				if (ImGui::Checkbox("Double-tap drill", &drill) && writer)
+				if (UiStyle::Checkbox("Double-tap drill", &drill) && writer)
 				{
 					shotBook.SetDoubleTapDrill(writer->Folder(), cur->shotKey, drill);
 					gradeBook.Invalidate(cur->shotKey);
@@ -1941,10 +2044,10 @@ void RLCoach::RenderWindow()
 				int th = *targetHitbox;
 				const char* thNames[3] = { "Off", "For your touch", "For the earliest intercept" };
 				ImGui::PushItemWidth(220 * S);
-				if (ImGui::Combo("Target car outline", &th, thNames, 3))
+				if (UiStyle::Combo("Target car outline", &th, thNames, 3))
 				{
 					const float v = static_cast<float>(th);
-					onGame([this, v]() { cvarManager->getCvar("rlcoach_target_hitbox").setValue(v); });
+					onGame([this, v]() { cvarManager->getCvar("road2_target_hitbox").setValue(v); });
 				}
 				ImGui::PopItemWidth();
 			}
@@ -1988,7 +2091,7 @@ void RLCoach::RenderWindow()
 		const int active = (range != 0) + (gradeFrom != 0) + (gradeMask != 31) + (shotPick != 0) + (*showUngraded ? 1 : 0);
 		ImGui::SameLine();
 		const std::string fl = active ? std::format("Filter ({})##filter", active) : std::string("Filter##filter");
-		if (active ? OutlineButton(fl.c_str()) : ImGui::Button(fl.c_str())) ImGui::OpenPopup("repfilter");
+		if (active ? OutlineButton(fl.c_str()) : QuietButton(fl.c_str())) ImGui::OpenPopup("repfilter");
 		if (ImGui::BeginPopup("repfilter"))
 		{
 			FontScope f(fLabel);
@@ -1997,7 +2100,7 @@ void RLCoach::RenderWindow()
 			for (int r = 0; r < 4; r++)
 			{
 				if (r) ImGui::SameLine();
-				if (ImGui::RadioButton(ranges[r], range == r)) setCvar("rlcoach_viewer_range", static_cast<float>(r));
+				if (UiStyle::RadioButton(ranges[r], range == r)) setCvar("road2_viewer_range", static_cast<float>(r));
 			}
 			ImGui::Spacing();
 			ImGui::TextColored(kMuted, "GRADED BY");
@@ -2005,7 +2108,7 @@ void RLCoach::RenderWindow()
 			for (int g = 0; g < 3; g++)
 			{
 				if (g) ImGui::SameLine();
-				if (ImGui::RadioButton(froms[g], gradeFrom == g)) setCvar("rlcoach_viewer_grade_from", static_cast<float>(g));
+				if (UiStyle::RadioButton(froms[g], gradeFrom == g)) setCvar("road2_viewer_grade_from", static_cast<float>(g));
 			}
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("You: reps you rated. Auto: the plugin's grade. You or auto: either one counts.");
 			ImGui::Spacing();
@@ -2017,11 +2120,11 @@ void RLCoach::RenderWindow()
 				ImGui::PushID(g);
 				ImGui::PushStyleColor(ImGuiCol_Button, on ? GradeColor(g) : Hex(0x15223A));
 				ImGui::PushStyleColor(ImGuiCol_Text, on ? kOnAccent : kMuted);
-				if (ImGui::Button(std::to_string(g).c_str(), ImVec2(30 * S, 0)))
+				if (SlantButton(std::to_string(g).c_str(), ImVec2(30 * S, 0), on ? GradeColor(g) : Hex(0x15223A), true, on ? kOnAccent : kMuted))
 				{
 					int m = gradeMask ^ (1 << (g - 1));
 					if (m == 0) m = 31;   // nothing picked = all of them
-					setCvar("rlcoach_viewer_grades", static_cast<float>(m));
+					setCvar("road2_viewer_grades", static_cast<float>(m));
 				}
 				ImGui::PopStyleColor(2);
 				ImGui::PopID();
@@ -2030,17 +2133,17 @@ void RLCoach::RenderWindow()
 			ImGui::TextColored(kMuted, "SHOT");
 			int sp = shotPick;
 			ImGui::PushItemWidth(170 * S);
-			if (ImGui::Combo("##shot", &sp, kShotNames, 8)) setCvar("rlcoach_viewer_shot", static_cast<float>(sp));
+			if (UiStyle::Combo("##shot", &sp, kShotNames, 8)) setCvar("road2_viewer_shot", static_cast<float>(sp));
 			ImGui::PopItemWidth();
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("The shot type comes from the auto grade, so this only lists auto-graded reps.");
 			ImGui::Spacing();
 			bool showAll = *showUngraded;
-			if (ImGui::Checkbox("Show ungraded", &showAll)) setCvar("rlcoach_viewer_show_ungraded", showAll ? 1.0f : 0.0f);
+			if (UiStyle::Checkbox("Show ungraded", &showAll)) setCvar("road2_viewer_show_ungraded", showAll ? 1.0f : 0.0f);
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reps you didn't rate that also have no auto grade (bailed or reset).\nThey stay saved; this only hides them from the list.");
 			if (active && LinkButton("Clear filters"))
 			{
-				setCvar("rlcoach_viewer_range", 0); setCvar("rlcoach_viewer_grade_from", 0); setCvar("rlcoach_viewer_grades", 31);
-				setCvar("rlcoach_viewer_shot", 0); setCvar("rlcoach_viewer_show_ungraded", 0);
+				setCvar("road2_viewer_range", 0); setCvar("road2_viewer_grade_from", 0); setCvar("road2_viewer_grades", 31);
+				setCvar("road2_viewer_shot", 0); setCvar("road2_viewer_show_ungraded", 0);
 			}
 			ImGui::EndPopup();
 		}

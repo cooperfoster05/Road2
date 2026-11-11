@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "RLCoach.h"
+#include "UiStyle.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -9,6 +10,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_set>
+#include <cwctype>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -26,6 +28,10 @@
 // Summaries, ratings and grades are never deleted. Neither are
 // recordings listed in protected_reps.txt (the engine and bot
 // benchmark reps, one file name per line; Oct 24).
+// Nov 4 (the retention question, Coop agreed): an unrated rep that
+// auto-graded 4 or 5, or that you opened in the review (where the
+// smallest fix and the engine line are found; reviewed.csv), keeps
+// its recording at least 30 days instead of the unrated keep time.
 // ============================================================
 
 namespace
@@ -127,7 +133,7 @@ void RLCoach::Housekeep(const std::filesystem::path& root, const std::filesystem
 		for (const RepListItem& it : RepLibrary::ListReps(root))
 			if (it.endReason == "reset" && !it.kept) bailed.insert(it.file);
 		int moved = RepStore::MigrateLegacy(root, bailed, &housekeepStop);
-		LOG("RL Coach: packed {} old rep files", moved);
+		LOG("Road2: packed {} old rep files", moved);
 	}
 	if (housekeepStop) return;
 
@@ -168,6 +174,19 @@ int RLCoach::TrimStorage(const std::filesystem::path& root, const std::filesyste
 	}
 	std::vector<RepListItem> items = RepLibrary::ListReps(root);   // newest first
 	std::time_t now = std::time(nullptr);
+	constexpr double kKeepWorthDays = 30.0;
+	std::unordered_map<std::string, int> autoGrades;
+	gradeBook.Copy(autoGrades);
+	std::unordered_set<std::string> reviewed;
+	{
+		std::ifstream in(root / "reviewed.csv");
+		std::string line;
+		while (std::getline(in, line))
+		{
+			while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+			if (!line.empty()) reviewed.insert(line);
+		}
+	}
 
 	std::unordered_set<std::string> drop;
 	std::vector<std::pair<const RepListItem*, uint64_t>> mayTrim;   // candidates for the size cap
@@ -181,6 +200,7 @@ int RLCoach::TrimStorage(const std::filesystem::path& root, const std::filesyste
 		if (safe) { total += bytes; continue; }
 		double age = AgeDays(it.savedAt, now);
 		double limit = (it.rating > 0 || it.recoveryRating > 0) ? keepRatedD : keepD;
+		if (auto g = autoGrades.find(it.file); (g != autoGrades.end() && g->second >= 4) || reviewed.count(it.file)) limit = std::max(limit, kKeepWorthDays);
 		if (age > limit) { drop.insert(it.file); continue; }
 		total += bytes;
 		mayTrim.push_back({ &it, bytes });
@@ -238,7 +258,7 @@ void RLCoach::StartExport()
 			return;
 		}
 		chunks.emplace_back("__index.csv", index);
-		auto file = root / "exports" / ("RLCoach_reps_" + NowStamp("%Y-%m-%d_%H-%M-%S") + ".rlc");
+		auto file = root / "exports" / ("Road2_reps_" + NowStamp("%Y-%m-%d_%H-%M-%S") + ".rlc");
 		std::string err;
 		if (RepStore::WriteBundle(file, chunks, err))
 			SetStorageMsg(std::format("Exported {} starred rep{} to exports\\{}", n, n == 1 ? "" : "s", file.filename().string()));
@@ -278,7 +298,7 @@ void RLCoach::StartImport()
 				if (name == "__index.csv") index = &csv;
 				else byName[name] = &csv;
 			}
-			if (!index) { problems += " " + file.filename().string() + ": not an RL Coach export."; continue; }
+			if (!index) { problems += " " + file.filename().string() + ": not a Road2 export."; continue; }
 
 			std::string tag = CleanTag(file.stem().string());
 			fs::path bundle = root / "sessions" / ("imported_" + tag + ".rlc");
@@ -345,6 +365,16 @@ void RLCoach::ToggleKeep(const std::string& file)
 	}
 }
 
+void RLCoach::OpenDataSubfolder(const char* name)
+{
+	if (writer) OpenFolder(writer->Folder() / name);
+}
+
+void RLCoach::OpenDataFolder()
+{
+	if (writer) OpenFolder(writer->Folder());
+}
+
 void RLCoach::RenderStorageSettings()
 {
 	auto setCvar = [this](const std::string& name, float value) {
@@ -360,44 +390,158 @@ void RLCoach::RenderStorageSettings()
 			storageStatsAt = now;
 		}
 	}
+	UiStyle::Heading("Recordings");
 	ImGui::Text("Recordings use %.1f MB of your %.0f MB cap", uiStorageBytes / (1024.0 * 1024.0), *storageCapMb);
 
 	int kd = static_cast<int>(*keepDays);
-	if (ImGui::SliderInt("Keep recordings (days)", &kd, 1, 60)) setCvar("rlcoach_keep_days", static_cast<float>(kd));
+	if (UiStyle::SliderInt("Keep recordings (days)", &kd, 1, 60)) setCvar("road2_keep_days", static_cast<float>(kd));
 	int krd = static_cast<int>(*keepRatedDays);
-	if (ImGui::SliderInt("Keep rated reps' recordings (days)", &krd, 7, 730)) setCvar("rlcoach_keep_rated_days", static_cast<float>(krd));
+	if (UiStyle::SliderInt("Keep rated reps' recordings (days)", &krd, 7, 730)) setCvar("road2_keep_rated_days", static_cast<float>(krd));
 	int cap = static_cast<int>(*storageCapMb);
-	if (ImGui::SliderInt("Size cap (MB)", &cap, 100, 10240))
+	if (UiStyle::SliderInt("Size cap (MB)", &cap, 100, 10240))
 	{
 		cap = std::max(100, (cap / 50) * 50);
-		setCvar("rlcoach_storage_cap_mb", static_cast<float>(cap));
+		setCvar("road2_storage_cap_mb", static_cast<float>(cap));
 	}
-	ImGui::TextWrapped("Summaries, your ratings and auto grades are kept forever. Starred reps (Keep in the rep viewer) "
-		"and your fastest goal on each shot are never cleaned up. Bailed reps keep only their summary.");
+	ImGui::TextWrapped("Summaries, your ratings and auto grades are kept forever. Starred reps (the star in the rep viewer) "
+		"and your fastest goal on each shot are never cleaned up. Reps that auto-graded 4 or 5, and any rep you've opened in the review, "
+		"keep their recording at least 30 days. Bailed reps keep only their summary.");
 
 	ImGui::Spacing();
-	ImGui::TextUnformatted("Sharing reps");
+	UiStyle::Heading("Sharing reps");
 	ImGui::TextDisabled("Export packs your starred reps into one file. To watch a friend's reps, put their file in the imports folder");
 	ImGui::TextDisabled("(rename it to their name first, e.g. jake.rlc) and click Import. Their reps never count as your benchmarks.");
 	bool sharing = shareBusy;
 	if (sharing) ImGui::TextDisabled("Working...");
 	else
 	{
-		if (ImGui::Button("Export starred reps")) StartExport();
+		if (UiStyle::QuietButton("Export starred reps")) StartExport();
 		ImGui::SameLine();
-		if (ImGui::Button("Import shared reps")) StartImport();
+		if (UiStyle::QuietButton("Import shared reps")) StartImport();
 		ImGui::SameLine();
-		if (ImGui::Button("Open exports folder") && writer) OpenFolder(writer->Folder() / "exports");
+		if (UiStyle::QuietButton("Open exports folder") && writer) OpenFolder(writer->Folder() / "exports");
 		ImGui::SameLine();
-		if (ImGui::Button("Open imports folder") && writer) OpenFolder(writer->Folder() / "imports");
+		if (UiStyle::QuietButton("Open imports folder") && writer) OpenFolder(writer->Folder() / "imports");
 	}
 	ImGui::Spacing();
 
+	UiStyle::Heading("Clean up");
 	bool busy = housekeepBusy;
 	if (busy) ImGui::TextDisabled("Clean up now");
-	else if (ImGui::Button("Clean up now")) StartHousekeeping();
+	else if (UiStyle::QuietButton("Clean up now")) StartHousekeeping();
 	std::string msg = GetStorageMsg();
 	if (!msg.empty()) { ImGui::SameLine(); ImGui::TextDisabled("%s", msg.c_str()); }
 	if (writer && writer->FailedSaves() > 0)
 		ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%d save(s) failed this session. Is the disk full?", writer->FailedSaves());
+}
+
+namespace { void Road2ModuleAnchor() {} }   // an address inside this DLL (RetireOldPlugin)
+
+// ============================================================
+// From RLCoach to Road2 (Nov 6). Only ever does anything for someone who ran a build from before v1 (Coop).
+// ============================================================
+std::filesystem::path RLCoach::DataRoot(const std::filesystem::path& base, bool& moved)
+{
+	namespace fs = std::filesystem;
+	moved = false;
+	std::error_code ec;
+	const fs::path oldDir = base / "RLCoach", newDir = base / "Road2";
+	if (!fs::exists(newDir, ec) && fs::exists(oldDir, ec))
+	{
+		fs::rename(oldDir, newDir, ec);
+		if (ec)
+		{
+			LOG("Road2: couldn't rename {} to Road2 ({}); using it as it is", oldDir.string(), ec.message());
+			return oldDir;
+		}
+		moved = true;
+		LOG("Road2: moved your data from {} to {}", oldDir.string(), newDir.string());
+	}
+	return newDir;
+}
+
+void RLCoach::CarryOverOldSettings(const std::filesystem::path& base)
+{
+	// BakkesMod keeps cvars in cfg\config.cfg (name "value") and binds in cfg\binds.cfg (bind key "command")
+	const std::filesystem::path cfg = base.parent_path() / "cfg";
+	int values = 0, binds = 0;
+	{
+		std::ifstream in(cfg / "config.cfg");
+		std::string line;
+		while (std::getline(in, line))
+		{
+			if (!line.empty() && line.back() == '\r') line.pop_back();
+			if (line.rfind("rlcoach_", 0) != 0) continue;
+			const size_t sp = line.find(' ');
+			if (sp == std::string::npos) continue;
+			std::string value = line.substr(sp + 1);
+			if (value.size() >= 2 && value.front() == '"' && value.back() == '"') value = value.substr(1, value.size() - 2);
+			CVarWrapper cv = cvarManager->getCvar("road2_" + line.substr(8, sp - 8));
+			if (cv.IsNull()) continue;
+			cv.setValue(value);
+			values++;
+		}
+	}
+	{
+		std::ifstream in(cfg / "binds.cfg");
+		std::string line;
+		while (std::getline(in, line))
+		{
+			if (!line.empty() && line.back() == '\r') line.pop_back();
+			if (line.rfind("bind ", 0) != 0 || line.find("rlcoach_") == std::string::npos) continue;
+			size_t at;
+			while ((at = line.find("rlcoach_")) != std::string::npos) line.replace(at, 8, "road2_");
+			cvarManager->executeCommand(line, false);
+			binds++;
+		}
+	}
+	LOG("Road2: carried over {} settings and {} key binds from the old RLCoach names", values, binds);
+}
+
+void RLCoach::RetireOldPlugin(const std::filesystem::path& base)
+{
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	const fs::path plugins = base.parent_path() / "plugins";
+	const fs::path old = plugins / "RLCoach.dll";
+	if (!fs::exists(old, ec)) return;
+#ifdef _WIN32
+	// Never this plugin itself (if it was built under the old name)
+	HMODULE self = nullptr;
+	wchar_t path[MAX_PATH] = {};
+	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		reinterpret_cast<LPCWSTR>(&Road2ModuleAnchor), &self) && GetModuleFileNameW(self, path, MAX_PATH))
+	{
+		std::wstring me = fs::path(path).filename().wstring();
+		for (auto& ch : me) ch = static_cast<wchar_t>(towlower(ch));
+		if (me == L"rlcoach.dll") return;
+	}
+#endif
+	LOG("Road2: an old RLCoach.dll is still installed; unloading and removing it");
+	gameWrapper->SetTimeout([this, old, plugins](GameWrapper*) {
+		cvarManager->executeCommand("plugin unload rlcoach", false);
+		gameWrapper->SetTimeout([this, old, plugins](GameWrapper*) {
+			std::error_code e2;
+			fs::remove(old, e2);
+			if (e2) LOG("Road2: couldn't delete {} ({}); delete it by hand", old.string(), e2.message());
+			// load Road2 at startup instead of RLCoach
+			const fs::path cfgFile = plugins.parent_path() / "cfg" / "plugins.cfg";
+			std::ifstream in(cfgFile);
+			std::ostringstream out;
+			std::string line;
+			bool haveRoad2 = false, changed = false;
+			std::vector<std::string> lines;
+			while (std::getline(in, line)) lines.push_back(line);
+			in.close();
+			for (const std::string& l : lines) if (l.find("plugin load road2") != std::string::npos) haveRoad2 = true;
+			for (std::string l : lines)
+			{
+				std::string t = l;
+				if (!t.empty() && t.back() == '\r') t.pop_back();
+				if (t == "plugin load rlcoach") { changed = true; if (haveRoad2) continue; l = "plugin load road2"; haveRoad2 = true; }
+				out << l << "\n";
+			}
+			if (changed) { std::ofstream f(cfgFile, std::ios::binary); f << out.str(); }
+		}, 1.0f);
+	}, 1.0f);
 }

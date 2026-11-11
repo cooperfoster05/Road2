@@ -78,13 +78,13 @@ BEGIN
     BEGIN
         BLOCK "041404b0"
         BEGIN
-            VALUE "CompanyName", "TODO: <Company name>"
-            VALUE "FileDescription", "TODO: <File description>"
+            VALUE "CompanyName", "Cooper Foster"
+            VALUE "FileDescription", "Road2: chess.com-style review for your Rocket League mechanics"
             VALUE "FileVersion", stringify(VERSION_MAJOR) "." stringify(VERSION_MINOR) "." stringify(VERSION_PATCH) "." stringify(VERSION_BUILD)
-            VALUE "InternalName", "RLCoach.dll"
-            VALUE "LegalCopyright", "Copyright (C) 2020"
-            VALUE "OriginalFilename", "RLCoach.dll"
-            VALUE "ProductName", "TODO: <Product name>"
+            VALUE "InternalName", "Road2.dll"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Cooper Foster (MIT)"
+            VALUE "OriginalFilename", "Road2.dll"
+            VALUE "ProductName", "Road2"
             VALUE "ProductVersion", stringify(VERSION_MAJOR) "." stringify(VERSION_MINOR) "." stringify(VERSION_PATCH) "." stringify(VERSION_BUILD)
         END
     END

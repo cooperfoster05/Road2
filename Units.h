@@ -1,5 +1,5 @@
 #pragma once
-// Speed units for everything the plugin shows (rlcoach_speed_units). Plain C++.
+// Speed units for everything the plugin shows (road2_speed_units). Plain C++.
 
 #include <atomic>
 #include <format>

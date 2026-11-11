@@ -1,5 +1,5 @@
-# Downloads pro replays from ballchasing.com into RLCoach's data folder (pro_replays\), for measuring how pros
-# set up and finish mechanics. Your API key stays on your PC: put it in ballchasing_key.txt in the RLCoach data
+# Downloads pro replays from ballchasing.com into Road2's data folder (pro_replays\), for measuring how pros
+# set up and finish mechanics. Your API key stays on your PC: put it in ballchasing_key.txt in the Road2 data
 # folder (one line, nothing else). Run from PowerShell:
 #     powershell -ExecutionPolicy Bypass -File tools\get_pro_replays.ps1
 #     powershell -ExecutionPolicy Bypass -File tools\get_pro_replays.ps1 -Count 100
@@ -8,7 +8,8 @@
 # already has (safe to run again).
 param([int]$Count = 50, [string]$Playlist = "", [string]$Title = "", [switch]$AnyPlayer)
 
-$data = Join-Path $env:APPDATA "bakkesmod\bakkesmod\data\RLCoach"
+$data = Join-Path $env:APPDATA "bakkesmod\bakkesmod\data\Road2"
+if (-not (Test-Path $data)) { $data = Join-Path $env:APPDATA "bakkesmod\bakkesmod\data\RLCoach" }   # before the plugin's first run as Road2
 $keyFile = Join-Path $data "ballchasing_key.txt"
 if (-not (Test-Path $keyFile)) { Write-Host "Put your ballchasing API key in $keyFile first."; exit 1 }
 $key = (Get-Content $keyFile -Raw).Trim()

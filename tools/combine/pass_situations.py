@@ -1,5 +1,5 @@
 # Turns real passes (real_passes.csv from extract_passes.py) into the Combine's first-touch situations
-# (data/RLCoach/combine/pass_situations.csv): turned so the passing team attacks the orange goal (+y), with the
+# (data/Road2/combine/pass_situations.csv): turned so the passing team attacks the orange goal (+y), with the
 # receiver's facing as Unreal pitch / yaw / roll. Receivers already jumping, mid-air or spinning are left out (bad
 # spawns). Same columns as save_situations.csv, plus where the ball was received: its height, its speed, and how long
 # after the pass.

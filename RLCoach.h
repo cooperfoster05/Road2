@@ -21,6 +21,7 @@
 #include "ControllerOverlay.h"
 #include "Lesson.h"
 #include "Combine.h"
+#include "Nexto.h"
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -71,14 +72,14 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	, public PluginWindowBase    // the rep viewer window
 {
 	// ---- Settings (cvars) ----
-	std::shared_ptr<bool>  hudEnabled;        // rlcoach_hud
-	std::shared_ptr<bool>  recordingEnabled;  // rlcoach_recording (data farming on/off, starts off every session)
-	std::shared_ptr<float> maxRepSeconds;     // rlcoach_max_rep_seconds
-	std::shared_ptr<bool>  useNumpad;         // rlcoach_rate_numpad (rate with numpad 1-5 instead of number row)
-	std::shared_ptr<bool>  manualGrading;     // rlcoach_manual_grading (rating keys 1-5 and recovery keys 6-8 on/off)
-	std::shared_ptr<float> postRollSeconds;   // rlcoach_postroll_seconds (minimum recording after the shot, catches late goals)
-	std::shared_ptr<float> postRollMaxSeconds;// rlcoach_postroll_max_seconds (keep going until you recover, up to this long)
-	std::shared_ptr<bool>  livePrediction;    // rlcoach_live_prediction (draw the predicted ball path while you play)
+	std::shared_ptr<bool>  hudEnabled;        // road2_hud
+	std::shared_ptr<bool>  recordingEnabled;  // road2_recording (data farming on/off, starts off every session)
+	std::shared_ptr<float> maxRepSeconds;     // road2_max_rep_seconds
+	std::shared_ptr<bool>  useNumpad;         // road2_rate_numpad (rate with numpad 1-5 instead of number row)
+	std::shared_ptr<bool>  manualGrading;     // road2_manual_grading (rating keys 1-5 and recovery keys 6-8 on/off)
+	std::shared_ptr<float> postRollSeconds;   // road2_postroll_seconds (minimum recording after the shot, catches late goals)
+	std::shared_ptr<float> postRollMaxSeconds;// road2_postroll_max_seconds (keep going until you recover, up to this long)
+	std::shared_ptr<bool>  livePrediction;    // road2_live_prediction (draw the predicted ball path while you play)
 
 	// ---- Ball prediction (RocketSim) ----
 	BallPredictor predictor;
@@ -92,9 +93,9 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	ShotBook shotBook;
 
 	// ---- Storage upkeep (RLCoachStorage.cpp) ----
-	std::shared_ptr<float> keepDays;          // rlcoach_keep_days: full recordings of unrated reps
-	std::shared_ptr<float> keepRatedDays;     // rlcoach_keep_rated_days: full recordings of reps you rated
-	std::shared_ptr<float> storageCapMb;      // rlcoach_storage_cap_mb: oldest un-kept recordings go first past this
+	std::shared_ptr<float> keepDays;          // road2_keep_days: full recordings of unrated reps
+	std::shared_ptr<float> keepRatedDays;     // road2_keep_rated_days: full recordings of reps you rated
+	std::shared_ptr<float> storageCapMb;      // road2_storage_cap_mb: oldest un-kept recordings go first past this
 	std::thread housekeepThread;
 	std::atomic<bool> housekeepBusy{ false };
 	std::atomic<bool> housekeepStop{ false };
@@ -232,17 +233,26 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	bool  repListLoaded = false;
 	int   selectedRep = -1;
 	bool  uiLoop = true;
-	std::shared_ptr<bool> showUngraded;   // rlcoach_viewer_show_ungraded
-	std::shared_ptr<int>  viewerRange;    // rlcoach_viewer_range: 0 today, 1 last 7 days, 2 starred, 3 all
-	std::shared_ptr<int>  viewerGradeFrom;// rlcoach_viewer_grade_from: whose grade the grade filter reads: 0 either, 1 yours, 2 auto
-	std::shared_ptr<int>  viewerGrades;   // rlcoach_viewer_grades: which grades show, bit g-1 for grade g (31 = all)
-	std::shared_ptr<int>  viewerShotFilter; // rlcoach_viewer_shot: 0 all shots, else the auto grade's shot type + 1
+	std::shared_ptr<bool> showUngraded;   // road2_viewer_show_ungraded
+	std::shared_ptr<int>  viewerRange;    // road2_viewer_range: 0 today, 1 last 7 days, 2 starred, 3 all
+	std::shared_ptr<int>  viewerGradeFrom;// road2_viewer_grade_from: whose grade the grade filter reads: 0 either, 1 yours, 2 auto
+	std::shared_ptr<int>  viewerGrades;   // road2_viewer_grades: which grades show, bit g-1 for grade g (31 = all)
+	std::shared_ptr<int>  viewerShotFilter; // road2_viewer_shot: 0 all shots, else the auto grade's shot type + 1
 
 	void ViewerLoad(const RepListItem& item);  // game thread
 	void ViewerExit();                         // game thread
 	void ViewerSeek(float tick);               // game thread
 	void ViewerTick(CarWrapper& car);          // game thread, every physics tick
 	void OverrideViewerInput(CarWrapper& car, void* params); // game thread, before the game reads input
+	void OverrideRideInput(CarWrapper& car, void* params);   // game thread: a lesson's running start played as inputs
+	void OpenDataSubfolder(const char* name);   // Explorer at data/Road2/<name>
+	void OpenDataFolder();   // Explorer at data/Road2 (the settings tab)
+	// The move from RLCoach to Road2 (Nov 6, for v1): the data folder data\RLCoach becomes data\Road2, settings and
+	// key binds saved under the old rlcoach_ names carry over to road2_, and an old RLCoach.dll is unloaded and removed
+	// so the two don't both run. RLCoachStorage.cpp
+	std::filesystem::path DataRoot(const std::filesystem::path& base, bool& moved);
+	void CarryOverOldSettings(const std::filesystem::path& base);
+	void RetireOldPlugin(const std::filesystem::path& base);
 	void RefreshRepList();                     // render thread
 	void DrawViewerPaths(CanvasWrapper& canvas);
 	void DrawPredictedPath(CanvasWrapper& canvas, const std::vector<BallSample>& path);
@@ -297,7 +307,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	bool uiDetailsOpen = false;           // render thread: the breakdown under the tabs
 
 	// Fonts (UiFonts.h), loaded by BakkesMod; null until loaded (the default font is used meanwhile)
-	ImFont* uiFonts[6] = {};
+	ImFont* uiFonts[9] = {};             // UiFonts::kCount (style A added three Barlow faces)
 	void LoadUiFonts();                   // onLoad: install and queue them
 	void FetchUiFonts();                  // render thread: pick up the ones that have loaded
 
@@ -311,6 +321,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	int   practiceSegStart = 0;              // start tick of the practiced segment (for grading)
 	int   practiceTargetTick = 0;            // the moment you picked (segment start, or the viewer's playhead)
 	int   practiceRideUntil = -1;            // lessons: the model drives the car up to this tick (a running start), then it's yours
+	bool  practiceRideByInput = false;       // ...by playing the model's inputs on your car (the game flips for real), not putting its frames back
 	int   practiceStartTick = 0;             // where each attempt starts (target minus lead-in)
 	int   practiceBallStartTick = 0;         // never start before the ball is moving
 	float practiceLeadIn = 0.5f;             // seconds of lead-in before the target
@@ -389,6 +400,8 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	bool  learnWarmup = false;           // this attempt is the session's warm-up check
 	int   learnWarmupReturn = 0;
 	bool  learnWarmupOffered = false, learnWarmupDone = false;
+	bool  learnTestOut = false;          // tiers 1-2 (Nov 2): the whole thing first; 3 of 5 at 4-5 completes the lesson
+	std::vector<int> learnTestOutScores; // this test-out's attempts
 	std::vector<Frame> learnFull;        // the attempt in progress in model time: the model up to the stage start, then you
 	StageScore learnLast;
 	int   learnLastStage = -1;
@@ -400,15 +413,19 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	struct UiLessonEntry
 	{
 		std::string id, name, blurb;
+		int tier = 0;
 		bool built = false, locked = false, completed = false;
 		int cleared = 0, stages = 0;
+		int best = 0;                       // best score on the whole mechanic (the last stage)
+		bool testedOut = false;             // passed by testing out (tiers 1-2)
 		std::vector<std::string> missing;   // prerequisites not complete yet (names)
+		std::vector<std::string> needs;     // every prerequisite (ids): the skill tree's lines
 	};
 	std::vector<UiLessonEntry> learnList;
 	bool learnInList = false;            // Learn is showing the lesson list
 	bool learnInListOpen = false;        // Learn is open at all (list or lesson)
 	std::set<std::string> learnWarmupSeen;   // lessons whose warm-up was offered this session
-	std::shared_ptr<bool> learnUnlockAll;    // rlcoach_learn_unlock_all
+	std::shared_ptr<bool> learnUnlockAll;    // road2_learn_unlock_all
 
 	// What the window shows (copied under the lock by LearnPublish)
 	struct UiLearn
@@ -427,9 +444,12 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 		StageScore last;
 		std::vector<std::string> events;
 		std::vector<char> stageWhole;          // the stage is a whole run (kickoffs have one per side)
+		bool moveLesson = false;               // timed against the model (movement and air control), not graded like a rep
 		std::vector<std::string> notes;        // more about it, under the page (kickoffs)
 		float stars[3] = { 0, 0, 0 };          // kickoffs: time to the ball for 1-3 stars
 		std::string starsWho;
+		bool testOut = false, canTestOut = false;   // testing out now; the lesson could be tested out of (tiers 1-2, not done)
+		std::vector<int> testOutScores;
 	};
 	std::mutex uiLearnMutex;
 	UiLearn uiLearn;
@@ -448,6 +468,8 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void LearnSetGhost(bool on);
 	void LearnStartWarmup();
 	void LearnSkipWarmup();
+	void LearnStartTestOut();            // the whole thing at full speed: pass 3 of 5 and the lesson's done
+	void LearnEndTestOut(bool passed);
 	void LearnBeginLive();               // practice just went live: start the model-time copy
 	bool LearnStageDone(const Frame& f); // practice tick: the stage is over (stages that end before the finish)
 	void LearnOnAttempt(const std::string& reason);   // from PracticeFinishAttempt
@@ -456,9 +478,14 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void LearnPublish();
 	void RenderLearn();                  // render thread
 	void RenderLearnList();
+	void RenderSkillTree(const UiLearn& u);   // the drawn tree (a wide enough window)
+	void RenderLearnLocks(bool unlockAll);
 
 	// ---- Timing readout ----
-	std::shared_ptr<bool> showTiming;         // rlcoach_show_timing
+	std::shared_ptr<bool> showTiming;         // road2_show_timing
+	std::shared_ptr<bool> welcomeDone = std::make_shared<bool>(false);   // road2_welcome_done: the first-run card was dismissed
+	void RenderWelcome();   // the first-run card at the top of the rep viewer
+	std::shared_ptr<bool> devTools = std::make_shared<bool>(false);   // road2_dev_tools: the test buttons and timing (Nov 3: hidden for testers)
 	PerfStat perfTick, perfInput, perfDraw;   // game thread only
 
 	// ---- Drawing (RLCoachHud.cpp) ----
@@ -466,17 +493,17 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& pad);
 
 	// ---- Look settings (RLCoachHud.cpp) ----
-	std::shared_ptr<bool>  hudCompact;        // rlcoach_hud_compact: only the essentials on the panel
-	std::shared_ptr<float> hudScale;          // rlcoach_hud_scale
-	std::shared_ptr<float> hudX, hudY;        // rlcoach_hud_x / rlcoach_hud_y: panel corner, fraction of the screen
-	std::shared_ptr<int>   speedUnits;        // rlcoach_speed_units: 0 uu/s, 1 km/h, 2 mph
-	std::shared_ptr<int>   inputDisplay;      // rlcoach_input_display: 0 none, 1 text on the panel, 2 PS4, 3 Xbox
-	std::shared_ptr<float> padX, padY, padScale;   // rlcoach_pad_x / _y / _scale
-	std::shared_ptr<int>   padTheme;          // rlcoach_pad_theme: 0 dark, 1 light
-	std::shared_ptr<int>   padJump, padBoost, padSlide, padRollLeft, padRollRight;   // rlcoach_pad_<action>: button index
-	std::shared_ptr<int>   targetHitbox;      // rlcoach_target_hitbox: 0 off, 1 for your touch, 2 for the earliest intercept
-	std::shared_ptr<float> ghostOpacity;      // rlcoach_ghost_opacity: the controller ghost when practicing a line, 0-1 (0 = off)
-	std::shared_ptr<float> windowSize;        // rlcoach_window_size: the Road2 window's size, 0.6-1.6 (Nov 1)
+	std::shared_ptr<bool>  hudCompact;        // road2_hud_compact: only the essentials on the panel
+	std::shared_ptr<float> hudScale;          // road2_hud_scale
+	std::shared_ptr<float> hudX, hudY;        // road2_hud_x / road2_hud_y: panel corner, fraction of the screen
+	std::shared_ptr<int>   speedUnits;        // road2_speed_units: 0 uu/s, 1 km/h, 2 mph
+	std::shared_ptr<int>   inputDisplay;      // road2_input_display: 0 none, 1 text on the panel, 2 PS4, 3 Xbox
+	std::shared_ptr<float> padX, padY, padScale;   // road2_pad_x / _y / _scale
+	std::shared_ptr<int>   padTheme;          // road2_pad_theme: 0 dark, 1 light
+	std::shared_ptr<int>   padJump, padBoost, padSlide, padRollLeft, padRollRight;   // road2_pad_<action>: button index
+	std::shared_ptr<int>   targetHitbox;      // road2_target_hitbox: 0 off, 1 for your touch, 2 for the earliest intercept
+	std::shared_ptr<float> ghostOpacity;      // road2_ghost_opacity: the controller ghost when practicing a line, 0-1 (0 = off)
+	std::shared_ptr<float> windowSize;        // road2_window_size: the Road2 window's size, 0.6-1.6 (Nov 1)
 	void RegisterLookCvars();
 	void RenderLookSettings();
 	void RenderPadSettings();
@@ -498,9 +525,56 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	bool combineBallFree = false;            // the ball has stopped following its real path
 	bool combineBotTouched = false;
 	int combineBotFirstTouch = -1, combineBotWait = 0;
-	bool CombineUsesBot() const { return combineEvent == "FF" || combineEvent == "SD" || combineEvent == "KO"; }
+	bool CombineUsesBot() const { return combineEvent == "FF" || combineEvent == "SD" || combineEvent == "KO" || combineEvent == "SG"; }
+	// ---- Nexto (Nov 4): the Road2 Bot played by Nexto instead of a replay path. 50s, kickoffs and shadow defense
+	// can be played against it ("FFN", "KON", "SDN" codes: the real positions, then Nexto plays the other car from
+	// there), and Score on a goalie ("SG") is only against it. RLCoachNexto.cpp ----
+	bool combineNexto = false;               // this set's bot is Nexto
+	float combineNextoBeta = 1.0f;           // 1 = always its best choice (sampling barely changed how hard it is)
+	int combineNextoDelay = 6;               // ticks from looking to acting: 6 is Nexto as it really plays; lower levels react later
+	std::vector<std::pair<int, Nexto::Controls>> nextoQueue;   // decisions waiting to go on the bot
+	bool combineOnTarget = false;            // score on a goalie: a shot of yours was heading in
+	// Kickoffs vs Nexto are called (Nov 4, Coop's idea): during a real-length 3-2-1 the call comes up, as a teammate
+	// would give it, and the kickoff counts for full points only if you did what was called
+	float combineKoYouDist = -1.0f;          // how far you were from the ball when Nexto hit it
+	int KickoffCall(int index) const;        // 0 speedflip, 1 delay, 2 fake, 3 spanish
+	// The spanish (Nov 4): a second bot, their last back, on a standard back spawn. It either cheats up or goes for
+	// its corner boost and back to net; you fake past the ball, go round it and demo it. RLCoachNexto.cpp
+	uintptr_t bot2Addr = 0;                  // the second bot's car (0 = none)
+	bool wantBot2 = false;                   // this item needs it
+	int bot2Plan = 0, bot2Stage = 0;         // 0 cheat up, 1 corner boost then back to net
+	bool bot2Seen = false, bot2Demoed = false, bot2Bumped = false;
+	Vector bot2PrevVel;
+	int bot2DemoTick = -1, combineBot2Wait = 0, combineBot2Retries = 0;
+	CarWrapper Bot2Car();
+	void Bot2Spawn();
+	void Bot2Remove();
+	void Bot2Place(bool frozen);             // on its spawn for the countdown and the go
+	void Bot2Drive();                        // every live tick
+	void Bot2Input(CarWrapper& car, void* params);
+	int CombineCountdownTicks() const;
+	Nexto::Net nexto;
+	bool nextoTried = false;
+	std::string nextoError;
+	Nexto::Controls nextoPrev{}, nextoPending{}, nextoNow{};
+	int nextoTick = 0;
+	bool nextoPadsUp[Nexto::kPads];
+	int nextoPadDown[Nexto::kPads] = {};     // ticks until each pad is back
+	uint32_t nextoSeed = 1;
+	bool NextoReady();                       // loads the weights the first time
+	void NextoStart();                       // the moment the bot goes live
+	void NextoStep(CarWrapper& me, BallWrapper& ball);   // every tick while it's live (from your car's tick)
+	void NextoPadsReset();
+	void NextoInput(void* params);           // the bot's inputs this tick, from the pre-input hook
+	std::string CombineCodeEvent() const { return combineEvent + (combineNexto && combineEvent != "SG" ? "N" : ""); }
+	// The hand-off (Nov 4): the bot plays the real player's path up to this moment (s from the start), then Nexto
+	// takes over. It keeps the real setup and only lets Nexto decide the part that matters
+	float NextoHandoff() const;
+	int combineBotLastTouch = -1;            // live tick of the bot's latest touch
+	std::vector<Combine::Challenge> combineTakesAll;   // score on a goalie: real takes (data/Road2/combine/takes.csv)
+	std::atomic<bool> combineTakesLoaded{ false };
 	int combineKoYou = -1, combineKoBot = -1;   // kickoffs: the tick each of you got to the ball
-	std::vector<Combine::SaveSituation> combinePasses;   // real passes (data/RLCoach/combine/pass_situations.csv)
+	std::vector<Combine::SaveSituation> combinePasses;   // real passes (data/Road2/combine/pass_situations.csv)
 	bool combinePassesLoaded = false;
 	int combineCtrlTicks = 0, combineCtrlTotal = 0;      // first touches: ticks the ball stayed with you after the first touch
 	int combineFirstTouch = -1;              // live tick of your first touch on this item
@@ -514,9 +588,9 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	};
 	Vector combineCarPrev;                   // the same, for spotting a free play reset (a jump of 400+ in a tick)
 	int combineResets = 0;                   // resets used on this item (2 allowed; the third skips it)
-	std::vector<Combine::SaveSituation> combineSituations;   // real saves (data/RLCoach/combine/save_situations.csv)
+	std::vector<Combine::SaveSituation> combineSituations;   // real saves (data/Road2/combine/save_situations.csv)
 	bool combineSituationsLoaded = false;
-	std::shared_ptr<bool> combineMomentumCam = std::make_shared<bool>(true);   // rlcoach_combine_momentum_cam
+	std::shared_ptr<bool> combineMomentumCam = std::make_shared<bool>(true);   // road2_combine_momentum_cam
 	int combineSavedUnlimited = -1;          // free play's unlimited boost, put back when the Combine ends
 	int practiceSavedUnlimited = -1;         // the same for kickoff lessons (no unlimited boost while practicing them)
 	// Recovery, during a throw: first contact, whether the body hit first, when you were settled on your wheels
@@ -552,6 +626,9 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::atomic<bool> uiCombineMode{ false };   // the window shows the Combine page
 	int uiCombineLevel = 1;                     // render thread: the level picked on the page
 	std::string uiCombineCode;                  // render thread: the code box
+	std::string uiCardStatus;                   // render thread: where the last result card was saved (or why it wasn't)
+	void SaveResultCard(const UiCombine& u);    // a finished set as a PNG in data\Road2\cards (ResultCard.h)
+	std::map<std::string, bool> uiCombineNexto;  // render thread: the event cards set to play Nexto
 	void CombineOpen();
 	void CombineClose();
 	void CombineStart(const std::string& event, int level, uint32_t seed);   // any thread
@@ -566,11 +643,12 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void CombineSaveBests();
 	void RenderCombine();
 	void DrawCombineHud(CanvasWrapper& canvas);
+	void DrawLearnRecoveryHud(CanvasWrapper& canvas);   // the Recovery lesson: momentum camera in the air, the back post ring
 	static int CombineMedal(int points, int maxPoints);   // 0 none, 1 bronze, 2 silver, 3 gold
 
 	// ---- Bot test (Oct 28, RLCoachBotTest.cpp): can a bot be spawned in free play and driven by the plugin? The
-	// groundwork for 50s, shadow defense and kickoff battles in the Combine. Console: rlcoach_bot_spawn,
-	// rlcoach_bot_mode 0-3, rlcoach_bot_remove. ----
+	// groundwork for 50s, shadow defense and kickoff battles in the Combine. Console: road2_bot_spawn,
+	// road2_bot_mode 0-3, road2_bot_remove. ----
 	uintptr_t botCarAddr = 0;            // the spawned bot's car (0 = none)
 	bool botTestUsed = false;            // the bot test console commands were used (only then its status lines show)
 	int botMode = 0;                     // 0 the game's AI drives, 1 held still, 2 plays back a rep's path, 3 plays back a rep's inputs, 4 the Combine drives it
@@ -579,11 +657,20 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::vector<Frame> botFrames;        // the rep it plays back
 	std::string botStatus;
 	void RegisterBotTest();
+	bool devCommandsOn = false;
+	void SetDevCommands(bool on);   // the developer console commands, only while Developer tools is on
 	void BotSpawn();
 	void BotFind();
 	void BotRemove();
 	void BotSetMode(int mode);
 	bool IsBotCar(CarWrapper& car);
+	// The bot's look (Nov 4): always an orange Octane, in a fixed loadout. road2_bot_capture "<preset>" copies one
+	// of your garage presets (its orange side, paints included) into data/Road2/bot_loadout.txt; that file, or the
+	// built-in look if there isn't one, goes on the bot each time it spawns
+	uintptr_t botLookAddr = 0;           // the car the look was last put on (once per car: a reset respawns it)
+	void BotCaptureLoadout(const std::string& preset);
+	void BotApplyLook(CarWrapper& bot);
+	int botLookPrimary = 0, botLookAccent = 0;
 	void BotInput(CarWrapper& car, void* params);   // pre-input hook, any car
 	void BotTick(CarWrapper& car);                  // post-input hook, any car
 	void DrawBotStatus(CanvasWrapper& canvas);

@@ -2,8 +2,11 @@
 #include "Lesson.h"
 #include "Grader.h"
 #include "Segmenter.h"
+#include "Mechanics.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <cmath>
 #include <format>
 #include <sstream>
@@ -1173,14 +1176,16 @@ Lesson Lessons::Kickoff(const std::string& id, const std::vector<Frame>& model)
 	L.name = L.koSpeedflip ? std::format("Kickoff: {} speedflip", L.koSpawn) : "Kickoff: boost and flip in";
 	if (model.size() < 120) return Lesson{};
 	// Stars from the openings book (ranked and pro replays, time to within 200 of the ball): one star is a typical
-	// Gold-Plat kickoff, two a typical Champ one, three about the SSL median (diagonal 1.92; three stars at 1.94; the
-	// model gets there in 1.86). Flip-ins: about 2.20 (slow Gold), 2.11 (the Gold-Plat median), 2.09 (Diamond-Champ).
+	// Gold-Plat kickoff, two a typical Champ one, three about the SSL median. Nov 4: re-run with 360 ranked 1v1s and
+	// 400 more pro games (30,006 takers; back centre went from a thin sample to 2,137, since it's mostly a 1v1 spawn).
+	// Medians, Gold-Plat / Champ / SSL: diagonal 2.11 / 1.97 / 1.93, off-centre 2.40 / 2.20 / 2.17, back centre
+	// 2.60 / 2.50 / 2.48. Flip-ins: about 2.20 (slow Gold), 2.11 (the Gold-Plat median), 2.09 (Diamond-Champ, 2.05-2.10).
 	L.koStarsWho = L.koSpeedflip ? "One star is a typical Gold-Plat kickoff, two a typical Champ one, three about the SSL median."
 		: "Two stars is the typical Gold-Plat flip-in, three a Diamond-Champ one.";
-	if (!L.koSpeedflip) { L.koStars[0] = 2.20f; L.koStars[1] = 2.11f; L.koStars[2] = 2.09f; }
-	else if (id == "kickoff_offcentre") { L.koStars[0] = 2.40f; L.koStars[1] = 2.24f; L.koStars[2] = 2.17f; }
-	else if (back) { L.koStars[0] = 2.77f; L.koStars[1] = 2.64f; L.koStars[2] = 2.51f; }
-	else { L.koStars[0] = 2.11f; L.koStars[1] = 1.98f; L.koStars[2] = 1.94f; }
+	if (!L.koSpeedflip) { L.koStars[0] = 2.20f; L.koStars[1] = 2.11f; L.koStars[2] = 2.09f; }   // (2.09: the model gets there in 2.083)
+	else if (id == "kickoff_offcentre") { L.koStars[0] = 2.40f; L.koStars[1] = 2.20f; L.koStars[2] = 2.18f; }
+	else if (back) { L.koStars[0] = 2.60f; L.koStars[1] = 2.50f; L.koStars[2] = 2.49f; }
+	else { L.koStars[0] = 2.11f; L.koStars[1] = 1.97f; L.koStars[2] = 1.94f; }
 
 	// The kickoffs in the model: a new one starts where the car jumps back to a spawn
 	std::vector<int> starts = { 0 };
@@ -1419,15 +1424,968 @@ static StageScore KoScore(const Lesson& L, int stage, const std::vector<Frame>& 
 	return out;
 }
 
+// ============================================================
+// Foundations: shot lessons (Nov 2). Aerial, power shot and dribble (tier 1), fast aerial and off the wall (tier 2),
+// each taught from one of Coop's own best reps. Steps are the rulebook's steps for the mechanic (Mechanics.cpp), each
+// starting from the model's car and ball; every attempt plays on to the finish, and the review's grader scores it
+// with the model as "your fastest goal on this shot", so the timing grades are against the model. A step is scored on
+// its own segment's grade; the whole thing on the rep's overall grade, like any rep (power shot: how hard it went in).
+// ============================================================
+
+namespace
+{
+	std::string Lower(std::string s)
+	{
+		for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+		return s;
+	}
+
+	int FromGrade(Grade g)
+	{
+		switch (g)
+		{
+		case Grade::Calculated:
+		case Grade::Clean:  return 5;
+		case Grade::Solid:  return 4;
+		case Grade::Sloppy: return 3;
+		case Grade::Costly: return 2;
+		case Grade::None:   return 0;
+		default:            return 1;
+		}
+	}
+
+	// The segment of a kind that belongs to the shot (its touch), else the last one of that kind
+	int SegOf(const RepSegments& segs, SegKind k)
+	{
+		const int shotTouch = static_cast<int>(segs.touchTicks.size());
+		int any = -1, mine = -1;
+		for (int i = 0; i < static_cast<int>(segs.segs.size()); i++)
+		{
+			if (segs.segs[i].kind != k) continue;
+			any = i;
+			if (segs.segs[i].touch == shotTouch || segs.segs[i].touch == 0) mine = i;
+		}
+		return mine >= 0 ? mine : any;
+	}
+
+	const SegmentGrade* GradeOf(const RepGrade& g, int segIndex)
+	{
+		for (const SegmentGrade& sg : g.segs) if (sg.segIndex == segIndex && sg.grade != Grade::None) return &sg;
+		return nullptr;
+	}
+
+	// The first jump at or after a tick (the takeoff)
+	int JumpFrom(const std::vector<Frame>& fr, int from)
+	{
+		for (int t = std::max(1, from); t < static_cast<int>(fr.size()); t++) if (fr[t].jump && !fr[t - 1].jump) return t;
+		return -1;
+	}
+
+	// Power: the shot's speed and whether you flipped into it (a second jump press within 0.5 s before the hit)
+	int PowerLevel(const std::vector<Frame>& full, const ShotAnalysis& s, bool wentIn, std::string& why)
+	{
+		if (!s.valid) { why = "Never touched the ball"; return 1; }
+		int presses = 0;
+		for (int t = std::max(1, s.touchTick - 60); t <= s.touchTick && t < static_cast<int>(full.size()); t++) presses += full[t].jump && !full[t - 1].jump;
+		const bool flipped = presses >= 2 || (presses >= 1 && !full[std::max(0, s.touchTick - 1)].onGround && !full[std::max(0, s.touchTick - 1)].hasFlip);
+		const float kph = s.shotSpeed * 0.036f;
+		int sc = s.shotSpeed >= 3100.0f ? 5 : s.shotSpeed >= 2700.0f ? 4 : 3;
+		why = std::format("{:.0f} uu/s ({:.0f} km/h){}", s.shotSpeed, kph, sc == 5 ? ", a real power shot" : sc == 4 ? ", hard" : ": hit it harder (2,700 for a 4, 3,100 for a 5)");
+		if (!flipped && sc > 4) { sc = 4; why += ", no flip into it"; }
+		if (!wentIn)
+		{
+			sc = std::min(sc, s.reachesGoalLine && s.missDist <= 150.0f ? 2 : 1);
+			why = (!s.reachesGoalLine ? std::string("Never reached the goal") : s.missDir.empty() || s.missDist < 1.0f ? std::string("Just missed (off the frame)")
+				: std::format("Missed {} by {:.0f}", s.missDir, s.missDist)) + " at " + why;
+		}
+		return sc;
+	}
+
+	// Steps that start a little before their segment, so there's time to do them
+	int StepStartFor(SegKind k, const Segment& sg, const ShotAnalysis& s, int prevStart)
+	{
+		int st = sg.start;
+		if (k == SegKind::Contact) st = s.touchTick - 50;
+		else if (k == SegKind::Flick || k == SegKind::Takeoff) st = sg.start - 24;
+		return std::max({ st, prevStart + 6, 1, s.startTick });
+	}
+
+	struct ShotText { const char* what; const char* why; std::vector<std::string> tips; const char* cue; };
+}
+
+Lesson Lessons::Shot(const std::string& id, const std::vector<Frame>& model)
+{
+	Lesson L;
+	L.kind = LessonKind::Shot;
+	L.id = id;
+	L.model = model;
+	if (model.size() < 60) return Lesson{};
+	if (id == "aerial") { L.name = "Aerial"; L.shotType = ShotType::Aerial; }
+	else if (id == "fast_aerial") { L.name = "Fast aerial"; L.shotType = ShotType::Aerial; L.needDoubleJump = true; }
+	else if (id == "off_the_wall") { L.name = "Off the wall"; L.shotType = ShotType::Aerial; L.needWallTakeoff = true; }
+	else if (id == "power_shot") { L.name = "Power shot"; L.shotType = ShotType::Ground; L.power = true; }
+	else if (id == "dribble") { L.name = "Dribble"; L.shotType = ShotType::Dribble; }
+	else if (id == "front_flick") { L.name = "Front flick"; L.shotType = ShotType::Dribble; L.needFrontFlick = true; }   // (Nov 3) the model: Coop's front flick goal, Oct 10
+	// (Nov 4) models from Coop's saved reps: a goal hit while driving on the wall, and an aerial goal off a ball that came
+	// off the backboard first. The shot type is whatever the grader made of the model (a wall hit can grade as an aerial).
+	else if (id == "wall_hit") { L.name = "Wall hit"; L.needWallTouch = true; }
+	else if (id == "backboard_read") { L.name = "Backboard read"; L.shotType = ShotType::Aerial; L.needBackboard = true; }
+	else return Lesson{};
+	L.modelShot = ShotGeometry::Analyze(model);
+	const ShotAnalysis& s = L.modelShot;
+	if (L.needWallTouch && s.valid) L.shotType = s.type;
+	if (!s.valid || s.type != L.shotType) return Lesson{};
+	const RepSegments segs = Segmenter::Split(model, -1);
+	const int takeoff = SegOf(segs, SegKind::Takeoff);
+	L.modelRef.valid = true;
+	L.modelRef.bestFile = "model";
+	L.modelRef.touchSec = (s.touchTick - s.startTick) / 120.0f;
+	L.modelRef.jumpSec = takeoff >= 0 ? (segs.segs[takeoff].start - s.startTick) / 120.0f : -1.0f;
+	L.shotTick = s.touchTick;
+	const float jumpS = takeoff >= 0 ? (segs.segs[takeoff].start - s.startTick) / 120.0f : 0.0f;
+	const float touchS = (s.touchTick - s.startTick) / 120.0f;
+	const Frame& hit = model[s.touchTick];
+
+	auto text = [&](SegKind k) -> ShotText {
+		if (L.needWallTouch)
+		{
+			if (k == SegKind::Contact) return { "Hit the ball while you're still driving on the wall, through it toward the goal.",
+				"Hitting it off the wall turns a ball the other team gave up on into a shot, and you're already moving toward the net.",
+				{ "Stay on the wall for the hit: no jump.", "Drive into the ball, not alongside it.", std::format("The model hits it {:.0f} high.", hit.ballZ) },
+				"On the wall, through the ball." };
+			return { "Drive up the wall on the ball's line, matching its speed, so you reach it while it's still on the wall.",
+				"The wall hit is all timing: up the wall too early and you're waiting, too late and it's past you.",
+				{ "Turn up the wall early and smoothly.", "Keep the ball in front of you, a little ahead of your nose.", std::format("The model hits it {:.2f} s in.", touchS) },
+				"Up the wall, on its line." };
+		}
+		if (L.needBackboard && k == SegKind::Approach) return { "Watch the ball off the backboard and get to where it's coming down, then jump to meet it.",
+			"Reading the bounce is the whole skill: the ball comes off the backboard faster and lower than people expect.",
+			{ "Watch the ball hit the backboard before you commit.", "Go to where it will be, not where it is.", std::format("Jump at about {:.2f} s (the model).", jumpS) },
+			"Read the bounce, then go." };
+		switch (L.shotType)
+		{
+		case ShotType::Aerial:
+			switch (k)
+			{
+			case SegKind::Approach: return { "Drive to the spot under the ball's path and jump at the right moment.",
+				"Jump too early and you hang in the air waiting for it; too late and it's past you. The jump sets up the whole aerial.",
+				{ "Watch where the ball is going, not where it is.", "Line up so the ball, you and the goal are close to one line.",
+				  std::format("Jump at about {:.2f} s (the model).", jumpS) }, "Lined up, jump on time." };
+			case SegKind::Takeoff: return { L.needDoubleJump ? "Jump, then jump again straight away while pulling the nose up, boosting the whole time."
+					: L.needWallTakeoff ? "Drive up the wall toward the ball and jump off it with the nose pointed at the ball, boosting."
+					: "Jump, pull the nose up toward the ball and boost straight away.",
+				L.needDoubleJump ? "The second jump right after the first is free height: you get to high balls before anyone who single-jumps."
+					: "The first half second off the ground is where your height comes from: boost late and you never catch up.",
+				L.needDoubleJump ? std::vector<std::string>{ "Hold the first jump a moment, then tap jump again (within about 0.1-0.2 s).", "Pull back while you jump so the nose comes up.", "Boost from the first jump on." }
+					: std::vector<std::string>{ "Boost the moment you leave the ground.", "Pull back to point the nose at the ball.", "Hold the jump button a moment for full height." },
+				L.needDoubleJump ? "Jump, jump again, nose up, boost." : "Nose up, boost right away." };
+			case SegKind::Flight: return { "Fly to where you'll meet the ball, steering with the stick and feathering boost.",
+				"Aerials are won in the flight: arriving early or late is what makes a touch weak or a whiff.",
+				{ "Aim at where the ball will be, on its goal side.", "Feather boost if you'd get there early.",
+				  std::format("The model meets it {:.0f} high, {:.2f} s after the jump.", hit.ballZ, touchS - jumpS) }, "Fly to the meeting point." };
+			default: return { "Hit the ball with the nose of the car, through its middle toward the goal.",
+				"A clean hit puts all of your flight's speed into the ball.",
+				{ "Point the nose at the side of the ball away from the goal.", "Keep boosting into the hit.", "Small corrections only in the last moment." },
+				"Nose through the ball, toward the goal." };
+			}
+		case ShotType::Ground:
+			if (k == SegKind::Approach) return { "Get behind the ball on the line to the goal and build up all the speed you can.",
+				"Power comes from your speed and a straight line through the ball. A sharp turn at the end costs both.",
+				{ "Drive to the side of the ball away from the goal, then turn in early.", "Hold boost on the way in.", "Come in on the line from the goal through the ball." },
+				"Behind it, on the line, full speed." };
+			return { "Jump and flip forward into the ball just before you reach it.",
+				"The flip adds a burst of speed at the moment of the hit: it's the difference between a hard shot and a power shot.",
+				{ std::format("Jump about {:.2f} s before the hit (the model), then flip right after.", (s.touchTick - (takeoff >= 0 ? segs.segs[takeoff].start : s.touchTick - 30)) / 120.0f),
+				  "Flip forward through the middle of the ball.", "Keep boosting until the flip." },
+				"Flip through the middle of the ball." };
+		default:
+			if (k == SegKind::Dribble) return { "Keep the ball balanced on your roof while you drive it toward the goal.",
+				"A steady carry is what gives you the flick and the shot. Lose it and there's nothing to flick.",
+				{ "Small steering inputs, steady throttle.", "Ball rolling forward: speed up a touch. Rolling back: ease off.",
+				  std::format("Carry it at a steady {:.0f} uu/s (the model's pace).", s.dribblePace) }, "Steady speed, ball on the roof." };
+			if (k == SegKind::Flick && L.needFrontFlick) return { "Jump to pop the ball off your roof, wait a beat, then flip straight forward into it.",
+				"A front flick sends the ball up and over the defender in front of you, fast. Straight forward is the point: a diagonal or a 45 is a different flick.",
+				{ "Stick straight forward for the flip, no sideways.", std::format("Wait about {:.2f} s between the jump and the flip (the model).", s.flipDelay),
+				  "Point the car at the goal before you jump." },
+				"Jump, beat, straight forward." };
+			if (k == SegKind::Flick) return { "Jump to pop the ball up off your roof, then flip forward into it.",
+				"The flick turns a carry into a shot: the ball leaves fast and up, over anyone in front of you.",
+				{ "Jump, wait a moment, then flip forward.", "Point the car at the goal before you flick.",
+				  std::format("Flick when you're in range (the model flicks from {:.0f} out).", std::fabs(5120.0f * s.goalSign - hit.ballY)) },
+				"Jump, then flip forward into it." };
+			return { "Approach the ball and settle it on your roof.", "The carry can't start until the ball sits still on the car.",
+				{ "Get under the ball as it drops.", "Match its speed so it lands softly." }, "Get it settled on the roof." };
+		}
+	};
+
+	const MechanicSpec& spec = Mechanics::Spec(L.shotType);
+	int prevStart = -1000;
+	for (const MechanicStep& ms : spec.steps)
+	{
+		const int si = SegOf(segs, ms.seg);
+		if (si < 0) continue;
+		LessonStep st;
+		const ShotText tx = text(ms.seg);
+		st.name = ms.name;
+		st.what = tx.what; st.why = tx.why; st.tips = tx.tips; st.cue = tx.cue;
+		st.start = StepStartFor(ms.seg, segs.segs[si], s, prevStart);
+		if (st.start >= s.touchTick) continue;
+		prevStart = st.start;
+		L.steps.push_back(st);
+		L.stepSegs.push_back(ms.seg);
+	}
+	if (L.power && !L.steps.empty()) L.steps.back().name = "The flip into it";
+	const int n = static_cast<int>(L.steps.size());
+	if (n == 0) return Lesson{};
+	// Stages: step 1, step 2, steps 1-2, step 3, steps 1-3, ... then the whole thing
+	for (int i = 0; i < n; i++)
+	{
+		L.stages.push_back({ i, i, std::format("Step {}: {}", i + 1, L.steps[i].name) });
+		if (i >= 1 && i + 1 < n) L.stages.push_back({ 0, i, std::format("Steps 1-{} together", i + 1) });
+	}
+	L.stages.push_back({ 0, n - 1, "The whole " + (id == "aerial" ? std::string("aerial") : L.power || id == "dribble" ? std::string("shot") : Lower(L.name)), true });
+	if (n == 1) L.stages.erase(L.stages.begin());
+	return L;
+}
+
+static int ShotWatchEnd(const Lesson& L, int stage)
+{
+	const int last = L.stages[stage].last;
+	if (last + 1 < static_cast<int>(L.steps.size())) return L.steps[last + 1].start + 20;
+	return std::min(static_cast<int>(L.model.size()) - 1, L.shotTick + 90);
+}
+
+static StageScore ShotScore(const Lesson& L, int stage, const std::vector<Frame>& full, int startTick, bool wentIn, bool floorFirst, bool compareToModel)
+{
+	StageScore out;
+	const LessonStage& st = L.stages[stage];
+	const int n = static_cast<int>(full.size());
+	if (n <= startTick + 10) return out;
+	const int end = n - 1;
+	const ShotAnalysis shot = ShotGeometry::Analyze(full);
+	const RepSegments segs = Segmenter::Split(full, end);
+	const RepGrade g = Grader::GradeRep(full, segs, shot, wentIn, floorFirst, L.modelRef);
+	struct Why { int score; std::string text; };
+	std::vector<Why> whys;
+
+	for (int step = st.first; step <= st.last; step++)
+	{
+		const SegKind k = L.stepSegs[step];
+		int sc = 0;
+		std::string why;
+		const int si = SegOf(segs, k);
+		const SegmentGrade* sg = si >= 0 ? GradeOf(g, si) : nullptr;
+		if (L.shotType == ShotType::Aerial && k == SegKind::Approach)
+		{
+			// the line-up's job is the jump: graded by the jump's timing against the model's
+			const SegmentGrade* tg = GradeOf(g, SegOf(segs, SegKind::Takeoff));
+			if (!shot.valid && SegOf(segs, SegKind::Takeoff) < 0) { sc = 1; why = "Never jumped for it"; }
+			else if (tg) { sc = FromGrade(tg->grade); why = tg->why; }
+			else { sc = 3; why = "Couldn't time your jump against the model's"; }
+		}
+		else if (L.shotType == ShotType::Aerial && k == SegKind::Takeoff)
+		{
+			// the climb: height gained in the 0.4 s after the jump, against the model's, and boosting from the start
+			const int j = JumpFrom(full, startTick), mj = JumpFrom(L.model, std::max(0, L.steps[step].start - 30));
+			if (j < 0) { sc = 1; why = "Never jumped"; }
+			else
+			{
+				const int a = std::min(n - 1, j + 48), ma = std::min(static_cast<int>(L.model.size()) - 1, mj + 48);
+				const float gain = full[a].carZ - full[j].carZ, mGain = mj >= 0 ? L.model[ma].carZ - L.model[mj].carZ : gain;
+				const float r = mGain > 1.0f ? gain / mGain : 1.0f;
+				sc = r >= 0.9f ? 5 : r >= 0.75f ? 4 : r >= 0.6f ? 3 : 2;
+				why = std::format("Climbed {:.0f} in the first 0.4 s (the model: {:.0f})", gain, mGain);
+				int boostAt = -1;
+				for (int t = j; t <= std::min(n - 1, j + 36); t++) if (full[t].boost) { boostAt = t; break; }
+				if (boostAt < 0 || boostAt > j + 18) { sc = std::min(sc, 3); why += boostAt < 0 ? ", no boost off the ground" : ", boost came late"; }
+				if (L.needDoubleJump)
+				{
+					const int j2 = JumpFrom(full, j + 2);
+					if (j2 < 0 || j2 > j + 36) { sc = std::min(sc, 2); why += ", no second jump right after the first"; }
+				}
+				if (L.needWallTakeoff && !(full[std::max(0, j - 1)].onWall || full[std::max(0, j - 1)].carZ > 150.0f)) { sc = std::min(sc, 2); why += ", but you left from the ground, not the wall"; }
+			}
+		}
+		else if (L.power && k == SegKind::Contact) sc = PowerLevel(full, shot, wentIn, why);
+		else if (L.needFrontFlick && k == SegKind::Flick && sg)
+		{
+			sc = FromGrade(sg->grade); why = sg->why;
+			if (shot.flipKind != FlipKind::Front && shot.flipKind != FlipKind::DiagonalFront)
+			{
+				sc = std::min(sc, 2);
+				why = std::format("That was a {}, not a front flick: stick straight forward for the flip", ShotGeometry::FlipName(shot.flipKind, true));
+			}
+		}
+		else if (sg) { sc = FromGrade(sg->grade); why = sg->why; }
+		else if (si < 0) { sc = !shot.valid ? 1 : 2; why = std::format("No {} in this attempt", Lower(L.steps[step].name)); }
+		else { sc = 3; why = "Not graded"; }
+		sc = std::max(1, sc);
+		out.stepScores.push_back(sc);
+		whys.push_back({ sc, std::format("{}: {}", L.steps[step].name, why) });
+	}
+
+	int score = 5;
+	for (int s2 : out.stepScores) score = std::min(score, s2);
+	if (st.whole)
+	{
+		int overall = g.overall;
+		std::string why = g.overallWhy;
+		if (L.power) { overall = PowerLevel(full, shot, wentIn, why); why = (wentIn ? "Goal, " : "") + why; }
+		if (shot.valid && shot.type != L.shotType) { overall = std::min(overall, wentIn ? 2 : 1); why = std::format("Not a {}: {}", Lower(Mechanics::Spec(L.shotType).name), why); }
+		// fast aerial / off the wall: the takeoff is the point of the lesson
+		for (size_t i = 0; i < out.stepScores.size(); i++)
+			if ((L.stepSegs[st.first + i] == SegKind::Takeoff && (L.needDoubleJump || L.needWallTakeoff) || L.stepSegs[st.first + i] == SegKind::Flick && L.needFrontFlick) && out.stepScores[i] <= 2) overall = std::min(overall, 3);
+		// wall hit: the hit has to come from the wall; backboard read: off the backboard first, then your touch
+		if (L.needWallTouch && shot.valid)
+		{
+			bool onWall = false;
+			for (int t = std::max(0, shot.touchTick - 2); t <= std::min(n - 1, shot.touchTick + 1); t++) onWall = onWall || full[t].onWall;
+			if (!onWall) { overall = std::min(overall, 2); why = "You hit it off the ground or in the air: stay on the wall for the hit. " + why; }
+		}
+		if (L.needBackboard && shot.valid)
+		{
+			int bb = -1, first = -1;
+			for (int t = std::max(1, startTick); t < n; t++) if (full[t].touch && first < 0) first = t;
+			for (int t = std::max(1, startTick); t < shot.touchTick && t < n; t++)
+				if (std::fabs(full[t].ballY) > 4800.0f && full[t].ballZ > 600.0f && full[t - 1].ballVY * full[t].ballVY < 0 && std::fabs(full[t - 1].ballVY) > 300.0f) { bb = t; break; }
+			if (bb < 0 || (first >= 0 && first < bb)) { overall = std::min(overall, 2); why = "Wait for it to come off the backboard, then read it. " + why; }
+		}
+		score = overall;
+		whys.insert(whys.begin(), { 0, std::format("Overall: {} ({})", overall, why) });
+	}
+	if (compareToModel)
+	{
+		const float dev = LineMatch(L, stage, full, startTick, end);
+		out.lineMatch = dev;
+		whys.push_back({ 6, std::format("Line match: {:.0f} from the model's path on average{}", dev, dev <= 150.0f ? " (right on it)" : dev <= 400.0f ? " (close)" : " (your own line)") });
+	}
+	std::stable_sort(whys.begin(), whys.end(), [](const Why& a, const Why& b) { return a.score < b.score; });
+	// The grader talks about "your fastest goal on this shot"; in a lesson that's the model
+	auto say = [](std::string t) {
+		for (const char* from : { "your fastest goal on this shot", "your best attempt" })
+			for (size_t p = t.find(from); p != std::string::npos; p = t.find(from, p)) { t.replace(p, std::strlen(from), "the model"); p += 9; }
+		return t;
+	};
+	for (const Why& w : whys) out.lines.push_back(say(w.text));
+	out.score = std::max(1, score);
+	return out;
+}
+
+// ============================================================
+// Foundations: movement lessons (Nov 2). Half flip, powerslide turn (tier 1), speedflip and wavedash (tier 2), from
+// models found in RocketSim (tools/learn/move_model.cpp) with the ball parked out of the way. Each is timed against the
+// model: the half flip and the powerslide turn on how soon you're turned around and going (facing back the way you
+// came, 1,000 uu/s that way), the speedflip on how soon you're supersonic from a standstill, the wavedash on the speed
+// it adds from 1,400 (top speed without boost).
+// ============================================================
+
+namespace
+{
+	float HeadingRad(const Frame& f) { return f.carYaw * (3.14159265f / 32768.0f); }
+	float RadDiff(float a, float b) { float d = a - b; while (d > 3.14159265f) d -= 6.2831853f; while (d < -3.14159265f) d += 6.2831853f; return std::fabs(d); }
+	float Spd(const Frame& f) { return std::sqrt(f.carVX * f.carVX + f.carVY * f.carVY + f.carVZ * f.carVZ); }
+	int Press(const std::vector<Frame>& fr, int from, int to)
+	{
+		const int n = static_cast<int>(fr.size());
+		for (int t = std::max(0, from); t <= to && t < n; t++) if (fr[t].jump && (t == 0 || !fr[t - 1].jump)) return t;
+		return -1;
+	}
+
+	struct MoveEvents { int act = -1, dodge = -1, land = -1, done = -1; float doneSpeed = 0; };
+
+	// What happened in a move attempt (or the model), by the inputs and the car
+	MoveEvents FindMove(const Lesson& L, const std::vector<Frame>& fr, int from)
+	{
+		MoveEvents e;
+		const int n = static_cast<int>(fr.size());
+		const float back = HeadingRad(L.model[0]) + 3.14159265f;
+		const bool turn = L.moveKind == "half_flip" || L.moveKind == "powerslide";
+		if (L.moveKind == "recovery")
+		{
+			// knocked into the air: land wheels first, then drive back to your back post (the model's spot)
+			e.act = std::max(0, from);
+			for (int t = std::max(1, from); t < n; t++) if (fr[t].onGround && !fr[t - 1].onGround) { e.land = t; break; }
+			if (e.land < 0) return e;
+			for (int t = e.land; t < n; t++)
+			{
+				const Frame& f = fr[t];
+				const float dx = 800.0f - f.carX, dy = -4900.0f - f.carY, d = std::max(1.0f, std::sqrt(dx * dx + dy * dy));
+				const float toward = (f.carVX * dx + f.carVY * dy) / d;
+				const float tilt = std::max(std::fabs(f.carPitch), std::fabs(f.carRoll)) * (180.0f / 32768.0f);
+				if (f.onGround && tilt < 15.0f && RadDiff(HeadingRad(f), std::atan2(dy, dx)) < 0.5f && toward > 1000.0f) { e.done = t; e.doneSpeed = Spd(f); break; }
+			}
+			return e;
+		}
+		if (L.moveKind == "powerslide") { for (int t = std::max(0, from); t < n; t++) if (fr[t].handbrake) { e.act = t; break; } }
+		else
+		{
+			e.act = Press(fr, from, n - 1);
+			if (e.act >= 0) { int rel = -1; for (int t = e.act; t < n; t++) if (!fr[t].jump) { rel = t; break; } if (rel >= 0) e.dodge = Press(fr, rel, std::min(n - 1, e.act + 200)); }
+			if (e.dodge >= 0) for (int t = e.dodge + 3; t < n; t++) if (fr[t].onGround) { e.land = t; break; }
+		}
+		for (int t = std::max(0, from); t < n; t++)
+		{
+			const Frame& f = fr[t];
+			if (turn)
+			{
+				const float toward = -(f.carVX * std::cos(back - 3.14159265f) + f.carVY * std::sin(back - 3.14159265f));
+				if (f.onGround && RadDiff(HeadingRad(f), back) < 0.35f && toward > 1000.0f && (L.moveKind == "powerslide" || e.land >= 0)) { e.done = t; e.doneSpeed = Spd(f); break; }
+			}
+			else if (L.moveKind == "speedflip") { if (f.onGround && e.land >= 0 && t >= e.land && Spd(f) >= 2200.0f) { e.done = t; e.doneSpeed = Spd(f); break; } }
+			else if (L.moveKind == "wavedash") { if (e.land >= 0 && t >= e.land + 30) { e.done = t; e.doneSpeed = Spd(f); break; } }
+		}
+		return e;
+	}
+
+	// How far behind the model. The models are physics-sim lines (frame-perfect inputs), so a clean human rep is a
+	// tenth or two slower: (Nov 3, Coop: the whole half flip felt "SO harsh") a 5 is within 0.15 s, a 4 within 0.3
+	int TimeLevel(float late) { return late <= 0.15f ? 5 : late <= 0.30f ? 4 : late <= 0.50f ? 3 : late <= 0.80f ? 2 : 1; }
+}
+
+// ============================================================
+// Air control (Nov 3): air roll control (tier 1) and the tornado spin (tier 2). Models from RocketSim
+// (tools/learn/orient_model.cpp): a PD attitude controller in one flight. Air roll: (1) roll all the way over and stop
+// level, (2) nose to the ball, (3) wheels to the ball (how a flip reset starts), each held a moment, each step starting
+// where the model finished the last one. Tornado: jump and boost up to a high ball holding air roll the whole way, nose
+// on the ball, and hit it.
+// ============================================================
+
+namespace
+{
+	struct V3 { float x, y, z; };
+	constexpr float kU2Rad = 3.14159265f / 32768.0f;
+	V3 FwdOf(const Frame& f)
+	{
+		const float p = f.carPitch * kU2Rad, y = f.carYaw * kU2Rad;
+		return { std::cos(p) * std::cos(y), std::cos(p) * std::sin(y), std::sin(p) };
+	}
+	V3 UpOf(const Frame& f)   // Unreal's rotator (RocketSim's matches; checked Nov 3)
+	{
+		const float p = f.carPitch * kU2Rad, y = f.carYaw * kU2Rad, r = f.carRoll * kU2Rad;
+		const float cp = std::cos(p), sp = std::sin(p), cy = std::cos(y), sy = std::sin(y), cr = std::cos(r), sr = std::sin(r);
+		return { -(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp };
+	}
+	float Dot3(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+	V3 Cross3(V3 a, V3 b) { return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x }; }
+	float AngTo(V3 a, V3 b) { const float n = std::sqrt(Dot3(a, a) * Dot3(b, b)); return n > 1e-6f ? std::acos(std::clamp(Dot3(a, b) / n, -1.0f, 1.0f)) : 3.14159f; }
+	V3 ToBall(const Frame& f) { return { f.ballX - f.carX, f.ballY - f.carY, f.ballZ - f.carZ }; }
+
+	// Air roll: the tick a step's target has been held (step 0: a full turn, either way, stopped level; 1: nose on
+	// the ball; 2: wheels to the ball), looking from `from`; -1 if it never was before the car came down
+	int AirRollDone(const std::vector<Frame>& fr, int step, int from)
+	{
+		const int n = static_cast<int>(fr.size());
+		float rolled = 0.0f;
+		int held = 0;
+		for (int t = std::max(0, from); t < n; t++)
+		{
+			const Frame& f = fr[t];
+			if (f.onGround && t > from + 4) return -1;
+			bool ok = false;
+			if (step == 0)
+			{
+				float rate = 0.0f;
+				if (t > from)
+				{
+					const V3 u0 = UpOf(fr[t - 1]), u1 = UpOf(f), fw = FwdOf(f);
+					const float d = std::atan2(Dot3(fw, Cross3(u0, u1)), Dot3(u0, u1));
+					rolled += d;
+					rate = std::fabs(d) * 120.0f;
+				}
+				ok = std::fabs(std::fabs(rolled) - 6.2831853f) < 0.35f && UpOf(f).z > 0.94f && rate < 1.2f;
+			}
+			else if (step == 1) ok = AngTo(FwdOf(f), ToBall(f)) < 0.26f;
+			else { const V3 u = UpOf(f); ok = AngTo({ -u.x, -u.y, -u.z }, ToBall(f)) < 0.44f; }
+			held = ok ? held + 1 : 0;
+			if (held >= (step == 0 ? 15 : 30)) return t;
+		}
+		return -1;
+	}
+
+	// (Nov 4, Coop) A tornado spin is directional air roll with the stick held the other way: the nose circles. The
+	// lesson is the hover: point the spin's middle straight up and boost, and you hang in the air. revs = times the nose
+	// went round (around straight up), coneDeg = how far off vertical it sat on average, hoverTicks = ticks spent
+	// hovering (up high, spinning, not flying off).
+	struct TornadoEvents { int leave = -1, touch = -1, hoverTicks = 0; float rollShare = 0, revs = 0, coneDeg = 0; };
+	TornadoEvents FindTornado(const std::vector<Frame>& fr, int from, int cap = 150)   // cap: how long after leaving the ground to measure, at most
+	{
+		TornadoEvents e;
+		const int n = static_cast<int>(fr.size());
+		for (int t = std::max(1, from); t < n; t++) if (!fr[t].onGround && fr[t - 1].onGround) { e.leave = t; break; }
+		if (e.leave < 0) return e;
+		const int end = std::min(n - 1, e.leave + cap);
+		int air = 0, on = 0, coneN = 0;
+		float cone = 0.0f, turned = 0.0f, prevAz = 0.0f;
+		bool havePrev = false;
+		for (int t = e.leave; t <= end; t++)
+		{
+			if (fr[t].onGround) break;
+			air++;
+			on += std::fabs(fr[t].roll) >= 0.7f;
+			if (t < e.leave + 24) continue;
+			// the nose's angle off straight up, and where it sits around it
+			const V3 f = FwdOf(fr[t]), b = { 0, 0, 1 };
+			const float cn = AngTo(f, b) * 57.2958f;
+			cone += cn / 57.2958f; coneN++;
+			const Frame& q = fr[t];
+			if (q.carZ > 300.0f && std::fabs(q.roll) >= 0.7f && cn >= 8.0f && cn <= 65.0f && std::hypot(q.carVX, q.carVY) < 700.0f) e.hoverTicks++;
+			const V3 ref = std::fabs(b.z) < 0.9f ? V3{ 0, 0, 1 } : V3{ 1, 0, 0 };
+			V3 e1 = Cross3(ref, b);
+			const float el = std::sqrt(Dot3(e1, e1));
+			e1 = { e1.x / el, e1.y / el, e1.z / el };
+			const V3 e2 = Cross3(b, e1);
+			const float az = std::atan2(Dot3(f, e2), Dot3(f, e1));
+			if (havePrev)
+			{
+				float d = az - prevAz;
+				while (d > 3.14159265f) d -= 6.2831853f;
+				while (d < -3.14159265f) d += 6.2831853f;
+				turned += d;
+			}
+			prevAz = az; havePrev = true;
+		}
+		e.rollShare = air ? static_cast<float>(on) / air : 0.0f;
+		e.revs = std::fabs(turned) / 6.2831853f;
+		e.coneDeg = coneN ? cone / coneN * 57.2958f : 0.0f;
+		return e;
+	}
+
+	Lesson AirControl(const std::string& id, const std::vector<Frame>& model)
+	{
+		Lesson L;
+		L.kind = LessonKind::Move;
+		L.id = id;
+		L.model = model;
+		if (model.size() < 60) return Lesson{};
+		if (id == "air_roll")
+		{
+			L.moveKind = "air_roll";
+			const int d0 = AirRollDone(model, 0, 0), d1 = d0 >= 0 ? AirRollDone(model, 1, d0) : -1, d2 = d1 >= 0 ? AirRollDone(model, 2, d1) : -1;
+			if (d2 < 0) return Lesson{};
+			L.moveStart = 0; L.moveAct = 0; L.moveDone = d2;
+			L.name = "Air roll control";
+			LessonStep a, b, c;
+			a.name = "Roll all the way over";
+			a.what = "Up in the air with no boost: air roll one full turn (either way) and stop with the car level.";
+			a.why = "Air roll is how you aim in the air. Starting and stopping it on purpose is the whole skill.";
+			a.tips = { "Hold air roll (or directional air roll) and let go a little before you're level: the car keeps turning for a moment.", "Tap the other way to stop the spin.", std::format("The model is round and level in {:.2f} s.", d0 / 120.0f) };
+			a.cue = "Roll, let go early, stop level.";
+			a.start = 0;
+			b.name = "Nose to the ball";
+			b.what = "Point the nose straight at the ball and hold it there.";
+			b.why = "Every aerial touch starts with the nose on the ball; air roll plus pitch and yaw gets you there fastest.";
+			b.tips = { "Ball cam on.", "Pitch and yaw to the ball; roll only if it's quicker that way.", std::format("Hold it a quarter second (the model takes {:.2f} s).", (d1 - d0) / 120.0f) };
+			b.cue = "Nose on the ball, hold.";
+			b.start = d0;
+			c.name = "Wheels to the ball";
+			c.what = "Turn so your wheels face the ball, and hold it.";
+			c.why = "Wheels to the ball is how a flip reset starts: all four wheels touching it gives you your flip back.";
+			c.tips = { "Roll and pitch so the ball is under your wheels from where you sit.", "Think of putting the car's floor against the ball.", std::format("Hold it a quarter second (the model takes {:.2f} s).", (d2 - d1) / 120.0f) };
+			c.cue = "Floor to the ball, hold.";
+			c.start = d1;
+			L.steps = { a, b, c };
+			L.stages = { { 0, 0, "Step 1: " + a.name }, { 1, 1, "Step 2: " + b.name }, { 2, 2, "Step 3: " + c.name }, { 0, 2, "All three in one flight", true } };
+			return L;
+		}
+		L.moveKind = "tornado";
+		const TornadoEvents m = FindTornado(model, 0, 100000);
+		if (m.leave < 0 || m.hoverTicks < 120) return Lesson{};
+		L.moveStart = 0; L.moveAct = m.leave; L.moveDone = static_cast<int>(model.size()) - 1;
+		L.name = "Tornado spin";
+		LessonStep a, b;
+		a.name = "Point up and spin";
+		a.what = "Jump, tip the nose up toward the ceiling, then hold directional air roll and push the stick all the way the other way (air roll right, stick left). The car spins, its nose circling straight up.";
+		a.why = "Air roll one way and steering the other turns the car around an axis off its nose, so the nose draws a circle. With the middle of that circle pointing straight up, your boost pushes you straight up.";
+		a.tips = { "Air roll right with the stick full left (or air roll left, stick full right), both held the whole way.", "Get the nose most of the way up before you start the spin.", "A little boost on the way up." };
+		a.cue = "Nose up, air roll right, stick left.";
+		a.start = 0;
+		b.name = "Hold the hover";
+		b.what = "Keep spinning and feather the boost so you hang in the air in one spot.";
+		b.why = "Holding a hover means your spin is really centred: the same control you need for tornado shots, flicks and air dribbles.";
+		b.tips = { "Tap boost when you start to drop, let go when you rise.", "If you drift one way, the circle's leaning: tip it back with a touch of pitch.",
+			std::format("The model hovers {:.1f} s.", m.hoverTicks / 120.0f) };
+		b.cue = "Spin, feather boost, stay put.";
+		b.start = 0;
+		L.steps = { a, b };
+		L.stages = { { 0, 0, "Step 1: " + a.name }, { 0, 1, "The whole tornado spin", true } };
+		return L;
+	}
+
+	bool AirControlStageDone(const Lesson& L, int stage, const std::vector<Frame>& full, int startTick)
+	{
+		const int t = static_cast<int>(full.size()) - 1;
+		if (t <= startTick + 4) return false;
+		if (t > startTick + (L.moveKind == "tornado" ? 720 : 480)) return true;
+		const LessonStage& st = L.stages[stage];
+		if (full[t].onGround && !full[std::max(0, t - 1)].onGround && t > startTick + 10) return true;   // came down
+		if (L.moveKind == "air_roll")
+		{
+			int from = startTick;
+			for (int s = st.first; s <= st.last; s++) { from = AirRollDone(full, s, from); if (from < 0) return false; }
+			return t >= from + 20;
+		}
+		const TornadoEvents e = FindTornado(full, startTick, 150);
+		if (st.last == 0) return e.leave >= 0 && t >= e.leave + 150;
+		return e.leave >= 0 && t >= e.leave + (L.moveDone - L.moveAct) + 30;   // as long as the model's flight, then a beat
+	}
+
+	StageScore AirControlScore(const Lesson& L, int stage, const std::vector<Frame>& full, int startTick)
+	{
+		StageScore out;
+		const LessonStage& st = L.stages[stage];
+		std::vector<std::string> whys;
+		if (L.moveKind == "air_roll")
+		{
+			int from = startTick, mFrom = L.steps[st.first].start;
+			bool lost = false;
+			for (int s = st.first; s <= st.last; s++)
+			{
+				int sc;
+				std::string why;
+				const int mDone = AirRollDone(L.model, s, mFrom);
+				const int done = lost ? -1 : AirRollDone(full, s, from);
+				if (done < 0)
+				{
+					sc = 1;
+					why = lost ? "Didn't get to it" : s == 0 ? "Never got all the way round and stopped level" : s == 1 ? "Never held the nose on the ball" : "Never held your wheels to the ball";
+					lost = true;
+				}
+				else
+				{
+					const float took = (done - from) / 120.0f, mTook = (mDone - mFrom) / 120.0f;
+					sc = TimeLevel(took - mTook);
+					why = std::format("Done in {:.2f} s (the model: {:.2f})", took, mTook);
+					from = done;
+				}
+				mFrom = mDone >= 0 ? mDone : mFrom;
+				out.stepScores.push_back(sc);
+				whys.push_back(std::format("{}: {}", L.steps[s].name, why));
+			}
+		}
+		else
+		{
+			const int cap = st.last == 0 ? 150 : 100000;   // step 1 stops 1.25 s after leaving the ground (AirControlStageDone): measure the model the same way
+			const TornadoEvents e = FindTornado(full, startTick, cap), m = FindTornado(L.model, 0, cap);
+			for (int s = st.first; s <= st.last; s++)
+			{
+				int sc;
+				std::string why;
+				if (e.leave < 0) { sc = 1; why = "Never left the ground"; }
+				else if (s == 0)
+				{
+					const float r = e.rollShare, rv = e.revs, cn = e.coneDeg, mRv = std::max(0.5f, m.revs);
+					why = std::format("Nose circled {:.1f} times, {:.0f} degrees off straight up (the model: {:.1f}, {:.0f})", rv, cn, m.revs, m.coneDeg);
+					if (r < 0.6f) { sc = r >= 0.3f ? 2 : 1; why = std::format("Air roll held only {:.0f}% of the way: hold it the whole time", r * 100.0f); }
+					else if (cn < 8.0f) { sc = 2; why = "That's a barrel roll, not a tornado: push the stick the opposite way from your air roll (air roll right, stick left) so the nose circles"; }
+					else
+					{
+						sc = rv >= mRv * 0.8f ? 5 : rv >= mRv * 0.6f ? 4 : rv >= mRv * 0.35f ? 3 : 2;
+						if (cn > 60.0f) { sc = std::min(sc, 3); why += ": you're leaning too far over, get the nose closer to straight up"; }
+						else if (sc <= 3) why += ": keep the spin going the whole time";
+					}
+				}
+				else
+				{
+					const float hv = e.hoverTicks / 120.0f, mh = std::max(1.0f, m.hoverTicks / 120.0f), r = hv / mh;
+					sc = r >= 0.85f ? 5 : r >= 0.65f ? 4 : r >= 0.45f ? 3 : r >= 0.2f ? 2 : 1;
+					why = std::format("Hovered {:.1f} s (the model: {:.1f})", hv, mh);
+					if (sc <= 3) why += e.rollShare < 0.6f ? ": keep the air roll held" : ": stay up high and in one spot, feathering boost";
+				}
+				out.stepScores.push_back(sc);
+				whys.push_back(std::format("{}: {}", L.steps[s].name, why));
+			}
+		}
+		int score = 5;
+		for (int s2 : out.stepScores) score = std::min(score, s2);
+		std::vector<std::pair<int, std::string>> order;
+		for (size_t i = 0; i < whys.size(); i++) order.push_back({ out.stepScores[i], whys[i] });
+		std::stable_sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+		if (st.whole) out.lines.push_back(std::format("Overall: {}", score));
+		for (auto& o : order) out.lines.push_back(o.second);
+		out.score = std::max(1, score);
+		return out;
+	}
+}
+
+Lesson Lessons::Move(const std::string& id, const std::vector<Frame>& model)
+{
+	if (id == "air_roll" || id == "tornado_spin") return AirControl(id, model);
+	Lesson L;
+	L.kind = LessonKind::Move;
+	L.id = id;
+	L.model = model;
+	if (model.size() < 60) return Lesson{};
+	L.moveKind = id == "powerslide_turn" ? "powerslide" : id;
+	const MoveEvents m = FindMove(L, model, 0);
+	if (m.done < 0 || m.act < 0 || (L.moveKind != "powerslide" && L.moveKind != "recovery" && (m.dodge < 0 || m.land < 0))) return Lesson{};
+	L.moveStart = 0; L.moveAct = m.act; L.moveDone = m.done;
+	L.dodgeTick = m.dodge; L.landTick = m.land;
+	const float doneS = m.done / 120.0f;
+
+	LessonStep a, b;
+	if (L.moveKind == "half_flip")
+	{
+		L.name = "Half flip";
+		a.name = "The backflip";
+		a.what = "From a standstill (or rolling backward), jump and flip backward straight away.";
+		a.why = "A half flip turns you around twice as fast as steering, and it starts with a backflip.";
+		a.tips = { "Hold the stick straight back as you press jump the second time: that's a backflip.", std::format("Flip right after the jump (the model flips {:.2f} s after it).", (m.dodge - m.act) / 120.0f), "Don't hold any air roll yet." };
+		a.cue = "Jump, then flip backward.";
+		a.start = 0;
+		b.name = "Cancel and roll over";
+		b.what = "The car jumps and starts the backflip for you. Once the nose points up, push the stick forward to stop the flip, then air roll to come upright facing the other way.";
+		b.why = "The cancel stops the backflip halfway, and the air roll turns the upside-down car right way up: you land facing back the way you came.";
+		b.tips = { "Push the stick all the way forward when the nose is pointing at the sky.", "Hold air roll (either way) until your wheels face the floor.", "Boost and drive off the moment you land." };
+		b.cue = "Stick forward, roll over, go.";
+		b.start = m.dodge + 4;
+	}
+	else if (L.moveKind == "speedflip")
+	{
+		L.name = "Speedflip";
+		a.name = "Jump and diagonal flip";
+		a.what = "Boosting from a standstill, jump and flip diagonally forward almost at once.";
+		a.why = "The diagonal flip's push is the speedflip's speed; it has to come early, while you're still slow.";
+		a.tips = { "Boost the whole time.", std::format("Jump at about {:.2f} s, then flip diagonally (stick forward and to the side) {:.2f} s later.", m.act / 120.0f, (m.dodge - m.act) / 120.0f), "A short tap of jump is enough." };
+		a.cue = "Jump, diagonal flip, keep boosting.";
+		a.start = 0;
+		b.name = "Cancel and land";
+		b.what = "The car jumps for you. Flip diagonally, pull the stick straight back right after to cancel it, hold air roll against the spin, and land flat.";
+		b.why = "Cancelled, the flip's push stays and the spin goes: you land going fast and pointed where you were going.";
+		b.tips = { "Pull back within a few ticks of the flip.", "Hold air roll the other way from your flip to stop the roll.", std::format("Land flat and keep boosting (the model is supersonic at {:.2f} s).", doneS) };
+		b.cue = "Cancel, wheels flat.";
+		b.start = m.act + 2;   // (Nov 3) handed over in the jump: the cancel comes 5 ticks after the flip, too soon to hand over between them
+	}
+	else if (L.moveKind == "wavedash")
+	{
+		L.name = "Wavedash";
+		a.name = "Jump and tilt back";
+		a.what = "Driving at top speed without boost, jump, and tilt the nose up a little on the way down.";
+		a.why = "The back wheels touch first; that's the moment the flip turns into speed.";
+		a.tips = { "A short jump is enough.", "Tilt the nose up about 20-40 degrees before you land.", "No boost: the whole point is free speed." };
+		a.cue = "Small hop, nose up a touch.";
+		a.start = 0;
+		b.name = "Flip as you land";
+		b.what = "Flip forward just as your back wheels touch the ground.";
+		b.why = "Flip a moment before the wheels touch and the car slides out of the flip at higher speed; too early and you just flip.";
+		b.tips = { "Watch the ground under you, not the ball.", "Push the stick forward and press jump right as you land.", std::format("Done right you go from 1,400 to about {:.0f}.", Spd(model[m.done])) };
+		b.cue = "Flip right as the wheels touch.";
+		b.start = std::max(0, m.dodge - 30);
+	}
+	else if (L.moveKind == "recovery")
+	{
+		L.name = "Recovery";
+		a.name = "Land and go";
+		a.what = "Knocked into the air and spinning: turn your wheels to the floor, land on them, and drive back toward your back post (the blue ring).";
+		a.why = "A clean landing keeps your speed and gets you back in the play; landing on your roof or side costs a second or more.";
+		a.tips = { "Air roll and pitch to stop the spin and get the wheels facing down early.", "Point the nose where you want to go before you land, so you drive away straight.",
+			std::format("Boost and drive off the moment you land (the model is back on its wheels at {:.2f} s and driving away at {:.2f} s).", m.land / 120.0f, doneS) };
+		a.cue = "Wheels down, nose where you're going.";
+		a.start = 0;
+	}
+	else
+	{
+		L.name = "Powerslide turn";
+		a.name = "Handbrake turn";
+		a.what = "At speed, steer hard and hold the handbrake to swing the car around, then let go and drive back the way you came.";
+		a.why = "A powerslide turns you around in a fraction of the space, and keeps far more speed than braking and turning.";
+		a.tips = { std::format("Hold the handbrake for about {:.2f} s while steering all the way.", 40 / 120.0f), "Let go a little before you face the new way, or you'll spin past it.", "Keep the throttle on through the slide, then boost out of it." };
+		a.cue = "Steer, handbrake, let go, boost.";
+		a.start = 0;
+	}
+	L.steps.push_back(a);
+	if (L.moveKind != "powerslide" && L.moveKind != "recovery")
+	{
+		L.steps.push_back(b);
+		L.stages = { { 0, 0, "Step 1: " + a.name }, { 1, 1, "Step 2: " + b.name }, { 0, 1, "The whole " + Lower(L.name), true } };
+	}
+	else L.stages = { { 0, 0, "The whole " + Lower(L.name), true } };
+	return L;
+}
+
+static int MoveWatchEnd(const Lesson& L, int stage)
+{
+	const int last = L.stages[stage].last;
+	if (last + 1 < static_cast<int>(L.steps.size())) return L.steps[last + 1].start + 20;
+	return std::min(static_cast<int>(L.model.size()) - 1, L.moveDone + 40);
+}
+
+static bool MoveStageDone(const Lesson& L, int stage, const std::vector<Frame>& full, int startTick)
+{
+	if (L.moveKind == "air_roll" || L.moveKind == "tornado") return AirControlStageDone(L, stage, full, startTick);
+	const int t = static_cast<int>(full.size()) - 1;
+	if (t <= startTick + 4) return false;
+	if (t > startTick + 480) return true;   // 4 s: give it up
+	const LessonStage& st = L.stages[stage];
+	const MoveEvents e = FindMove(L, full, 0);
+	if (st.last == 0 && L.steps.size() > 1)
+		return (e.dodge >= startTick && t >= e.dodge + 20) || t > L.dodgeTick + 90;   // step 1 is the flip
+	return (e.done >= 0 && t >= e.done + 30) || t > L.moveDone + 240;
+}
+
+static StageScore MoveScore(const Lesson& L, int stage, const std::vector<Frame>& full, int startTick)
+{
+	if (L.moveKind == "air_roll" || L.moveKind == "tornado") return AirControlScore(L, stage, full, startTick);
+	StageScore out;
+	const int n = static_cast<int>(full.size());
+	if (n <= startTick + 10) return out;
+	const LessonStage& st = L.stages[stage];
+	const MoveEvents e = FindMove(L, full, 0), m = FindMove(L, L.model, 0);
+	struct Why { int score; std::string text; };
+	std::vector<Why> whys;
+	auto stickBack = [](const Frame& f) { return f.pitch >= 0.5f; };
+	auto stickFwd = [](const Frame& f) { return f.pitch <= -0.5f; };
+	auto diagonal = [](const Frame& f) { return f.pitch <= -0.3f && std::max(std::fabs(f.yaw), std::fabs(f.steer)) >= 0.4f; };
+
+	for (int step = st.first; step <= st.last; step++)
+	{
+		int sc = 5;
+		std::string why;
+		if (L.moveKind == "recovery")
+		{
+			if (e.land < 0) { sc = 1; why = "Never landed"; }
+			else
+			{
+				const Frame& l = full[e.land];
+				const float tilt = std::max(std::fabs(l.carPitch), std::fabs(l.carRoll)) * (180.0f / 32768.0f);
+				if (e.done < 0) { sc = 1; why = "Never got going back toward your back post"; }
+				else { sc = TimeLevel((e.done - m.done) / 120.0f); why = std::format("Landed and driving back in {:.2f} s (the model: {:.2f})", e.done / 120.0f, m.done / 120.0f); }
+				if (tilt > 30.0f) { sc = std::min(sc, 2); why = std::format("Landed {:.0f} degrees over: get the wheels to the floor first. ", tilt) + why; }
+			}
+		}
+		else if (L.moveKind == "powerslide")
+		{
+			if (e.act < 0) { sc = 1; why = "No handbrake: hold it while you steer"; }
+			else if (e.done < 0) { sc = 1; why = "Never got turned around and going"; }
+			else
+			{
+				const float late = (e.done - m.done) / 120.0f;
+				sc = TimeLevel(late);
+				why = std::format("Turned around and going in {:.2f} s (the model: {:.2f})", e.done / 120.0f, m.done / 120.0f);
+			}
+		}
+		else if (step == 0)
+		{
+			// the jump and the flip
+			if (e.act < 0) { sc = 1; why = "No jump"; }
+			else if (e.dodge < 0 || (L.moveKind != "wavedash" && e.dodge > e.act + 60)) { sc = 1; why = e.dodge < 0 && L.moveKind == "wavedash" ? "No flip: flip forward as you land" : "No flip after the jump"; }
+			else
+			{
+				const Frame& d = full[e.dodge];
+				const float gap = (e.dodge - e.act) / 120.0f, mgap = (m.dodge - m.act) / 120.0f;
+				if (L.moveKind == "half_flip" && !stickBack(d)) { sc = 2; why = "Flip backward (stick back), not forward or sideways"; }
+				else if (L.moveKind == "speedflip" && !diagonal(d)) { sc = 2; why = "Flip diagonally (stick forward and to the side)"; }
+				else if (L.moveKind == "wavedash" && !stickFwd(d)) { sc = 2; why = "Flip forward into the landing"; }
+				else if (L.moveKind != "wavedash" && gap > mgap + 0.15f) { sc = gap > mgap + 0.3f ? 3 : 4; why = std::format("Flip sooner after the jump ({:.2f} s; the model: {:.2f})", gap, mgap); }
+				else why = L.moveKind == "half_flip" ? "Clean backflip" : L.moveKind == "speedflip" ? "Clean diagonal flip" : "Flipped forward";
+				if (L.moveKind == "speedflip")
+				{
+					int on = 0, all = 0;
+					for (int t = std::max(startTick, 0); t < e.dodge; t++) { all++; on += full[t].boost; }
+					if (all > 0 && on < all * 0.9f) { sc = std::min(sc, 3); why += std::format(", boost the whole time (on {:.0f}%)", 100.0f * on / all); }
+				}
+				if (L.moveKind == "wavedash")
+				{
+					// the tilt: nose up before the landing
+					float nose = 0;
+					for (int t = std::max(e.act, e.dodge - 20); t <= e.dodge; t++) nose = std::max(nose, full[t].carPitch * (180.0f / 32768.0f));
+					if (nose < 5.0f) { sc = std::min(sc, 3); why += std::format(", tilt the nose up before you land ({:.0f} degrees)", nose); }
+					else if (nose > 60.0f) { sc = std::min(sc, 3); why += std::format(", too much tilt ({:.0f} degrees)", nose); }
+				}
+			}
+		}
+		else
+		{
+			// the second step: the cancel and landing (half flip, speedflip), or the flip at the landing (wavedash)
+			if (e.dodge < 0) { sc = 1; why = "No flip"; }
+			else if (L.moveKind == "wavedash")
+			{
+				if (e.land < 0) { sc = 1; why = "Never landed"; }
+				else
+				{
+					const int gapT = e.land - e.dodge;
+					if (gapT > 15) { sc = 2; why = std::format("Flipped {:.2f} s before landing: flip right as the wheels touch", gapT / 120.0f); }
+					else
+					{
+						const float gain = e.done >= 0 ? e.doneSpeed - Spd(full[std::max(0, e.act - 1)]) : 0.0f, mGain = m.doneSpeed - Spd(L.model[std::max(0, m.act - 1)]);
+						const float r = mGain > 1.0f ? gain / mGain : 0.0f;
+						sc = r >= 0.85f ? 5 : r >= 0.7f ? 4 : r >= 0.5f ? 3 : r > 0.15f ? 2 : 1;
+						why = std::format("Gained {:.0f} uu/s (the model: {:.0f})", gain, mGain);
+					}
+				}
+			}
+			else
+			{
+				int fwd = -1;
+				const int until = e.land >= 0 ? e.land : std::min(n - 1, e.dodge + 120);
+				const auto cancel = L.moveKind == "half_flip" ? stickFwd : stickBack;
+				for (int t = std::max(e.dodge + 1, startTick); t <= until; t++) if (cancel(full[t])) { fwd = t; break; }   // (a running start's inputs are the model's)
+				const int mFwd = [&] { const int u = m.land; for (int t = m.dodge + 1; t <= u; t++) if (cancel(L.model[t])) return t; return -1; }();
+				if (fwd < 0) { sc = 2; why = L.moveKind == "half_flip" ? "No cancel: push the stick forward to stop the backflip" : "No cancel: pull the stick back right after the flip"; }
+				else if (const int slack = L.moveKind == "speedflip" ? 12 : 24; mFwd >= 0 && std::abs(fwd - mFwd) > slack) { sc = std::abs(fwd - mFwd) > 2 * slack ? 3 : 4; why = std::format("Cancelled {:.2f} s {} than the model", std::abs(fwd - mFwd) / 120.0f, fwd > mFwd ? "later" : "sooner"); }
+				else why = "Cancelled on time";
+				if (e.land < 0) { sc = std::min(sc, 2); why += ", but never landed"; }
+				else
+				{
+					const Frame& l = full[e.land];
+					const float tilt = std::max(std::fabs(l.carPitch), std::fabs(l.carRoll)) * (180.0f / 32768.0f);
+					if (tilt > 30.0f) { sc = std::min(sc, 2); why += std::format(", landed tilted ({:.0f} degrees): roll until the wheels face the floor", tilt); }
+					if (L.moveKind == "half_flip" && RadDiff(HeadingRad(l), HeadingRad(L.model[0]) + 3.14159265f) > 0.6f) { sc = std::min(sc, 3); why += ", but not facing back the way you came"; }
+				}
+			}
+		}
+		out.stepScores.push_back(sc);
+		if (L.steps.size() > 1 || !st.whole) whys.push_back({ sc, std::format("{}: {}", L.steps[step].name, why) });
+		else whys.push_back({ sc, why });
+	}
+	int score = 5;
+	for (int s2 : out.stepScores) score = std::min(score, s2);
+	if (st.whole && L.moveKind != "powerslide" && L.moveKind != "recovery")
+	{
+		// the whole move: what it's for (time, or speed gained), with the steps listed
+		int overall;
+		std::string why;
+		if (L.moveKind == "wavedash") { overall = out.stepScores.back(); why = whys.back().text.substr(whys.back().text.find(": ") + 2); }
+		else if (e.done < 0) { overall = 1; why = L.moveKind == "speedflip" ? "Never got to supersonic" : "Never got turned around and going"; }
+		else
+		{
+			overall = TimeLevel((e.done - m.done) / 120.0f);
+			why = std::format("{} in {:.2f} s (the model: {:.2f})", L.moveKind == "speedflip" ? "Supersonic" : "Turned around and going", e.done / 120.0f, m.done / 120.0f);
+		}
+		if (out.stepScores.front() <= 2) overall = std::min(overall, 2);   // not this move
+		score = overall;
+		whys.insert(whys.begin(), { 0, std::format("Overall: {} ({})", overall, why) });
+	}
+	std::stable_sort(whys.begin(), whys.end(), [](const Why& a, const Why& b) { return a.score < b.score; });
+	for (const Why& w : whys) out.lines.push_back(w.text);
+	out.score = std::max(1, score);
+	return out;
+}
+
 // The running start (Nov 2, Coop): step 3 of a speedflip used to drop you in frozen at full speed, just landed and
 // pointed off the ball, so you sailed past it; step 2 gave you 8 ticks to jump. Now the model drives the half second
 // before the step (never from before the kickoff's own start) and hands over where the step begins.
 int Lesson::StageRideFrom(int stage) const
 {
-	if (kind != LessonKind::Kickoff || koSides.empty() || stage < 0 || stage >= static_cast<int>(stages.size())) return -1;
+	if (stage < 0 || stage >= static_cast<int>(stages.size())) return -1;
+	if (kind == LessonKind::Move)
+	{
+		if (stages[stage].first == 0) return -1;
+		if (StageRideByInput(stage)) return 0;   // from the model's own start, so the game does the jump and flip itself
+		return std::max(0, StageStart(stage) - 60);   // (Nov 2) the move's later steps too
+	}
+	if (kind != LessonKind::Kickoff || koSides.empty()) return -1;
 	if (KoStepKind(*this, stages[stage].first) == 0) return -1;
 	const int start = StageStart(stage);
 	return std::max(KoSideFor(*this, start).start, start - 60);
+}
+
+// (Nov 3, Coop: step 2 of the half flip "starts you in the middle of the jump, impossible to cancel") Putting the car
+// back frame by frame can't start a flip: the game only cancels a flip it's doing itself. So for the half flip and the
+// speedflip the running start plays the model's inputs on your car instead, and the game jumps and flips for real.
+bool Lesson::StageRideByInput(int stage) const
+{
+	if (kind != LessonKind::Move || stage < 0 || stage >= static_cast<int>(stages.size()) || stages[stage].first == 0) return false;
+	return moveKind == "half_flip" || moveKind == "speedflip";
 }
 
 int Lesson::StageWatchEnd(int stage) const
@@ -1438,6 +2396,8 @@ int Lesson::StageWatchEnd(int stage) const
 	case LessonKind::CeilingShot: return CsWatchEnd(*this, stage);
 	case LessonKind::FlipReset:   return FrWatchEnd(*this, stage);
 	case LessonKind::Kickoff:     return KoWatchEnd(*this, stage);
+	case LessonKind::Shot:        return ShotWatchEnd(*this, stage);
+	case LessonKind::Move:        return MoveWatchEnd(*this, stage);
 	default:                      return AdWatchEnd(*this, stage);
 	}
 }
@@ -1450,6 +2410,8 @@ bool Lessons::StageDone(const Lesson& L, int stage, const std::vector<Frame>& fu
 	case LessonKind::CeilingShot: return CsStageDone(L, stage, full, startTick);
 	case LessonKind::FlipReset:   return FrStageDone(L, stage, full, startTick);
 	case LessonKind::Kickoff:     return KoStageDone(L, stage, full, startTick);
+	case LessonKind::Shot:        return false;   // every attempt plays on to the finish
+	case LessonKind::Move:        return MoveStageDone(L, stage, full, startTick);
 	default:                      return AdStageDone(L, stage, full, startTick);
 	}
 }
@@ -1463,6 +2425,8 @@ StageScore Lessons::Score(const Lesson& L, int stage, const std::vector<Frame>& 
 	case LessonKind::CeilingShot: return CsScore(L, stage, full, startTick, wentIn, floorFirst, ref, compareToModel);
 	case LessonKind::FlipReset:   return FrScore(L, stage, full, startTick, wentIn, floorFirst, ref, compareToModel);
 	case LessonKind::Kickoff:     return KoScore(L, stage, full, startTick);
+	case LessonKind::Shot:        return ShotScore(L, stage, full, startTick, wentIn, floorFirst, compareToModel);
+	case LessonKind::Move:        return MoveScore(L, stage, full, startTick);
 	default:                      return AdScore(L, stage, full, startTick, wentIn, floorFirst, ref, compareToModel);
 	}
 }
@@ -1474,26 +2438,50 @@ Lesson Lessons::Build(const std::string& id, const std::vector<Frame>& model)
 	if (id == "ceiling_shot") return CeilingShot(model);
 	if (id == "flip_reset") return FlipReset(model);
 	if (id.rfind("kickoff_", 0) == 0) return Kickoff(id, model);
+	if (id == "aerial" || id == "power_shot" || id == "dribble" || id == "front_flick" || id == "fast_aerial" || id == "off_the_wall" || id == "wall_hit" || id == "backboard_read") return Shot(id, model);
+	if (id == "half_flip" || id == "speedflip" || id == "wavedash" || id == "powerslide_turn" || id == "recovery" || id == "air_roll" || id == "tornado_spin") return Move(id, model);
 	return Lesson{};
 }
 
 const std::vector<LessonInfo>& Lessons::Catalog()
 {
-	// Order is the tree's left-to-right reading order: roots first, then what they open
+	// The skill tree (Oct 28 map; tiers 1-2 built Nov 2), tier by tier. Order is the tree's reading order: roots first,
+	// then what they open. A prerequisite that isn't built yet doesn't lock anything (RLCoachLearn.cpp).
 	static const std::vector<LessonInfo> c = {
-		{ "air_dribble", "Air dribble", "Off the wall and carried in the air, then the finish.", {}, true },
-		{ "double_tap", "Double tap", "Into the backboard, read the bounce, second touch in.", {}, true },
-		{ "ceiling_shot", "Ceiling shot", "Onto the ceiling, fall off with your flip, shoot.", {}, true },
-		{ "flip_reset", "Flip reset", "Get your flip back off the ball and use it on the shot.", { "air_dribble" }, true },
-		{ "air_dribble_double_tap", "Air dribble double tap", "Carry it into the backboard, then the second touch.", { "air_dribble", "double_tap" }, false },
-		{ "ceiling_double_tap", "Ceiling double tap", "Off the ceiling into the backboard, then the second touch.", { "ceiling_shot", "double_tap" }, false },
-		{ "ceiling_flip_reset", "Ceiling flip reset", "Off the ceiling into a reset, then the shot.", { "ceiling_shot", "flip_reset" }, false },
-		{ "flip_reset_double_tap", "Flip reset double tap", "Reset, flip it into the backboard, then the second touch.", { "flip_reset", "double_tap" }, false },
+		// Tier 1: foundations (each can be tested out of)
+		{ "aerial", "Aerial", "Jump, boost and meet the ball in the air.", {}, true, 1 },
+		{ "power_shot", "Power shot", "Boost in and flip through the ball for the hardest hit.", {}, true, 1 },
+		{ "dribble", "Dribble", "Carry the ball on your roof, then flick it in.", {}, true, 1 },
+		{ "half_flip", "Half flip", "Backflip, cancel, roll upright: the fastest way to turn around.", {}, true, 1 },
+		{ "powerslide_turn", "Powerslide turn", "A handbrake turn that keeps your speed.", {}, true, 1 },
+		{ "recovery", "Recovery", "Land on your wheels after a hit, pointed where you're going.", {}, true, 1 },
+		{ "air_roll", "Air roll control", "Point the car any way you want in the air.", { "aerial" }, true, 1 },
+		{ "wall_hit", "Wall hit", "Drive up the wall and hit the ball off it.", {}, false, 1 },
+		// Tier 2: core
+		{ "fast_aerial", "Fast aerial", "Jump, jump again straight away, boost: first to the high balls.", { "aerial" }, true, 2 },
+		{ "speedflip", "Speedflip", "A cancelled diagonal flip: the quickest way up to full speed.", { "half_flip" }, true, 2 },
+		{ "wavedash", "Wavedash", "A flip just as your wheels land, for free speed.", { "recovery" }, true, 2 },
+		{ "front_flick", "Front flick", "Pop the ball off your roof with a front flip.", { "dribble" }, true, 2 },
+		{ "ground_catch", "Ground catch", "Cushion a falling ball onto your car.", { "dribble" }, false, 2 },
+		{ "tornado_spin", "Tornado spin", "Air roll one way, stick the other, nose up: spin and hover in the air.", { "air_roll" }, true, 2 },
+		{ "off_the_wall", "Off the wall", "Jump off the wall at the ball and hit it.", { "wall_hit", "fast_aerial" }, true, 2 },
+		{ "backboard_read", "Backboard read", "Meet a ball coming off the backboard.", { "fast_aerial" }, true, 2 },
+		// Tier 3: advanced
+		{ "air_dribble", "Air dribble", "Off the wall and carried in the air, then the finish.", { "off_the_wall", "air_roll" }, true, 3 },
+		{ "double_tap", "Double tap", "Into the backboard, read the bounce, second touch in.", { "off_the_wall", "backboard_read" }, true, 3 },
+		{ "ceiling_shot", "Ceiling shot", "Onto the ceiling, fall off with your flip, shoot.", { "off_the_wall" }, true, 3 },
+		// Tier 4: expert
+		{ "flip_reset", "Flip reset", "Get your flip back off the ball and use it on the shot.", { "air_dribble" }, true, 4 },
+		{ "air_dribble_double_tap", "Air dribble double tap", "Carry it into the backboard, then the second touch.", { "air_dribble", "double_tap" }, false, 4 },
+		{ "ceiling_double_tap", "Ceiling double tap", "Off the ceiling into the backboard, then the second touch.", { "ceiling_shot", "double_tap" }, false, 4 },
+		// Tier 5: master
+		{ "ceiling_flip_reset", "Ceiling flip reset", "Off the ceiling into a reset, then the shot.", { "ceiling_shot", "flip_reset" }, false, 5 },
+		{ "flip_reset_double_tap", "Flip reset double tap", "Reset, flip it into the backboard, then the second touch.", { "flip_reset", "double_tap" }, false, 5 },
 		// Kickoffs (Nov 1): the flip-in first, then the speedflip from each spawn
-		{ "kickoff_flipin", "Kickoff: boost and flip in", "Boost on go, straight at the ball, flip into it. The kickoff most players start with.", {}, true },
-		{ "kickoff_diagonal", "Kickoff: diagonal speedflip", "The fastest kickoff from the corner spawns: jump, diagonal flip, cancel, flip in. SSL players use it 97% of the time.", { "kickoff_flipin" }, true },
-		{ "kickoff_offcentre", "Kickoff: off-centre speedflip", "The speedflip from the spawns beside the goal.", { "kickoff_diagonal" }, true },
-		{ "kickoff_back", "Kickoff: back centre speedflip", "The speedflip from the spawn in front of your goal: the longest run.", { "kickoff_diagonal" }, true },
+		{ "kickoff_flipin", "Kickoff: boost and flip in", "Boost on go, straight at the ball, flip into it. The kickoff most players start with.", {}, true, 0 },
+		{ "kickoff_diagonal", "Kickoff: diagonal speedflip", "The fastest kickoff from the corner spawns: jump, diagonal flip, cancel, flip in. SSL players use it 97% of the time.", { "kickoff_flipin" }, true, 0 },
+		{ "kickoff_offcentre", "Kickoff: off-centre speedflip", "The speedflip from the spawns beside the goal.", { "kickoff_diagonal" }, true, 0 },
+		{ "kickoff_back", "Kickoff: back centre speedflip", "The speedflip from the spawn in front of your goal: the longest run.", { "kickoff_diagonal" }, true, 0 },
 	};
 	return c;
 }
@@ -1555,7 +2543,7 @@ LessonProgress::Change LessonProgress::Record(int stage, int score, float speed,
 
 std::string LessonProgress::Save(const std::string& id) const
 {
-	std::string s = std::format("{},unlocked,{}\n{},completed,{}\n", id, unlocked, id, completed ? 1 : 0);
+	std::string s = std::format("{},unlocked,{}\n{},completed,{}\n{},testout,{}\n", id, unlocked, id, completed ? 1 : 0, id, testOut);
 	for (size_t i = 0; i < best.size(); i++)
 	{
 		std::string r;
@@ -1579,6 +2567,7 @@ void LessonProgress::Load(const std::string& id, const std::string& csv)
 		if (p.size() < 3 || p[0] != id) continue;
 		if (p[1] == "unlocked") unlocked = std::atoi(p[2].c_str());
 		else if (p[1] == "completed") completed = std::atoi(p[2].c_str()) != 0;
+		else if (p[1] == "testout") testOut = std::atoi(p[2].c_str());
 		else if (p[1] == "stage" && p.size() >= 4)
 		{
 			int i = std::atoi(p[2].c_str());

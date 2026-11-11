@@ -1,0 +1,15 @@
+# The Road2 Bot's look, copied from what you were wearing (rlcoach_bot_capture me)
+# Paints: the paint's name after the item, e.g. "slot 2 386 Titanium White"
+slot 0 23    # Octane
+slot 1 2967    # Streamline
+slot 2 386    # Cristiano
+slot 3 63 Titanium White    # Standard
+slot 7 270    # Glossy
+slot 12 270    # Glossy
+slot 14 1948    # Classic
+slot 15 8749 Titanium White    # Beastbox
+slot 16 6839    # Spectral
+slot 18 12371    # I Feel It Coming
+slot 20 3085    # Default
+primary 57    # from the preset capture: the "me" capture read 0 here
+accent 0

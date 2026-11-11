@@ -8,6 +8,7 @@
 #include "RepData.h"
 #include "ShotBook.h"
 #include "ShotGeometry.h"
+#include "Segmenter.h"
 #include <deque>
 #include <string>
 #include <vector>
@@ -38,7 +39,9 @@ struct StageScore
 	float lineMatch = -1;                // average distance from the model's path (info only; -1 = not measured)
 };
 
-enum class LessonKind { AirDribble, DoubleTap, CeilingShot, FlipReset, Kickoff };
+// Shot (Nov 2): the foundation lessons graded by the review's own grader (aerial, power shot, dribble...). Move (Nov 2):
+// movement with no ball (half flip, wavedash, powerslide turn, speedflip), scored on time and speed.
+enum class LessonKind { AirDribble, DoubleTap, CeilingShot, FlipReset, Kickoff, Shot, Move };
 
 // A kickoff in a kickoff lesson's model (Nov 1): the model holds the right spawn's kickoff, then the same one mirrored
 // from the left spawn (back centre: one). Model ticks of what happens in each.
@@ -70,6 +73,20 @@ struct Lesson
 	std::string koStarsWho;                // who gets there in those times
 	std::string koSpawn;                   // "diagonal", "off-centre", "back centre"
 	std::vector<std::string> notes;        // more about it, under the steps (kickoffs: variations, what decides them, teammates)
+	// Shot lessons (Nov 2)
+	ShotType shotType = ShotType::Ground;
+	std::vector<SegKind> stepSegs;         // the rep segment each step is graded on
+	ShotReference modelRef;                // the model as "your fastest goal on this shot" (the grader's timing benchmark)
+	bool power = false;                    // power shot: the whole thing is scored on how hard it went in
+	bool needDoubleJump = false;           // fast aerial: a second jump straight after the first
+	bool needWallTakeoff = false;          // off the wall: leave from the wall
+	bool needFrontFlick = false;           // front flick: the dribble's flick has to be straight forward
+	bool needWallTouch = false;            // wall hit: the shot touch on the wall
+	bool needBackboard = false;            // backboard read: the ball off the backboard before your first touch
+	// Move lessons (Nov 2): what each is measured on (model ticks)
+	std::string moveKind;                  // "half_flip", "wavedash", "powerslide", "speedflip"
+	int moveStart = -1, moveAct = -1, moveDone = -1;   // the run-up, the move (jump / handbrake), back in control
+	int dodgeTick = -1;                    // the flip
 
 	bool valid() const { return !model.empty() && !stages.empty(); }
 	int StageStart(int stage) const { return steps[stages[stage].first].start; }
@@ -78,19 +95,24 @@ struct Lesson
 	// Kickoff steps that start mid-kickoff: the model drives you from this tick up to the step's start, so you take over
 	// already moving (a running start); -1 for none
 	int StageRideFrom(int stage) const;
+	bool StageRideByInput(int stage) const;   // the running start plays the model's inputs, not its frames (Move: half flip, speedflip)
 	// Whether the stage includes the finish (it then ends on a goal or a miss, like any practice attempt)
 	bool StageHasFinish(int stage) const { return stages[stage].last == static_cast<int>(steps.size()) - 1; }
 };
 
 namespace Lessons
 {
-	// Builds a lesson from its model rep (data/RLCoach/lessons/<id>_model.csv). Invalid if the rep isn't that mechanic.
+	// Builds a lesson from its model rep (data/Road2/lessons/<id>_model.csv). Invalid if the rep isn't that mechanic.
 	Lesson AirDribble(const std::vector<Frame>& model);
 	Lesson DoubleTap(const std::vector<Frame>& model);
 	Lesson CeilingShot(const std::vector<Frame>& model);
 	Lesson FlipReset(const std::vector<Frame>& model);
 	// Kickoffs (Nov 1): kickoff_flipin, kickoff_diagonal, kickoff_offcentre, kickoff_back
 	Lesson Kickoff(const std::string& id, const std::vector<Frame>& model);
+	// Foundations (Nov 2): aerial, power_shot, dribble, fast_aerial, off_the_wall (graded like a rep), and the moves
+	// half_flip, wavedash, powerslide_turn, speedflip (timed against the model)
+	Lesson Shot(const std::string& id, const std::vector<Frame>& model);
+	Lesson Move(const std::string& id, const std::vector<Frame>& model);
 	Lesson Build(const std::string& id, const std::vector<Frame>& model);
 
 	// During an attempt (full = the model up to the stage start, then what you've done; ticks in model time):
@@ -108,6 +130,7 @@ struct LessonProgress
 {
 	int unlocked = 0;                         // highest stage you can open
 	bool completed = false;                   // passed the last stage (the whole mechanic)
+	int testOut = 0;                          // tiers 1-2 (Nov 2): 0 not tried, 1 failed (the steps are open), 2 passed
 	std::vector<int> best;                    // best score per stage
 	std::vector<std::deque<int>> recentFull;  // last 5 scores at 100% per stage
 	int rampStreak = 0;                       // 4-5s in a row at the current auto-ramp speed
@@ -134,6 +157,8 @@ struct LessonInfo
 	std::string id, name, blurb;
 	std::vector<std::string> needs;   // lesson ids to complete first
 	bool built = false;               // false = coming soon (no model or scoring yet)
+	int tier = 0;                     // the skill tree's tier, 1-6 (0: kickoffs, their own group)
+	bool TestOut() const { return tier == 1 || tier == 2; }   // can be passed whole, skipping the steps
 };
 
 namespace Lessons

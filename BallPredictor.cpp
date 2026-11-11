@@ -65,7 +65,7 @@ void BallPredictor::StartInit(const std::filesystem::path& meshesFolder)
 
 	if (!HasMeshFiles(meshesFolder))
 	{
-		SetStatus("No arena files yet: run RLArenaCollisionDumper (see the RLCoach settings tab)");
+		SetStatus("No arena files yet: run RLArenaCollisionDumper (see Road2's settings: F2, Plugins, Road2)");
 		started = false; // allow another try after the files are added
 		return;
 	}

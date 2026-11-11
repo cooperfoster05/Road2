@@ -15,7 +15,7 @@ public:
 	virtual ~PluginWindowBase() = default;
 
 	bool isWindowOpen_ = false;
-	std::string menuTitle_ = "RLCoach";
+	std::string menuTitle_ = "Road2";
 	// Nov 1: a size-conscious window. uiBaseSize_ is the "Window size" setting (RenderWindow sets it from its cvar).
 	// The height always fits what's showing (fitHeight_, measured each frame), and dragging the window narrower than
 	// it needs shrinks the whole UI with it instead of cutting things off.

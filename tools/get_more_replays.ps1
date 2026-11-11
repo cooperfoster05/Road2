@@ -1,8 +1,8 @@
 # Downloads more replays from ballchasing.com for the kickoff openings book (Nov 1): ranked 1v1 games, spread evenly
 # across ranks (back-centre kickoffs, fakes and wavedashes are mostly a 1v1 thing, and we had none), and games with pro
-# players in them (ranked and private matches), into RLCoach's data folder: ranked_replays\<rank>\ (the 1v1s, beside
+# players in them (ranked and private matches), into Road2's data folder: ranked_replays\<rank>\ (the 1v1s, beside
 # the 2s and 3s) and pro_replays2\. Your API key stays on your PC:
-# it's read from ballchasing_key.txt in the RLCoach data folder and never printed. Run from PowerShell:
+# it's read from ballchasing_key.txt in the Road2 data folder and never printed. Run from PowerShell:
 #     powershell -ExecutionPolicy Bypass -File tools\get_more_replays.ps1
 #     powershell -ExecutionPolicy Bypass -File tools\get_more_replays.ps1 -PerRank 30 -PerPro 50     (a shorter run)
 # It takes turns between ranks and playlists, so stopping it early still leaves an even spread. Free accounts can
@@ -16,7 +16,8 @@ param(
     [int]$PaceSeconds = 17
 )
 
-$data = Join-Path $env:APPDATA "bakkesmod\bakkesmod\data\RLCoach"
+$data = Join-Path $env:APPDATA "bakkesmod\bakkesmod\data\Road2"
+if (-not (Test-Path $data)) { $data = Join-Path $env:APPDATA "bakkesmod\bakkesmod\data\RLCoach" }   # before the plugin's first run as Road2
 $keyFile = Join-Path $data "ballchasing_key.txt"
 if (-not (Test-Path $keyFile)) { Write-Host "Put your ballchasing API key in $keyFile first."; exit 1 }
 $key = (Get-Content $keyFile -Raw).Trim()

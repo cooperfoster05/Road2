@@ -14,7 +14,7 @@ struct PadInput
 enum class PadStyle { PS4, Xbox };
 enum class PadTheme { Dark, Light };
 
-// Physical buttons an action can be bound to (index stored in the rlcoach_pad_* cvars)
+// Physical buttons an action can be bound to (index stored in the road2_pad_* cvars)
 enum PadButton { PB_None = 0, PB_South, PB_East, PB_West, PB_North, PB_L1, PB_R1, PB_L3, PB_R3, PB_Count };
 
 // Which button does what. Defaults are Rocket League's default controller binds.

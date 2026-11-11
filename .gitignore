@@ -12,3 +12,6 @@ _to_delete/
 
 # Python caches
 __pycache__/
+
+# Release zips from tools/package.ps1
+dist/
