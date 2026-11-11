@@ -132,6 +132,9 @@
     <ClCompile Include="Engine.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
+    <ClCompile Include="ArenaFiles.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
     <ClCompile Include="EngineCore.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
@@ -285,6 +288,9 @@
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="Engine.h">
+      <Filter>Plugin\header</Filter>
+    </ClInclude>
+    <ClInclude Include="ArenaFiles.h">
       <Filter>Plugin\header</Filter>
     </ClInclude>
     <ClInclude Include="EngineInternal.h">

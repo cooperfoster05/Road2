@@ -366,7 +366,7 @@ void RLCoach::CombineStart(const std::string& event, int level, uint32_t seed)
 	if (!gameWrapper->IsInFreeplay()) { combineStatus = "Open free play to play the Combine"; CombinePublish(); return; }
 	if (!predictor.Ready())
 	{
-		combineStatus = predictor.Status().rfind("No arena files", 0) == 0 ? "The Combine needs the arena files first: a one-time setup, on the setup card in the settings (F2, Plugins, Road2)"
+		combineStatus = predictor.Status().rfind("No arena files", 0) == 0 ? "The Combine needs the arena files, and Road2 couldn't read them from your game files: see the card in the settings (F2, Plugins, Road2)"
 			: "The simulator is still loading; try again in a moment";
 		CombinePublish();
 		return;

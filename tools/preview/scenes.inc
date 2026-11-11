@@ -92,6 +92,7 @@ static void Frame(RLCoach& p, const std::string& scene, int f)
 	if (f == 2) { if (Has(scene, "best")) p.uiTab = 2; if (Has(scene, "fix")) p.uiTab = 1; }
 	if (Has(scene, "settings"))
 	{
+		if (Has(scene, "fail")) { p.predictor.ready = false; p.predictor.status = "No arena files: Found 12 of the arena's 16 pieces in the game's files (a game update may have changed them)"; }
 		ImGui::SetNextWindowPos(ImVec2(40, 20), ImGuiCond_Always);
 		ImGui::SetNextWindowSize(ImVec2(1000, 1040), ImGuiCond_Always);
 		ImGui::Begin("Bakkesmod settings");

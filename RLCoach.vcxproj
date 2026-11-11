@@ -164,6 +164,9 @@
     <ClCompile Include="Lesson.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="ArenaFiles.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="Combine.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -229,6 +232,7 @@
     <ClInclude Include="BallPredictor.h" />
     <ClInclude Include="WhatIf.h" />
     <ClInclude Include="Engine.h" />
+    <ClInclude Include="ArenaFiles.h" />
     <ClInclude Include="EngineInternal.h" />
     <ClInclude Include="Mechanics.h" />
     <ClInclude Include="version.h" />

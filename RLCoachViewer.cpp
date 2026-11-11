@@ -378,7 +378,7 @@ void RLCoach::RenderWelcome()
 	struct Step { bool done; const char* title; const char* detail; };
 	const Step steps[3] = {
 		{ rec, "Turn on recording", "Every rep gets saved and graded. It starts off each time you launch the game." },
-		{ sim, "Make the arena files", "For the smallest fix, the best line and the Combine. Two minutes, once: the steps are on the setup card in the settings (F2, Plugins, Road2)." },
+		{ sim, "The arena files", "For the smallest fix, the best line and the Combine. Road2 reads them from your Rocket League files by itself; if this stays unticked, see the card in the settings (F2, Plugins, Road2)." },
 		{ reps, "Play a few reps", "Free play or any training pack. A rep starts when you move and ends on a goal, a miss or a timeout." },
 	};
 	for (int i = 0; i < 3; i++)
@@ -404,7 +404,7 @@ void RLCoach::RenderWelcome()
 		{
 			ImGui::SetCursorScreenPos(ImVec2(a.x + W - pad - 110.0f * S, p.y));
 			ImGui::PushID(i);
-			if (i == 0 ? AccentButton("Turn it on", ImVec2(110.0f * S, 0)) : QuietButton("Load them", ImVec2(110.0f * S, 0)))
+			if (i == 0 ? AccentButton("Turn it on", ImVec2(110.0f * S, 0)) : QuietButton("Try again", ImVec2(110.0f * S, 0)))
 			{
 				if (i == 0) setCvar("road2_recording", 1.0f);
 				else gameWrapper->Execute([this](GameWrapper*) { StartPredictor(); });
@@ -1810,7 +1810,7 @@ void RLCoach::RenderWindow()
 				const LineView& v = line[slot];
 				const bool fixTab = slot == kFixLine;
 				if (simMissing)
-					emptyState(0, "Needs the arena files", "A one-time setup: open the settings (F2, Plugins, Road2) and follow the setup card.");
+					emptyState(0, "Needs the arena files", "Road2 couldn't read them from your game files: open the settings (F2, Plugins, Road2) to see why and try again.");
 				else if (!simReady)
 					emptyState(0, "Loading the simulator...", "The searches start as soon as it's ready.");
 				else if (busySlot == slot || ((pending || busy) && (!v.mine || v.status == WhatIfStatus::None)))

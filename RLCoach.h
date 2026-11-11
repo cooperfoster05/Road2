@@ -245,6 +245,7 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void ViewerTick(CarWrapper& car);          // game thread, every physics tick
 	void OverrideViewerInput(CarWrapper& car, void* params); // game thread, before the game reads input
 	void OverrideRideInput(CarWrapper& car, void* params);   // game thread: a lesson's running start played as inputs
+	std::filesystem::path GameCookedFolder();   // Rocket League's TAGame\CookedPCConsole (RLCoachStorage.cpp)
 	void OpenDataSubfolder(const char* name);   // Explorer at data/Road2/<name>
 	void OpenDataFolder();   // Explorer at data/Road2 (the settings tab)
 	// The move from RLCoach to Road2 (Nov 6, for v1): the data folder data\RLCoach becomes data\Road2, settings and

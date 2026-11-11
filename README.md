@@ -40,20 +40,18 @@ BakkesMod.
 3. In Rocket League press F6 and type `plugin load road2`. To load it every time, press F2, open the Plugins tab,
    find Road2 in the plugin manager and tick it. Road2's settings are under F2, Plugins, Road2.
 
-### One-time setup: the arena files
+### The arena files (automatic)
 
 The smallest fix, the engine line, predicted ball paths and the Combine run on
-[RocketSim](https://github.com/ZealanL/RocketSim), which needs the arena's collision shapes. They can't be shipped
-with the plugin, so you make them once (about two minutes):
+[RocketSim](https://github.com/ZealanL/RocketSim), which needs the standard arena's collision shape. Road2 reads it
+from your own Rocket League install the first time it loads (about a quarter of a second) and saves it as 16 small
+files in `data\Road2\collision_meshes\soccar`. Nothing of the game's is shipped with Road2, and there is nothing to
+download or run. The Simulator tile in the settings (F2, Plugins, Road2) should say Ready.
 
-1. Download `RLArenaCollisionDumper.exe` with
-   [this link](https://github.com/ZealanL/RLArenaCollisionDumper/releases/download/v1.0.0/RLArenaCollisionDumper.exe)
-   (the setup card has a button that copies it). It's the program itself; the green "Code" button on its GitHub page
-   downloads the source code, which won't run. Windows may say it's an unrecognised app: More info, then Run anyway.
-2. Put it in `%APPDATA%\bakkesmod\bakkesmod\data\Road2`.
-3. Start Rocket League and go into free play on a standard arena (DFH Stadium works). While you're in free play, run
-   the exe. It makes a `collision_meshes` folder next to itself.
-4. In the settings (F2, Plugins, Road2), click "Load arena files" on the setup card. The Simulator tile should say Ready.
+If it can't (a card in the settings says why, with a Try again button), the older way still works: put
+[RLArenaCollisionDumper.exe](https://github.com/ZealanL/RLArenaCollisionDumper/releases/download/v1.0.0/RLArenaCollisionDumper.exe)
+in `%APPDATA%\bakkesmod\bakkesmod\data\Road2`, run it while you're in free play on a standard arena, then click
+Try again.
 
 Recording, grading, reviewing and Learn work without this step.
 

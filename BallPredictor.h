@@ -23,7 +23,8 @@ public:
 	~BallPredictor();
 
 	// Loads the arena collision files in the background. Safe to call more than once.
-	void StartInit(const std::filesystem::path& meshesFolder);
+	// gameCookedFolder: Rocket League's TAGame/CookedPCConsole, where the arena is read from when there are no files yet
+	void StartInit(const std::filesystem::path& meshesFolder, const std::filesystem::path& gameCookedFolder = {});
 
 	bool Ready() const { return ready; }
 	std::string Status() const;

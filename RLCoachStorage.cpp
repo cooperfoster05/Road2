@@ -94,6 +94,18 @@ namespace
 	}
 }
 
+// Rocket League's own files, found from where the game is running (the same on Steam and Epic):
+// ...\rocketleague\Binaries\Win64\RocketLeague.exe -> ...\rocketleague\TAGame\CookedPCConsole
+std::filesystem::path RLCoach::GameCookedFolder()
+{
+#ifdef _WIN32
+	wchar_t exe[1024] = {};
+	const DWORD n = GetModuleFileNameW(nullptr, exe, 1023);
+	if (n > 0 && n < 1023) return std::filesystem::path(exe).parent_path().parent_path().parent_path() / "TAGame" / "CookedPCConsole";
+#endif
+	return {};
+}
+
 void RLCoach::SetStorageMsg(const std::string& msg)
 {
 	std::lock_guard<std::mutex> lock(storageMsgMutex);

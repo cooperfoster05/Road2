@@ -204,7 +204,8 @@ void RLCoach::LoadUiFonts()
 
 void RLCoach::StartPredictor()
 {
-	if (writer) predictor.StartInit(writer->Folder() / "collision_meshes");
+	if (!writer) return;
+	predictor.StartInit(writer->Folder() / "collision_meshes", GameCookedFolder());
 }
 
 void RLCoach::SetDevCommands(bool on)
@@ -974,34 +975,32 @@ void RLCoach::RenderSettings()
 		ImGui::Dummy(ImVec2(0, 4.0f * S));
 		{
 			CapsFont f(uiFonts[UiFonts::Head]);
-			ImGui::TextColored(kOrange, "ONE-TIME SETUP: THE ARENA FILES");
+			ImGui::TextColored(kOrange, simMissing ? "THE ARENA FILES" : "GETTING THE ARENA READY");
 		}
 		ImGui::PushTextWrapPos(a.x + w - 16.0f * S - ImGui::GetWindowPos().x);
-		ImGui::TextColored(kSub, "The smallest fix, the best line, ball prediction and the Combine run in a physics sim that needs the arena's shapes. Two minutes, once:");
-		const char* steps[4] = {
-			"Download RLArenaCollisionDumper.exe: the button below copies the link (the .exe itself, not the green Code button's zip).",
-			"Put it in the data folder (the button below opens it).",
-			"Go into free play on a standard arena (DFH Stadium), and while you're in, run the exe.",
-			"Come back here and click Load arena files.",
-		};
-		for (int i = 0; i < 4; i++)
+		// (Nov 11) Road2 reads the arena's shape from your own Rocket League files by itself, so this card only stays
+		// up if that didn't work. The old way (the separate dumper program) still works as a fallback.
+		if (simMissing)
 		{
-			{
-				CapsFont f;
-				ImGui::TextColored(kOrange, "%d", i + 1);
-			}
-			ImGui::SameLine(0, 10.0f * S);
-			ImGui::TextWrapped("%s", steps[i]);
+			ImGui::TextColored(kSub, "The smallest fix, the best line, ball prediction and the Combine run in a physics sim that needs the arena's shape. "
+				"Road2 reads it from your own Rocket League files, and this time that didn't work:");
+			ImGui::TextColored(kWarn, "%s", predictor.Status().c_str());
+			ImGui::TextColored(kSub, "Try again below. If it keeps failing after a game update, the older way still works: put RLArenaCollisionDumper.exe "
+				"in the data folder, run it while you're in free play on a standard arena, then try again.");
 		}
+		else
+			ImGui::TextColored(kSub, "Road2 is reading the arena's shape from your Rocket League files. This takes a moment, once.");
 		ImGui::PopTextWrapPos();
 		ImGui::Spacing();
-		if (AccentButton("Load arena files")) gameWrapper->Execute([this](GameWrapper*) { StartPredictor(); });
-		ImGui::SameLine();
-		if (QuietButton("Open the data folder")) OpenDataFolder();
-		ImGui::SameLine();
-		// (Nov 6, Coop's clean-install test) the GitHub page's big green button downloads the source, not the program
-		if (QuietButton("Copy the download link")) ImGui::SetClipboardText("https://github.com/ZealanL/RLArenaCollisionDumper/releases/download/v1.0.0/RLArenaCollisionDumper.exe");
-		if (!simMissing) { ImGui::SameLine(); ImGui::TextColored(kMuted, "%s", predictor.Status().c_str()); }   // loading, or why it failed
+		if (simMissing)
+		{
+			if (AccentButton("Try again")) gameWrapper->Execute([this](GameWrapper*) { StartPredictor(); });
+			ImGui::SameLine();
+			if (QuietButton("Open the data folder")) OpenDataFolder();
+			ImGui::SameLine();
+			if (QuietButton("Copy the dumper's link")) ImGui::SetClipboardText("https://github.com/ZealanL/RLArenaCollisionDumper/releases/download/v1.0.0/RLArenaCollisionDumper.exe");
+		}
+		if (!simMissing) ImGui::TextColored(kMuted, "%s", predictor.Status().c_str());   // loading, or why loading failed
 		ImGui::Dummy(ImVec2(0, 6.0f * S));
 		ImGui::Unindent(16.0f * S);
 		const ImVec2 b(a.x + w, ImGui::GetCursorScreenPos().y);
@@ -1050,7 +1049,7 @@ void RLCoach::RenderSettings()
 			bool lp = *livePrediction;
 			if (Checkbox("Show the predicted ball path while you play", &lp)) setCvar("road2_live_prediction", lp ? 1.0f : 0.0f);
 		}
-		else if (QuietButton("Load arena files")) gameWrapper->Execute([this](GameWrapper*) { StartPredictor(); });
+		else if (QuietButton("Read the arena files again")) gameWrapper->Execute([this](GameWrapper*) { StartPredictor(); });
 		if (simReady && *devTools)
 		{
 			if (QuietButton("Run accuracy test on saved reps")) predictor.StartAccuracyTest(writer->Folder());

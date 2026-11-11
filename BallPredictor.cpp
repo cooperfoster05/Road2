@@ -1,5 +1,6 @@
 // No pch on purpose: this file only sees RocketSim, never the BakkesMod SDK.
 #include "BallPredictor.h"
+#include "ArenaFiles.h"
 #include "RepLibrary.h"
 
 #include "third_party/RocketSim/src/RocketSim.h"
@@ -59,21 +60,28 @@ std::string BallPredictor::Status() const
 	return status;
 }
 
-void BallPredictor::StartInit(const std::filesystem::path& meshesFolder)
+void BallPredictor::StartInit(const std::filesystem::path& meshesFolder, const std::filesystem::path& gameCookedFolder)
 {
 	if (started.exchange(true)) return;
+	if (initThread.joinable()) initThread.join();   // an earlier try that ended without the files
 
-	if (!HasMeshFiles(meshesFolder))
-	{
-		SetStatus("No arena files yet: run RLArenaCollisionDumper (see Road2's settings: F2, Plugins, Road2)");
-		started = false; // allow another try after the files are added
-		return;
-	}
-
-	SetStatus("Loading arena files...");
-	initThread = std::thread([this, meshesFolder]() {
+	SetStatus(HasMeshFiles(meshesFolder) ? "Loading arena files..." : "Reading the arena from your game files...");
+	initThread = std::thread([this, meshesFolder, gameCookedFolder]() {
 		try
 		{
+			// (Nov 11) no arena files yet: read them out of the player's own Rocket League install (ArenaFiles.h).
+			// This replaced the separate dumper program; a quarter of a second, once.
+			if (!HasMeshFiles(meshesFolder))
+			{
+				std::string msg;
+				if (!ArenaFiles::FromGameFiles(gameCookedFolder, meshesFolder, msg))
+				{
+					SetStatus("No arena files: " + msg);
+					started = false;   // allow another try
+					return;
+				}
+				SetStatus("Loading arena files...");
+			}
 			RocketSim::Init(meshesFolder, true);
 			RocketSim::Arena* a = RocketSim::Arena::Create(RocketSim::GameMode::SOCCAR);
 			{

@@ -62,8 +62,8 @@ Road2 v${short}: install
    Check: ...\bakkesmod\bakkesmod\plugins\Road2.dll and ...\bakkesmod\bakkesmod\data\Road2\lessons both exist.
 4. Start Rocket League, press F6 and type:   plugin load road2
    To load it every time: F2, Plugins, Plugin Manager, tick Road2.
-5. Bind road2_viewer to a key (F2, Bindings) and press it. The welcome card walks you through the rest,
-   including the arena files (a one-time setup for the smallest fix, the best line and the Combine).
+5. Bind road2_viewer to a key (F2, Bindings) and press it. The welcome card walks you through the rest.
+   (Road2 reads the arena's shape from your own Rocket League files by itself: nothing else to download.)
 
 Feedback: what confused you, anything that graded strangely (star the rep, Export starred reps, send the file from
 the exports folder), screenshots, and if it crashed: %APPDATA%\bakkesmod\bakkesmod\bakkesmod.log
