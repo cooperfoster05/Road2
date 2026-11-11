@@ -9,6 +9,7 @@
 namespace HudDraw
 {
 	struct Rgba { unsigned char r, g, b, a; };
+	inline bool gColorBlind = false;   // road2_colorblind: the in-game panel and Combine text use the colour-blind set
 
 	inline void SetColor(CanvasWrapper& c, Rgba col) { c.SetColor(col.r, col.g, col.b, col.a); }
 

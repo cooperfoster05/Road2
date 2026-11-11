@@ -485,6 +485,10 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	std::shared_ptr<bool> showTiming;         // road2_show_timing
 	std::shared_ptr<bool> welcomeDone = std::make_shared<bool>(false);   // road2_welcome_done: the first-run card was dismissed
 	void RenderWelcome();   // the first-run card at the top of the rep viewer
+	std::shared_ptr<bool> colorBlind = std::make_shared<bool>(false);   // road2_colorblind
+	// The grading check (Nov 10, a developer command): road2_grade_check save writes every benchmark rep's grades to
+	// grade_check.csv; road2_grade_check grades them again and lists what changed. Run before a release.
+	void GradeCheck(bool save);
 	std::shared_ptr<bool> devTools = std::make_shared<bool>(false);   // road2_dev_tools: the test buttons and timing (Nov 3: hidden for testers)
 	PerfStat perfTick, perfInput, perfDraw;   // game thread only
 

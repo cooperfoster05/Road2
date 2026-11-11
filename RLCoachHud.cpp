@@ -54,6 +54,11 @@ namespace
 	// The grade color (as in the rep viewer: 5 cyan, 4 green, 3 amber, 2 orange, 1 red)
 	Rgba GradeRgba(int o)
 	{
+		if (HudDraw::gColorBlind)
+		{
+			static const Rgba kSet[6] = { { 133, 146, 171, 255 }, { 204, 121, 167, 255 }, { 230, 159, 0, 255 }, { 240, 228, 66, 255 }, { 0, 158, 115, 255 }, { 86, 180, 233, 255 } };
+			return kSet[std::clamp(o, 0, 5)];
+		}
 		if (o >= 5) return { 45, 226, 230, 255 };
 		if (o == 4) return { 61, 220, 132, 255 };
 		if (o == 3) return { 255, 176, 32, 255 };
@@ -465,7 +470,7 @@ void RLCoach::DrawPanel(CanvasWrapper& canvas, CarWrapper& car, const PadInput& 
 			for (int k = 0; k < n; k++)
 			{
 				const int v = k + 1;
-				const Rgba gc = rec ? (v == 1 ? Rgba{ 255, 90, 90, 255 } : v == 2 ? Rgba{ 255, 176, 32, 255 } : Rgba{ 61, 220, 132, 255 }) : GradeRgba(v);
+				const Rgba gc = rec ? GradeRgba(v == 1 ? 1 : v == 2 ? 3 : 4) : GradeRgba(v);
 				const bool on = l.picked == v;
 				const float bx = kx + k * (cw + gap);
 				SlantFill(canvas, bx, cyy, cw, ch, on ? gc : kTrack);
@@ -570,6 +575,10 @@ void RLCoach::RenderLookSettings()
 		gameWrapper->Execute([this, name, value](GameWrapper*) { cvarManager->getCvar(name).setValue(value); });
 	};
 
+	{
+		bool cb = *colorBlind;
+		if (UiStyle::Checkbox("Colour-blind friendly colours (grades without red against green)", &cb)) setCvar("road2_colorblind", cb ? 1.0f : 0.0f);
+	}
 	// Panel
 	UiStyle::Heading("The panel");
 	bool compact = *hudCompact;

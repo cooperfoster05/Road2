@@ -127,7 +127,9 @@ namespace
 	void HudBig(CanvasWrapper& c, const Vector2& sz, const std::string& text, int points)
 	{
 		// The countdown number, or how the item went: the first part in its grade colour, the details after it
-		const HudDraw::Rgba fill = points < 0 ? kNavyA : points == 0 ? kBadA : points >= 3 ? kGoodA : kWarnA;
+		const bool cb = HudDraw::gColorBlind;
+		const HudDraw::Rgba fill = points < 0 ? kNavyA : points == 0 ? (cb ? HudDraw::Rgba{ 204, 121, 167, 255 } : kBadA)
+			: points >= 3 ? (cb ? HudDraw::Rgba{ 86, 180, 233, 255 } : kGoodA) : (cb ? HudDraw::Rgba{ 240, 228, 66, 255 } : kWarnA);
 		const HudDraw::Rgba ink = points < 0 ? kWhiteA : HudDraw::Rgba{ 11, 15, 26, 255 };
 		std::vector<std::string> parts = Parts(Upper(text));
 		if (parts.size() == 1) { SlantText(c, sz.X * 0.5f, sz.Y * 0.125f, parts[0], 3.0f, fill, ink, 22.0f); return; }

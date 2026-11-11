@@ -2,6 +2,7 @@
 #include "RLCoach.h"
 #include "Ratings.h"
 #include "UiStyle.h"
+#include "HudDraw.h"
 #include "UiFonts.h"
 #include "bakkesmod/wrappers/includes.h"
 #include "bakkesmod/wrappers/GuiManagerWrapper.h"
@@ -86,6 +87,14 @@ void RLCoach::onLoad()
 		.bindTo(showTiming);
 	cvarManager->registerCvar("road2_welcome_done", "0", "The first-run welcome card was dismissed", true, true, 0, true, 1)
 		.bindTo(welcomeDone);
+	cvarManager->registerCvar("road2_colorblind", "0", "Colour-blind friendly colours for grades and results", true, true, 0, true, 1)
+		.bindTo(colorBlind);
+	cvarManager->getCvar("road2_colorblind").addOnValueChanged([](std::string, CVarWrapper cv) {
+		UiStyle::SetColorBlind(cv.getBoolValue());
+		HudDraw::gColorBlind = cv.getBoolValue();
+	});
+	UiStyle::SetColorBlind(*colorBlind);
+	HudDraw::gColorBlind = *colorBlind;
 	cvarManager->registerCvar("road2_dev_tools", "0", "Show the developer tools in the settings (tests, timing)", true, true, 0, true, 1)
 		.bindTo(devTools);
 
@@ -203,9 +212,12 @@ void RLCoach::SetDevCommands(bool on)
 			TestSetState();
 		}, "Test: move the car and ball to a fixed spot", PERMISSION_ALL);
 		RegisterBotTest();
+		cvarManager->registerNotifier("road2_grade_check", [this](std::vector<std::string> args) {
+			GradeCheck(args.size() >= 2 && args[1] == "save");
+		}, "Grading check: 'road2_grade_check save' records the benchmark reps' grades; 'road2_grade_check' compares", PERMISSION_ALL);
 	}
 	else
-		for (const char* n : { "road2_test_setstate", "road2_bot_spawn", "road2_bot_mode", "road2_bot_remove", "road2_bot_capture" })
+		for (const char* n : { "road2_grade_check", "road2_test_setstate", "road2_bot_spawn", "road2_bot_mode", "road2_bot_remove", "road2_bot_capture" })
 			cvarManager->removeNotifier(n);
 }
 

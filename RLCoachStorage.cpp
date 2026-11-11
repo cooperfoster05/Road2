@@ -9,6 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <cwctype>
 
@@ -544,4 +545,72 @@ void RLCoach::RetireOldPlugin(const std::filesystem::path& base)
 			if (changed) { std::ofstream f(cfgFile, std::ios::binary); f << out.str(); }
 		}, 1.0f);
 	}, 1.0f);
+}
+
+// ============================================================
+// The grading check (Nov 10): the same reps, graded again, must come out the same unless the change was meant.
+// The reps are the benchmark ones in protected_reps.txt (never cleaned up); without that file, your 200 newest
+// recordings. Graded with no shot reference, so your newer goals can't move the result.
+// ============================================================
+void RLCoach::GradeCheck(bool save)
+{
+	if (!writer) return;
+	const std::filesystem::path root = writer->Folder();
+	std::vector<std::string> files;
+	{
+		std::ifstream in(root / "protected_reps.txt");
+		std::string line;
+		while (std::getline(in, line))
+		{
+			if (!line.empty() && line.back() == '\r') line.pop_back();
+			if (!line.empty()) files.push_back(line);
+		}
+	}
+	const std::vector<RepListItem> all = RepLibrary::ListReps(root);
+	std::unordered_map<std::string, const RepListItem*> byFile;
+	for (const RepListItem& it : all) byFile[it.file] = &it;
+	if (files.empty())
+		for (auto it = all.rbegin(); it != all.rend() && files.size() < 200; ++it) if (it->hasRecording) files.push_back(it->file);
+	auto gradeOf = [&](const std::string& file, std::string& out) {
+		auto f = byFile.find(file);
+		if (f == byFile.end()) return false;
+		std::vector<Frame> fr;
+		std::string err;
+		if (!RepLibrary::LoadRep(root, file, fr, err) || fr.size() < 4) return false;
+		const ShotAnalysis shot = ShotGeometry::Analyze(fr);
+		const RepSegments segs = Segmenter::Split(fr, f->second->eventTick >= 0 ? f->second->eventTick : static_cast<int>(fr.size()) - 1);
+		const RepGrade g = Grader::GradeRep(fr, segs, shot, f->second->goal, f->second->floorBeforeGoal, ShotReference{});
+		out = std::to_string(g.overall) + "," + ShotGeometry::TypeName(shot.type);
+		for (const SegmentGrade& sg : g.segs) out += std::string("|") + Grader::Name(sg.grade);
+		return true;
+	};
+	if (save)
+	{
+		std::ofstream out(root / "grade_check.csv", std::ios::trunc);
+		int n = 0;
+		for (const std::string& file : files)
+		{
+			std::string g;
+			if (gradeOf(file, g)) { out << file << "," << g << "\n"; n++; }
+		}
+		LOG("Road2 grade check: saved the grades of {} reps (grader v{}) to grade_check.csv", n, Grader::kVersion);
+		return;
+	}
+	std::ifstream in(root / "grade_check.csv");
+	if (!in) { LOG("Road2 grade check: nothing saved yet. Run: road2_grade_check save"); return; }
+	std::string line;
+	int same = 0, changed = 0, missing = 0;
+	while (std::getline(in, line))
+	{
+		if (!line.empty() && line.back() == '\r') line.pop_back();
+		const size_t c = line.find(',');
+		if (c == std::string::npos) continue;
+		const std::string file = line.substr(0, c), was = line.substr(c + 1);
+		std::string now;
+		if (!gradeOf(file, now)) { missing++; continue; }
+		if (now == was) { same++; continue; }
+		if (++changed <= 25) LOG("Road2 grade check: {} was {} now {}", file, was, now);
+	}
+	LOG("Road2 grade check (grader v{}): {} the same, {} changed, {} not found{}", Grader::kVersion, same, changed, missing,
+		changed > 25 ? " (the first 25 are listed above)" : changed == 0 ? ". Nothing moved." : "");
 }

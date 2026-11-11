@@ -994,6 +994,28 @@ void RLCoach::DrawWhatIfPath(CanvasWrapper& canvas)
 	if (!Shows(r) || lineFile[slot] != viewerRep.file) return;
 	draw(r.frames, r.startTick, 56, 189, 248, 200, false);
 	draw(r.frames, r.startTick, 125, 211, 252, 120, true);
+	// (Nov 10) The line's car as a ghost: a wire hitbox where the line has the car at this moment of your rep, so
+	// you see the two side by side as it plays (and a faint ball where the line has the ball). From where the line
+	// takes over; nothing before that (it's your own rep until then).
+	const int tick = static_cast<int>(viewerPlayhead);
+	if (tick >= r.startTick && tick < static_cast<int>(r.frames.size()))
+	{
+		CarWrapper car = gameWrapper->GetLocalCar();
+		if (!car.IsNull())
+		{
+			Vector half = car.GetLocalCollisionExtent();
+			const Vector off = car.GetLocalCollisionOffset();
+			if (half.X > 90.0f) half = half * 0.5f;   // some builds report the full size
+			if (half.X >= 20.0f && half.Z >= 5.0f)
+			{
+				const Frame& g = r.frames[tick];
+				const Overlay3D::Basis b = Overlay3D::FromRotator(g.carPitch, g.carYaw, g.carRoll);
+				const Vector center = Vector(g.carX, g.carY, g.carZ) + b.f * off.X + b.r * off.Y + b.u * off.Z;
+				Overlay3D::HitboxWire(canvas, camLoc, camFwd, center, b, half, 56, 189, 248, 0.85f);
+				Overlay3D::BallGhost(canvas, camLoc, camFwd, Vector(g.ballX, g.ballY, g.ballZ), 125, 211, 252, 60);
+			}
+		}
+	}
 }
 
 // ============================================================

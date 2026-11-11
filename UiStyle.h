@@ -54,10 +54,10 @@ namespace UiStyle
 	inline const ImVec4 kMuted = Hex(0x8592AB);       // labels
 	inline const ImVec4 kRoot = Hex(0xFF8A1F);        // the root cause marker
 
-	inline const ImVec4 kGood = Hex(0x3DDC84);
+	inline ImVec4 kGood = Hex(0x3DDC84);          // these three change with the colour-blind setting (SetColorBlind)
 	inline const ImVec4 kOk = Hex(0x2E8BFF);
-	inline const ImVec4 kWarn = Hex(0xFFB020);
-	inline const ImVec4 kBad = Hex(0xFF5A5A);
+	inline ImVec4 kWarn = Hex(0xFFB020);
+	inline ImVec4 kBad = Hex(0xFF5A5A);
 	inline const ImVec4 kGold = Hex(0xFFB020);
 
 	// The slant: tan(12 degrees). Every slanted shape leans by this much of its height.
@@ -293,8 +293,25 @@ namespace UiStyle
 		return w + sh;
 	}
 
+	// Colour-blind friendly colours (Nov 10, road2_colorblind): the usual grades lean on red against green, which a lot
+	// of people can't tell apart. This set (Okabe and Ito's) is: 5 sky blue, 4 blue-green, 3 yellow, 2 orange, 1 pink.
+	// Good / warning / bad become sky blue / yellow / pink.
+	inline bool gColorBlind = false;
+	inline void SetColorBlind(bool on)
+	{
+		gColorBlind = on;
+		kGood = on ? Hex(0x56B4E9) : Hex(0x3DDC84);
+		kWarn = on ? Hex(0xF0E442) : Hex(0xFFB020);
+		kBad = on ? Hex(0xCC79A7) : Hex(0xFF5A5A);
+	}
+
 	inline ImVec4 GradeColor(int overall)
 	{
+		if (gColorBlind)
+		{
+			static const unsigned kSet[6] = { 0, 0xCC79A7, 0xE69F00, 0xF0E442, 0x009E73, 0x56B4E9 };
+			return overall >= 1 ? Hex(kSet[overall > 5 ? 5 : overall]) : kMuted;
+		}
 		if (overall >= 5) return Hex(0x2DE2E6);
 		if (overall == 4) return kGood;
 		if (overall == 3) return kWarn;
@@ -306,9 +323,9 @@ namespace UiStyle
 	inline ImVec4 SegGradeColor(const std::string& g)
 	{
 		if (g == "Clean" || g == "Calculated") return kGood;
-		if (g == "Solid") return Hex(0x5EB8FF);
+		if (g == "Solid") return gColorBlind ? Hex(0x009E73) : Hex(0x5EB8FF);
 		if (g == "Sloppy") return kWarn;
-		return Hex(0xFF8A1F);
+		return gColorBlind ? Hex(0xCC79A7) : Hex(0xFF8A1F);
 	}
 
 	// ---- Drawn pieces for the review screen ----
