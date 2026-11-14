@@ -175,6 +175,7 @@
     </ClCompile>
     <ClCompile Include="RLCoachCombine.cpp" />
     <ClCompile Include="RLCoachMatch.cpp" />
+    <ClCompile Include="RLCoachMatchPractice.cpp" />
     <ClCompile Include="Nexto.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

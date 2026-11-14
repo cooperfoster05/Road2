@@ -374,6 +374,7 @@ void RLCoach::CombineStart(const std::string& event, int level, uint32_t seed)
 	if (combineGenBusy) return;
 	if (combineGenThread.joinable()) combineGenThread.join();
 	PracticeExit();
+	MatchPracticeStop();
 	// "FFN" / "KON" / "SDN": the event against Nexto; "SG" is only ever against it
 	std::string ev0 = event;
 	bool vsNexto = ev0 == "SG";

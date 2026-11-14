@@ -112,6 +112,7 @@ static int ViewerEventTick(const RepListItem& item) { return item.eventTick; }
 
 void RLCoach::ViewerLoad(const RepListItem& item)
 {
+	MatchPracticeStop();
 	if (!writer) return;
 	PracticeExit();   // opening a rep ends any practice set
 	CancelWhatIf();   // and forgets the last rep's searches

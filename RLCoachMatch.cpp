@@ -141,6 +141,7 @@ void RLCoach::MatchScanStop(bool save)
 // each new replay frame.
 void RLCoach::MatchSample()
 {
+	MatchPracticeTripTick();   // practise from here: starts once free play has loaded
 	const bool in = gameWrapper->IsInReplay();
 	if (in != matchInReplay)
 	{
@@ -263,6 +264,36 @@ void RLCoach::MatchOnTouch(CarWrapper& car)
 }
 
 // Reads a scan and works out the breakdown, off the game and render threads (a few hundredths of a second)
+// The practice list, one file beside each scan: matches\<scan>.list, a line per moment (frame index, player, label)
+void RLCoach::MatchListLoad(const std::string& scanFile)
+{
+	uiMatchListFor = scanFile;
+	uiMatchList.clear();
+	if (!writer || scanFile.empty()) return;
+	std::ifstream in(writer->Folder() / "matches" / (std::filesystem::path(scanFile).stem().string() + ".list"));
+	std::string line;
+	while (std::getline(in, line))
+	{
+		const size_t a = line.find(','), b = a == std::string::npos ? a : line.find(',', a + 1);
+		if (b == std::string::npos) continue;
+		MpItem it;
+		try { it.frameIndex = std::stoi(line.substr(0, a)); it.player = std::stoi(line.substr(a + 1, b - a - 1)); }
+		catch (...) { continue; }
+		it.label = line.substr(b + 1);
+		if (!it.label.empty() && it.label.back() == '\r') it.label.pop_back();
+		uiMatchList.push_back(std::move(it));
+	}
+}
+void RLCoach::MatchListSave()
+{
+	if (!writer || uiMatchListFor.empty()) return;
+	const std::filesystem::path f = writer->Folder() / "matches" / (std::filesystem::path(uiMatchListFor).stem().string() + ".list");
+	std::error_code ec;
+	if (uiMatchList.empty()) { std::filesystem::remove(f, ec); return; }
+	std::ofstream out(f, std::ios::trunc);
+	for (const MpItem& it : uiMatchList) out << it.frameIndex << ',' << it.player << ',' << it.label << '\n';
+}
+
 void RLCoach::MatchLoad(const std::string& file)
 {
 	if (!writer || matchLoadBusy.exchange(true)) return;
@@ -645,6 +676,199 @@ void RLCoach::RenderMatchReview(const MatchAnalysis& a, const std::shared_ptr<co
 		{
 			FontPush f(fLabel);
 			ImGui::TextColored(kMuted, uiMatchZoom > 1.01f ? "DRAG TO MOVE   /   SCROLL TO ZOOM   /   DOUBLE-CLICK FOR THE WHOLE MATCH" : "SCROLL ON THE TIMELINE TO ZOOM IN");
+		}
+	}
+
+	// ---- Practise from here (Nov 13): what's running, and the button for the picked moment ----
+	{
+		UiMp mp;
+		{
+			std::lock_guard<std::mutex> lock(uiMatchMutex);
+			mp = uiMp;
+		}
+		if (mp.active || !mp.status.empty())
+		{
+			dl->ChannelsSplit(2);
+			dl->ChannelsSetCurrent(1);
+			const ImVec2 p0 = ImGui::GetCursorScreenPos();
+			const float pad = 12.0f * S;
+			ImGui::SetCursorScreenPos(ImVec2(p0.x + pad, p0.y + pad));
+			ImGui::BeginGroup();
+			ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + W - 2.0f * pad);
+			if (mp.active)
+			{
+				{
+					FontPush f(fHead);
+					ImGui::TextColored(kText, "%s", Upper("Practising: " + mp.label).c_str());
+				}
+				if (!mp.status.empty()) ImGui::TextColored(kSub, "%s", mp.status.c_str());
+				if (!mp.result.empty())
+				{
+					const ImVec4 rc = mp.good > 0 ? kGood : mp.good < 0 ? kBad : kWarn;
+					ImGui::TextColored(rc, "Try %d: %s%s", mp.tries, mp.result.c_str(), mp.good > 0 ? " (better than the game)" : mp.good < 0 ? " (worse than the game)" : " (about the same as the game)");
+					ImGui::TextColored(kMuted, "%s", mp.real.c_str());
+				}
+				ImGui::Dummy(ImVec2(0, 2.0f * S));
+				if (mp.canReturn)
+				{
+					if (AccentButton("Back to the replay", ImVec2(180.0f * S, 30.0f * S))) onGame([this]() { MatchPracticeBack(); });
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stops practising and opens the replay again, where you left it");
+					ImGui::SameLine();
+				}
+				if (OutlineButton("Stop practising", ImVec2(160.0f * S, 30.0f * S), kBad)) onGame([this]() { MatchPracticeStop(); });
+			}
+			else
+			{
+				if (mp.loading)
+				{
+					FontPush f(fHead);
+					ImGui::TextColored(kText, "GOING TO FREE PLAY");
+				}
+				ImGui::TextColored(mp.loading ? kSub : kWarn, "%s", mp.status.c_str());
+				if (mp.canReturn && !mp.loading && uiMatchNowFrame.load() < 0)
+				{
+					if (OutlineButton("Back to the replay", ImVec2(180.0f * S, 30.0f * S))) onGame([this]() { MatchPracticeBack(); });
+				}
+			}
+			ImGui::PopTextWrapPos();
+			ImGui::EndGroup();
+			const ImVec2 p1(p0.x + W, ImGui::GetItemRectMax().y + pad);
+			dl->ChannelsSetCurrent(0);
+			dl->AddRectFilled(p0, p1, U32(kPanel), 6.0f * S);
+			dl->AddRectFilled(p0, ImVec2(p0.x + 3.0f * S, p1.y), U32(kOrange));
+			dl->ChannelsMerge();
+			ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y));
+			ImGui::Dummy(ImVec2(W, 6.0f * S));
+		}
+		// watching this match's replay: practise the moment it's on right now (or put it on the list)
+		const int nowFrame = uiMatchNowFrame.load();
+		if (sameReplayOpen && nowFrame >= 0 && uiMatchMe >= 0 && uiMatchMe < P && data && !data->frames.empty())
+		{
+			int idx = static_cast<int>(std::lower_bound(data->frames.begin(), data->frames.end(), nowFrame, [](const MatchFrame& f, int fr) { return f.frame < fr; }) - data->frames.begin());
+			idx = std::clamp(idx, 0, static_cast<int>(data->frames.size()) - 1);
+			const int clock = data->frames[idx].clock;
+			const std::string label = std::format("Practise from here  {}:{:02d}", clock / 60, clock % 60);
+			const float bw = ImGui::CalcTextSize(label.c_str()).x + 30.0f * S, aw = ImGui::CalcTextSize("+ Add to list").x + 26.0f * S;
+			const ImVec2 p0 = ImGui::GetCursorScreenPos();
+			ImGui::PushStyleColor(ImGuiCol_Text, kSub);
+			ImGui::PushClipRect(p0, ImVec2(p0.x + W - bw - aw - 20.0f * S, p0.y + 40.0f * S), true);
+			ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + 8.0f * S));
+			ImGui::TextUnformatted(std::format("Where the replay is now, as {}", a.players[uiMatchMe].name).c_str());
+			ImGui::PopClipRect();
+			ImGui::PopStyleColor();
+			ImGui::SetCursorScreenPos(ImVec2(p0.x + W - bw - aw - 10.0f * S, p0.y));
+			if (OutlineButton("+ Add to list", ImVec2(aw, 32.0f * S)))
+			{
+				uiMatchList.push_back(MpItem{ idx, uiMatchMe, std::format("{}:{:02d}", clock / 60, clock % 60) });
+				MatchListSave();
+			}
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Saves this moment to the match's practice list, to play them all back to back later\n(bind road2_practise_add to a key to do it without opening this page)");
+			ImGui::SameLine(0, 10.0f * S);
+			if (AccentButton(label.c_str(), ImVec2(bw, 32.0f * S)))
+			{
+				const MpItem it{ idx, uiMatchMe, std::format("{}:{:02d}", clock / 60, clock % 60) };
+				onGame([this, it]() { MatchPracticeGo({ it }, false); });
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Loads free play and puts everyone where they were 1.5 s before here, you as %s.\nThe others drive what really happened, then Nexto takes over.\nBack to the replay brings you back to this spot.\n(bind road2_practise_here to a key to do it from the replay)", a.players[uiMatchMe].name.c_str());
+			ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + 32.0f * S));
+			ImGui::Dummy(ImVec2(W, 6.0f * S));
+		}
+		// a moment picked on the timeline or in the list: practise it as the selected player
+		if (uiMatchSel >= 0 && uiMatchSel < static_cast<int>(a.moments.size()) && uiMatchMe >= 0 && uiMatchMe < P && data)
+		{
+			const Moment& m = a.moments[uiMatchSel];
+			const std::string what = std::format("{}:{:02d}  {}", m.clock / 60, m.clock % 60, m.text);
+			const std::string label = std::format("Practise from here as {}", a.players[uiMatchMe].name);
+			const float bw = ImGui::CalcTextSize(label.c_str()).x + 30.0f * S, aw = ImGui::CalcTextSize("+ List").x + 26.0f * S;
+			const ImVec2 p0 = ImGui::GetCursorScreenPos();
+			ImGui::PushStyleColor(ImGuiCol_Text, kSub);
+			ImGui::PushClipRect(p0, ImVec2(p0.x + W - bw - aw - 20.0f * S, p0.y + 40.0f * S), true);
+			ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + 8.0f * S));
+			ImGui::TextUnformatted(what.c_str());
+			ImGui::PopClipRect();
+			ImGui::PopStyleColor();
+			ImGui::SetCursorScreenPos(ImVec2(p0.x + W - bw - aw - 10.0f * S, p0.y));
+			if (OutlineButton("+ List", ImVec2(aw, 32.0f * S)))
+			{
+				uiMatchList.push_back(MpItem{ m.index, uiMatchMe, std::format("{}:{:02d} {}", m.clock / 60, m.clock % 60, m.text) });
+				MatchListSave();
+			}
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adds this moment to the match's practice list");
+			ImGui::SameLine(0, 10.0f * S);
+			if (AccentButton(label.c_str(), ImVec2(bw, 32.0f * S)))
+			{
+				const MpItem it{ m.index, uiMatchMe, std::format("{}:{:02d} {}", m.clock / 60, m.clock % 60, m.text) };
+				onGame([this, it]() { MatchPracticeGo({ it }, false); });
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("In free play (Road2 loads it): the ball and every car where they were 1.5 s before this, you as %s.\nThe others drive what really happened up to the moment, then Nexto takes over.", a.players[uiMatchMe].name.c_str());
+			ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + 32.0f * S));
+			ImGui::Dummy(ImVec2(W, 6.0f * S));
+		}
+		// the practice list: moments saved while watching, played back to back like the Combine (one counted try each)
+		if (!uiMatchList.empty())
+		{
+			const bool running = mp.listPos >= 0;
+			Heading(std::format("PRACTICE LIST  ·  {}", uiMatchList.size()).c_str());
+			const float rowH = 26.0f * S;
+			int remove = -1;
+			for (int i = 0; i < static_cast<int>(uiMatchList.size()); i++)
+			{
+				const MpItem& it = uiMatchList[i];
+				ImGui::PushID(i);
+				const ImVec2 p = ImGui::GetCursorScreenPos();
+				const bool now = running && mp.listPos == i;
+				if (now) dl->AddRectFilled(p, ImVec2(p.x + W, p.y + rowH), U32(kPanel), 4.0f * S);
+				const float ty = p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f;
+				dl->AddText(ImVec2(p.x + 8.0f * S, ty), U32(now ? kOrange : kMuted), std::format("{}", i + 1).c_str());
+				const std::string who = it.player >= 0 && it.player < P ? a.players[it.player].name : std::string("?");
+				// the result of its counted try, when the list has been played
+				const int g = running && i < static_cast<int>(mp.listGood.size()) ? mp.listGood[i] : -2;
+				const char* chip = g == 1 ? "BETTER" : g == 0 ? "SAME" : g == -1 ? "WORSE" : "";
+				const ImVec4 cc = g == 1 ? kGood : g == 0 ? kWarn : kBad;
+				const float chipW = *chip ? ImGui::CalcTextSize(chip).x + 12.0f * S : 0.0f;
+				const float xEnd = p.x + W - 30.0f * S - chipW;
+				dl->PushClipRect(ImVec2(p.x + 30.0f * S, p.y), ImVec2(xEnd - 6.0f * S, p.y + rowH), true);
+				dl->AddText(ImVec2(p.x + 30.0f * S, ty), U32(kText), it.label.c_str());
+				dl->AddText(ImVec2(p.x + 34.0f * S + ImGui::CalcTextSize(it.label.c_str()).x, ty), U32(kSub), ("  as " + who).c_str());
+				dl->PopClipRect();
+				if (*chip)
+				{
+					dl->AddRect(ImVec2(xEnd, p.y + 4.0f * S), ImVec2(xEnd + chipW, p.y + rowH - 4.0f * S), U32(cc), 3.0f * S);
+					dl->AddText(ImVec2(xEnd + 6.0f * S, ty), U32(cc), chip);
+				}
+				ImGui::InvisibleButton("row", ImVec2(W - 26.0f * S, rowH));
+				if (ImGui::IsItemHovered() && g != -2 && i < static_cast<int>(mp.listResult.size())) ImGui::SetTooltip("%s", mp.listResult[i].c_str());
+				else if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click to practise just this one");
+				if (ImGui::IsItemClicked())
+				{
+					const MpItem one = it;
+					onGame([this, one]() { MatchPracticeGo({ one }, false); });
+				}
+				ImGui::SameLine(0, 0);
+				if (!running)
+				{
+					if (LinkButton("x")) remove = i;
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Take it off the list");
+				}
+				else ImGui::Dummy(ImVec2(26.0f * S, rowH));
+				ImGui::PopID();
+			}
+			if (remove >= 0) { uiMatchList.erase(uiMatchList.begin() + remove); MatchListSave(); }
+			ImGui::Dummy(ImVec2(0, 4.0f * S));
+			if (AccentButton(running ? "Play the list again" : "Play the list", ImVec2(170.0f * S, 30.0f * S)))
+			{
+				const std::vector<MpItem> items = uiMatchList;
+				onGame([this, items]() { MatchPracticeGo(items, true); });
+			}
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Free play, every moment on the list in turn.\nYour first finished try at each one counts against what really happened; a reset retries it.");
+			if (!running)
+			{
+				ImGui::SameLine();
+				if (OutlineButton("Clear", ImVec2(90.0f * S, 30.0f * S), kBad)) { uiMatchList.clear(); MatchListSave(); }
+			}
+			ImGui::Dummy(ImVec2(W, 6.0f * S));
 		}
 	}
 
@@ -1178,13 +1402,25 @@ void RLCoach::RenderMatchReview(const MatchAnalysis& a, const std::shared_ptr<co
 							FontPush f(uiFonts[UiFonts::Bold]);
 							dl->AddText(ImVec2(p.x + 80.0f * S, ty), U32(kText), lab.c_str());
 						}
-						const float wx = p.x + 186.0f * S, wEnd = p.x + W - (sameReplayOpen ? 56.0f : 10.0f) * S;
+						const float wx = p.x + 186.0f * S, wEnd = p.x + W - (sameReplayOpen ? 124.0f : 70.0f) * S;
 						dl->PushClipRect(ImVec2(wx, p.y), ImVec2(wEnd, p.y + rowH), true);
 						dl->AddText(ImVec2(wx, ty), U32(kSub), what.c_str());
 						dl->PopClipRect();
 						if (hovRow && ImGui::CalcTextSize(what.c_str()).x > wEnd - wx) ImGui::SetTooltip("%s", what.c_str());
+						// the right end: Practise (free play), and Watch when the replay is open
+						const float prX = p.x + W - (sameReplayOpen ? 118.0f : 64.0f) * S;
+						const bool onPractise = ImGui::GetIO().MousePos.x >= prX - 4.0f * S && ImGui::GetIO().MousePos.x < prX + 58.0f * S;
+						dl->AddText(ImVec2(prX, ty), U32(hovRow && onPractise ? kText : kOrange), "Practise");
 						if (sameReplayOpen) dl->AddText(ImVec2(p.x + W - 50.0f * S, ty), U32(kAccentText), "Watch");
-						if (click) jump(picks[r]);
+						if (hovRow && onPractise) ImGui::SetTooltip("Practise from here as %s, in free play", a.players[me].name.c_str());
+						if (click && onPractise)
+						{
+							const int frameIndex = m.index, who = me;
+							uiMatchSel = picks[r];
+							const MpItem it{ frameIndex, who, std::format("{}:{:02d} {}", m.clock / 60, m.clock % 60, m.text) };
+							onGame([this, it]() { MatchPracticeGo({ it }, false); });
+						}
+						else if (click) jump(picks[r]);
 					}
 					ImGui::SetCursorScreenPos(ImVec2(o.x, o.y + rowH * picks.size() + 4.0f * S));
 					ImGui::Dummy(ImVec2(W, 2.0f * S));
@@ -1591,6 +1827,20 @@ void RLCoach::RenderMatch()
 			uiMatchZoom = 1.0f;
 			uiMatchView0 = review->t0;
 			for (const MatchPlayer& pl : review->players) if (!review->recordedBy.empty() && pl.name == review->recordedBy) uiMatchMe = pl.id;
+		}
+		matchWho = uiMatchMe;   // the hotkeys practise as whoever is picked here
+		if (uiMatchListFor != loadedFile) MatchListLoad(loadedFile);
+		{
+			std::vector<MpItem> added;
+			{
+				std::lock_guard<std::mutex> lock(uiMatchListMutex);
+				added.swap(uiMatchListAdd);
+			}
+			if (!added.empty())
+			{
+				for (MpItem& it : added) uiMatchList.push_back(std::move(it));
+				MatchListSave();
+			}
 		}
 		const bool same = u.inReplay && !openReplay.empty() && openReplay == review->replayName;
 		RenderMatchReview(*review, reviewData, same);

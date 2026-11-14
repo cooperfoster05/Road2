@@ -162,6 +162,9 @@
     <ClCompile Include="RLCoachMatch.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
+    <ClCompile Include="RLCoachMatchPractice.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
     <ClCompile Include="Match.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>

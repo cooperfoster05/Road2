@@ -148,8 +148,25 @@ void RLCoach::onLoad()
 	SetDevCommands(*devTools);
 	cvarManager->registerCvar("road2_match_scan_speed", "1", "Match review: how fast to play a replay while scanning it (1 = normal speed)", true, true, 1, true, 8)
 		.bindTo(matchScanSpeed);
+	cvarManager->registerNotifier("road2_match_practice_stop", [this](std::vector<std::string>) { MatchPracticeStop(); },
+		"Match review: stop practising from here (the bots go)", PERMISSION_ALL);
 	cvarManager->registerCvar("road2_match_seek_mode", "0", "Match review: how a jump moves the replay. 0 = like the replay's own scrub bar, 1 = the replay's skip with a full reload, 2 = the old way (Nov 13)", true, true, 0, true, 2)
 		.bindTo(matchSeekMode);
+	// The round trip (Nov 13): from the replay to free play and back, and a list of moments to play back to back
+	cvarManager->registerNotifier("road2_practise_here", [this](std::vector<std::string>) { MatchPracticeHere(); },
+		"Match review: practise the open replay's moment now, as the player picked on the Road2 page (loads free play)", PERMISSION_ALL);
+	cvarManager->registerNotifier("road2_practise_back", [this](std::vector<std::string>) { MatchPracticeBack(); },
+		"Match review: back to the replay, where you left it", PERMISSION_ALL);
+	cvarManager->registerNotifier("road2_practise_add", [this](std::vector<std::string>) {
+		MpItem it;
+		if (!MatchItemNow(it)) { LOG("Road2: open the scanned replay and pick who you'll play on the Road2 page first"); return; }
+		std::lock_guard<std::mutex> lock(uiMatchListMutex);
+		uiMatchListAdd.push_back(it);
+	}, "Match review: add the open replay's moment now to this match's practice list", PERMISSION_ALL);
+	cvarManager->registerCvar("road2_match_freeplay_load", "0", "Practise from here: how free play is loaded. 0 = the game's map load, 1 = BakkesMod's load_freeplay", true, true, 0, true, 1)
+		.bindTo(matchFreeplayLoad);
+	cvarManager->registerCvar("road2_match_return_mode", "0", "Practise from here: how Back to the replay opens it. 0 = by its id, 1 = by its file, 2 = BakkesMod's replay-from-time", true, true, 0, true, 2)
+		.bindTo(matchReturnMode);
 	cvarManager->registerCvar("road2_combine_momentum_cam", "1", "Recovery (the Combine and the Learn lesson): point the camera the way you're travelling until you land", true, true, 0, true, 1)
 		.bindTo(combineMomentumCam);
 
@@ -165,7 +182,7 @@ void RLCoach::onLoad()
 			// (Nov 11) Road2 only ever replaces an input in free play. Each of these already stops itself a tick after
 			// you leave; this makes it zero ticks, so nothing of Road2's can touch a car's input in a match.
 			if (!gameWrapper->IsInFreeplay()) return;
-			PerfTimer t(perfInput); BotInput(car, params); OverrideViewerInput(car, params); OverrideRideInput(car, params);
+			PerfTimer t(perfInput); BotInput(car, params); MatchPracticeInput(car, params); OverrideViewerInput(car, params); OverrideRideInput(car, params);
 		});
 
 	// Every physics tick, after the car's input for that tick is set
@@ -237,6 +254,7 @@ void RLCoach::onUnload()
 	if (whatIfThread.joinable()) whatIfThread.join();
 	if (combineGenThread.joinable()) combineGenThread.join();
 	MatchScanStop(false);
+	MatchPracticeStop();
 	if (matchLoadThread.joinable()) matchLoadThread.join();
 	CombineExit();
 	BotRemove();
@@ -303,6 +321,13 @@ void RLCoach::OnVehicleInput(CarWrapper car)
 	ControllerInput in = car.GetInput();
 	lastInput = in;
 	BotDrive();
+
+	// Practise from here (a match moment in free play) runs the cars and ball itself
+	if (mpPhase != MpPhase::Off)
+	{
+		MatchPracticeTick(car);
+		return;
+	}
 
 	// The Combine runs the car and ball itself; the recorder sits out
 	if (combinePhase != CombinePhase::Off)
@@ -569,6 +594,7 @@ Frame RLCoach::CaptureAt(CarWrapper& car, BallWrapper& ball, const ControllerInp
 void RLCoach::OnBallTouch(CarWrapper car, void* params)
 {
 	if (matchScanning) { MatchOnTouch(car); return; }
+	if (mpPhase == MpPhase::Live || mpPhase == MpPhase::Result) { MatchPracticeTouch(car); return; }
 	if (combinePhase == CombinePhase::Live && !car.IsNull())
 	{
 		CarWrapper me = gameWrapper->GetLocalCar();

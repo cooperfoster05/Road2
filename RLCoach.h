@@ -728,6 +728,80 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void MatchJump(int frame);                              // game thread: moves the open replay there
 	bool ReplaySeek(int frame);                             // game thread: the replay to a frame, the way the replay viewer's own scrub bar does it
 	void RenderMatchReview(const MatchAnalysis& a, const std::shared_ptr<const MatchData>& data, bool sameReplayOpen);
+
+	// ---- Practise from here (Nov 13, RLCoachMatchPractice.cpp): a moment of a scanned match in free play. The ball and
+	// every car start where they were; you take one player; the others drive their real paths up to the moment, then
+	// Nexto drives them; the try is judged by the scoring chance against what happened in the game. Game thread unless
+	// marked. ----
+	enum class MpPhase { Off, Spawning, Frozen, Live, Result };
+	struct MpBot
+	{
+		int player = -1;                    // the scan's player this bot plays
+		int team = 0;                       // its team in free play (0 = yours)
+		uintptr_t addr = 0;                 // its car (0 = not found yet)
+		bool nexto = false;                 // Nexto drives it (else it's on its real path)
+		Nexto::Controls prev{}, now{};
+		std::vector<std::pair<int, Nexto::Controls>> queue;   // Nexto's choices waiting out its reaction time
+	};
+	MpPhase mpPhase = MpPhase::Off;
+	std::shared_ptr<const MatchData> mpData;
+	std::shared_ptr<const MatchAnalysis> mpAnalysis;
+	int mpMe = -1, mpTeam = 0, mpStart = 0, mpMoment = 0;   // you (a scan player), your team in the scan, the start and the moment (frame indexes)
+	bool mpMirror = false;                  // you were orange: everything is turned round so you're blue, as free play has you
+	std::vector<MpBot> mpBots;
+	int mpPhaseTicks = 0, mpLiveTicks = 0, mpTries = 0, mpSpawned = 0, mpPoss = -1, mpNextoTick = 0;
+	bool mpBallFree = false, mpTouched = false;
+	Vector mpCarPrev;
+	int mpSavedUnlimited = -1;
+	bool mpPadsUp[Nexto::kPads] = {};
+	int mpPadDown[Nexto::kPads] = {};
+	float mpChance[2] = { 0, 0 };          // the chance now, yours and theirs (free play teams)
+	std::string mpLabel, mpResult, mpReal; // what's being practised; how the last try went; what happened in the game
+	int mpResultGood = -1;                 // the last try against the game: 1 better, 0 about the same, -1 worse (-2 none yet)
+	// The round trip (Nov 13): from the replay into free play and back. And the practice list: moments marked while
+	// watching, played back to back like a Combine set.
+	struct MpItem { int frameIndex = 0, player = -1; std::string label; };
+	std::vector<MpItem> mpQueue;            // what to practise once free play has loaded (the list, or one moment)
+	bool mpQueueList = false;               // play the queue as a list (one counted try each) rather than one moment
+	int mpTripWait = 0;                     // frames waited for free play to load (-1 = not waiting)
+	std::string mpReturnId;                 // the replay to go back to (its id) and where in it (s)
+	float mpReturnTime = -1.0f;
+	std::vector<MpItem> mpList;             // the list being played
+	int mpListPos = -1;                     // which item (-1 = not playing a list)
+	std::vector<int> mpListGood;            // each item's counted try against the game: 1 better, 0 same, -1 worse, -2 not played
+	std::vector<std::string> mpListResult;
+	std::atomic<int> matchWho{ -1 };        // the player selected on the page (for the hotkey, which runs on the game thread)
+	struct UiMp
+	{
+		bool active = false, loading = false, canReturn = false;
+		std::string label, status, result, real;
+		int tries = 0, good = -2;
+		int listPos = -1;
+		std::vector<int> listGood;
+		std::vector<std::string> listResult;
+	};
+	UiMp uiMp;                              // guarded by uiMatchMutex
+	std::vector<MpItem> uiMatchList;        // render thread: the practice list for the open scan (saved beside it)
+	std::string uiMatchListFor;             // the scan it belongs to
+	void MatchPracticeGo(std::vector<MpItem> items, bool asList);   // game thread: from wherever you are (replay, menu, free play)
+	void MatchPracticeHere();               // game thread: the open replay's current moment, as the selected player
+	void MatchPracticeBack();               // game thread: back to the replay, where you left it
+	void MatchLoadFreeplay(const std::string& map);
+	void MatchPracticeTripTick();           // every frame: picks the trip up once free play has loaded
+	bool MatchItemNow(MpItem& out);         // the open replay's moment now (false: not the scanned replay, or nobody picked)
+	std::shared_ptr<int> matchFreeplayLoad = std::make_shared<int>(0);   // road2_match_freeplay_load
+	std::shared_ptr<int> matchReturnMode = std::make_shared<int>(0);     // road2_match_return_mode
+	std::mutex uiMatchListMutex;
+	std::vector<MpItem> uiMatchListAdd;     // moments added with the hotkey (game thread), picked up by the page
+	void MatchListLoad(const std::string& scanFile);   // render thread
+	void MatchListSave();                   // render thread
+	void MatchPracticeStart(int frameIndex, int player);   // frameIndex: into the scan's frames ("here"); free play only
+	void MatchPracticeStop();
+	void MatchPracticeTick(CarWrapper& car);
+	void MatchPracticeInput(CarWrapper& car, void* params);   // the bots' inputs (the pre-input hook)
+	void MatchPracticeTouch(CarWrapper& car);
+	void MatchPracticePublish(const std::string& status = std::string());
+	void DrawMatchPracticeHud(CanvasWrapper& canvas);
 	void DrawCombineHud(CanvasWrapper& canvas);
 	void DrawLearnRecoveryHud(CanvasWrapper& canvas);   // the Recovery lesson: momentum camera in the air, the back post ring
 	static int CombineMedal(int points, int maxPoints);   // 0 none, 1 bronze, 2 silver, 3 gold

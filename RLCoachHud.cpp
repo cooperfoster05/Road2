@@ -79,6 +79,7 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 	if (car.IsNull()) return;
 	DrawBotStatus(canvas);
 	DrawCombineHud(canvas);
+	DrawMatchPracticeHud(canvas);
 	DrawLearnRecoveryHud(canvas);
 	if (combinePhase != CombinePhase::Off) return;   // the Combine shows its own line only
 

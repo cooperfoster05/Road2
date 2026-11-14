@@ -111,6 +111,8 @@ static void SetupMore(RLCoach& p, const std::string& scene)
 			if (Has(scene, "zoom")) { p.uiMatchZoom = 5.0f; p.uiMatchView0 = 95.0f; }
 			if (Has(scene, "mine")) p.uiMatchFilter = 1;
 			if (Has(scene, "plays")) { p.uiMatchTab = 0; p.uiMatchFilter = 7; }
+			if (Has(scene, "picked")) { p.uiMatchTab = 0; p.uiMatchSel = 20; }
+			if (Has(scene, "mp")) { p.uiMp.active = true; p.uiMp.label = "foster. at 4:37"; p.uiMp.result = "Your chance 41%, theirs 6%"; p.uiMp.real = "In the game 6 s on: your chance 9%, theirs 4%"; p.uiMp.tries = 3; p.uiMp.good = 1; }
 		}
 	}
 	if (Has(scene, "combine")) { p.uiCombineMode = true; p.CombineOpen(); p.uiCombineLevel = 5; }
@@ -118,6 +120,19 @@ static void SetupMore(RLCoach& p, const std::string& scene)
 static void Frame(RLCoach& p, const std::string& scene, int f)
 {
 	if (f == 2) { if (Has(scene, "best")) p.uiTab = 2; if (Has(scene, "fix")) p.uiTab = 1; }
+	if (f == 3 && Has(scene, "list") && p.uiMatchAnalysis)
+	{
+		p.uiMatchTab = 0;
+		p.uiMatchList = { { 100, 0, "4:37 Shot by foster." }, { 900, 0, "3:12" }, { 2000, 0, "1:55 Beaten by Tiger" }, { 2600, 0, "0:41 Double commit" } };
+		p.uiMp.listPos = 2; p.uiMp.listGood = { 1, -1, -2, -2 }; p.uiMp.listResult = { "Your chance 41%", "Your chance 3%", "", "" };
+		p.uiMp.active = true; p.uiMp.label = "foster. at 1:55"; p.uiMp.canReturn = true; p.uiMp.status = "Move to start";
+	}
+	if (f == 3 && Has(scene, "now") && p.uiMatchAnalysis)
+	{
+		p.uiMatchTab = 0;
+		p.uiMatch.inReplay = true; p.uiMatchOpenReplay = p.uiMatchAnalysis->replayName; p.uiMatchNowFrame = 1500;
+	}
+	if (f == 3 && Has(scene, "loading")) { p.uiMp.loading = true; p.uiMp.canReturn = true; p.uiMp.status = "Loading free play..."; }
 	if (Has(scene, "settings"))
 	{
 		if (Has(scene, "fail")) { p.predictor.ready = false; p.predictor.status = "No arena files: Found 12 of the arena's 16 pieces in the game's files (a game update may have changed them)"; }
