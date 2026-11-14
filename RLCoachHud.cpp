@@ -72,6 +72,7 @@ void RLCoach::RenderHud(CanvasWrapper canvas)
 {
 	UpdateRatingKeys();
 	Units::SpeedMode() = *speedUnits;
+	MatchSample();   // match review: reads the replay while one is being scanned (does nothing otherwise)
 
 	if (!IsOfflinePractice()) return;
 	CarWrapper car = gameWrapper->GetLocalCar();

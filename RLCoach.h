@@ -16,6 +16,7 @@
 #include "Grader.h"
 #include "GradeBook.h"
 #include "Habits.h"
+#include "Match.h"
 #include "Coach.h"
 #include "WhatIf.h"
 #include "ControllerOverlay.h"
@@ -30,6 +31,7 @@
 #include <atomic>
 #include <map>
 #include <set>
+#include <array>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -658,6 +660,74 @@ class RLCoach: public BakkesMod::Plugin::BakkesModPlugin
 	void CombineLoadBests();
 	void CombineSaveBests();
 	void RenderCombine();
+
+	// ---- Match review, step 1: scanning a replay (RLCoachMatch.cpp) ----
+	std::shared_ptr<float> matchScanSpeed = std::make_shared<float>(1.0f);   // road2_match_scan_speed: tries to play the replay faster while scanning
+	std::shared_ptr<int> matchSeekMode = std::make_shared<int>(0);          // road2_match_seek_mode: how a jump moves the replay (see ReplaySeek)
+	bool matchPausedNote = false;                                           // the scan is showing "paused: press play"
+	bool matchInReplay = false, matchScanning = false;      // game thread, all of these
+	int matchTotalFrames = 0, matchLastFrame = -1, matchCaptured = 0, matchGaps = 0, matchStall = 0;
+	float matchRate = 0.0f;                                 // replay frames read per second
+	std::chrono::steady_clock::time_point matchScanBegan{};
+	std::string matchRows, matchStatus, matchReplayName, matchSavedFile;
+	std::unordered_map<std::string, int> matchPlayerIds;    // player name -> id in the file
+	std::vector<std::string> matchPlayers;                  // "Blue: name", in id order
+	std::vector<std::array<int, 6>> matchCounters;          // per player: touches, shots, saves, goals, assists, score
+	struct UiMatch
+	{
+		bool inReplay = false, scanning = false;
+		int frame = 0, frames = 0, captured = 0, gaps = 0;
+		float rate = 0.0f;
+		std::string status, replayName, savedFile;
+		std::vector<std::string> players;
+	};
+	std::mutex uiMatchMutex;
+	UiMatch uiMatch;
+	std::atomic<bool> uiMatchMode{ false };                 // the window shows the match review page
+	void MatchSample();                  // every rendered frame
+	void MatchScanStart();
+	void MatchScanStop(bool save);
+	void MatchOnTouch(CarWrapper& car);
+	void MatchPublish();
+	void RenderMatch();
+	// the breakdown of a scanned replay (step 1b): loaded and worked out on its own thread
+	std::thread matchLoadThread;
+	std::atomic<bool> matchLoadBusy{ false };
+	std::shared_ptr<const MatchAnalysis> uiMatchAnalysis;   // guarded by uiMatchMutex; null = none loaded
+	std::shared_ptr<const MatchData> uiMatchData;           // guarded by uiMatchMutex; the scan itself (for opening a shot)
+	// a shot opened like a rep (render thread): worked out when you pick a shot, a save or a goal
+	struct UiMatchShot
+	{
+		bool ok = false;
+		std::string error;
+		int player = -1;
+		Match::ShotRep rep;
+		ShotAnalysis shot;
+		RepSegments segs;
+		RepGrade grade;
+	};
+	UiMatchShot uiMatchShot;
+	int uiMatchShotFor = -1;                                // the moment it was worked out for
+	std::string uiMatchShotFile, uiMatchShotSaved;          // the scan it belongs to; what was said after "Practise this shot"
+	bool uiMatchRepsStale = false;                          // a shot was saved as a rep: refresh the rep list on the way back
+	std::string uiMatchChanceTip;   // the timeline's scoring-chance hover text, drawn once the moment ticks have had their say
+	float uiMatchZoom = 1.0f, uiMatchView0 = 0.0f, uiMatchKeepScroll = 0.0f;   // the timeline: how far in, the left edge's time
+	bool uiMatchDragged = false;
+	std::string uiMatchLoadedFile, uiMatchLoadError;        // guarded by uiMatchMutex
+	std::atomic<int> uiMatchNowFrame{ -1 };                 // the open replay's current frame (-1 = no replay open)
+	std::string matchOpenReplayName;                        // game thread: the open replay's name
+	std::string uiMatchOpenReplay;                          // guarded by uiMatchMutex
+	// render thread only
+	std::vector<std::string> uiMatchFiles;                  // the scans in the matches folder, newest first
+	bool uiMatchFilesStale = true;
+	int uiMatchMe = -1, uiMatchSel = -1, uiMatchTab = 2, uiMatchFilter = 0;   // tab: 2 takeaways, 0 moments, 1 numbers
+	std::vector<int> uiMatchPick;                           // the moments behind the takeaway you clicked (filter 5)
+	std::string uiMatchMeFor;                               // the file uiMatchMe was picked for
+	bool uiMatchShowScan = false;
+	void MatchLoad(const std::string& file);                // any thread
+	void MatchJump(int frame);                              // game thread: moves the open replay there
+	bool ReplaySeek(int frame);                             // game thread: the replay to a frame, the way the replay viewer's own scrub bar does it
+	void RenderMatchReview(const MatchAnalysis& a, const std::shared_ptr<const MatchData>& data, bool sameReplayOpen);
 	void DrawCombineHud(CanvasWrapper& canvas);
 	void DrawLearnRecoveryHud(CanvasWrapper& canvas);   // the Recovery lesson: momentum camera in the air, the back post ring
 	static int CombineMedal(int points, int maxPoints);   // 0 none, 1 bronze, 2 silver, 3 gold

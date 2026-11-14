@@ -1147,6 +1147,11 @@ void RLCoach::RenderWindow()
 		RenderCombine();
 		return;
 	}
+	if (uiMatchMode)
+	{
+		RenderMatch();
+		return;
+	}
 	ImFont* fLabel = uiFonts[UiFonts::Label];
 	ImFont* fBold = uiFonts[UiFonts::Bold];
 	ImFont* fHead = uiFonts[UiFonts::Head];
@@ -1169,7 +1174,7 @@ void RLCoach::RenderWindow()
 	Wordmark(fDisplay, "Rep viewer");
 	{
 		std::string info = std::format("{} reps", repList.size());
-		float w = ImGui::CalcTextSize(info.c_str()).x + ImGui::CalcTextSize("Refresh").x + ImGui::CalcTextSize("Learn").x + ImGui::CalcTextSize("Combine").x + 76.0f * S;
+		float w = ImGui::CalcTextSize(info.c_str()).x + ImGui::CalcTextSize("Refresh").x + ImGui::CalcTextSize("Learn").x + ImGui::CalcTextSize("Combine").x + ImGui::CalcTextSize("Match").x + 98.0f * S;
 		ImGui::SameLine(std::max(200.0f * S, ImGui::GetWindowContentRegionMax().x - w));
 		ImGui::TextDisabled("%s", info.c_str());
 		ImGui::SameLine();
@@ -1190,6 +1195,8 @@ void RLCoach::RenderWindow()
 			uiCombineMode = true;
 			onGame([this]() { CombineOpen(); });
 		}
+		ImGui::SameLine();
+		if (LinkButton("Match")) uiMatchMode = true;
 	}
 	if (!*welcomeDone) RenderWelcome();
 

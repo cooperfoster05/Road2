@@ -114,6 +114,7 @@ static void OnSegv(int, siginfo_t*, void* ctx)
 int main(int argc, char** argv)
 {
 	const std::string scene = argc > 1 ? argv[1] : "list";
+	if (getenv("PREV_H")) H = atoi(getenv("PREV_H"));   // a tall screen, to see a whole page at once
 	const std::string out = argc > 2 ? argv[2] : "out.rgba";
 	const std::string data = "/home/claude/h/data";
 	struct sigaction sa{}; sa.sa_sigaction = OnSegv; sa.sa_flags = SA_SIGINFO | SA_NODEFER; sigaction(SIGSEGV, &sa, nullptr);
@@ -157,6 +158,7 @@ int main(int argc, char** argv)
 		io.MousePos = MousePos(scene);
 		ImGui::NewFrame();
 		ImGui::SetNextWindowPos(ImVec2(40, 20), ImGuiCond_Always);
+		if (getenv("PREV_H")) ImGui::SetNextWindowSize(ImVec2(540, (float)H - 40), ImGuiCond_Always);
 		Frame(p, scene, f);
 		ImGui::Render();
 		std::this_thread::sleep_for(std::chrono::milliseconds(60));

@@ -146,6 +146,10 @@ void RLCoach::onLoad()
 	// tools" is on in the settings (Nov 6, for v1): testers never see them in the console
 	cvarManager->getCvar("road2_dev_tools").addOnValueChanged([this](std::string, CVarWrapper cv) { SetDevCommands(cv.getBoolValue()); });
 	SetDevCommands(*devTools);
+	cvarManager->registerCvar("road2_match_scan_speed", "1", "Match review: how fast to play a replay while scanning it (1 = normal speed)", true, true, 1, true, 8)
+		.bindTo(matchScanSpeed);
+	cvarManager->registerCvar("road2_match_seek_mode", "0", "Match review: how a jump moves the replay. 0 = like the replay's own scrub bar, 1 = the replay's skip with a full reload, 2 = the old way (Nov 13)", true, true, 0, true, 2)
+		.bindTo(matchSeekMode);
 	cvarManager->registerCvar("road2_combine_momentum_cam", "1", "Recovery (the Combine and the Learn lesson): point the camera the way you're travelling until you land", true, true, 0, true, 1)
 		.bindTo(combineMomentumCam);
 
@@ -232,6 +236,8 @@ void RLCoach::onUnload()
 	whatIfCancel = true;
 	if (whatIfThread.joinable()) whatIfThread.join();
 	if (combineGenThread.joinable()) combineGenThread.join();
+	MatchScanStop(false);
+	if (matchLoadThread.joinable()) matchLoadThread.join();
 	CombineExit();
 	BotRemove();
 	PracticeExit();
@@ -562,6 +568,7 @@ Frame RLCoach::CaptureAt(CarWrapper& car, BallWrapper& ball, const ControllerInp
 
 void RLCoach::OnBallTouch(CarWrapper car, void* params)
 {
+	if (matchScanning) { MatchOnTouch(car); return; }
 	if (combinePhase == CombinePhase::Live && !car.IsNull())
 	{
 		CarWrapper me = gameWrapper->GetLocalCar();

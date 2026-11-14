@@ -159,6 +159,12 @@
     <ClCompile Include="RLCoachCombine.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>
+    <ClCompile Include="RLCoachMatch.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
+    <ClCompile Include="Match.cpp">
+      <Filter>Plugin\src</Filter>
+    </ClCompile>
     <ClCompile Include="Nexto.cpp">
       <Filter>Plugin\src</Filter>
     </ClCompile>

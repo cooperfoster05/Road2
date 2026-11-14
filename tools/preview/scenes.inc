@@ -59,7 +59,7 @@ static void Setup(RLCoach& p, const std::string& scene)
 	p.RefreshRepList();
 	for (int i = 0; i < 600 && p.gradeThreadBusy; i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
 	SetupMore(p, scene);
-	if (Has(scene, "review") || Has(scene, "best") || Has(scene, "fix"))
+	if (!Has(scene, "match") && (Has(scene, "review") || Has(scene, "best") || Has(scene, "fix")))
 		LoadPure(p, Has(scene, "good") ? "rep_2026-11-08_22-49-07_276.csv" : "rep_2026-11-08_22-26-00_013.csv");
 }
 static void SetupMore(RLCoach& p, const std::string& scene)
@@ -84,6 +84,34 @@ static void SetupMore(RLCoach& p, const std::string& scene)
 		if (u.done) u.medal = "BRONZE";
 		p.uiDoneAt = -10.0;
 		p.uiDoneCode = u.code;
+	}
+	if (Has(scene, "match"))
+	{
+		p.uiMatchMode = true;
+		RLCoach::UiMatch& u = p.uiMatch;
+		u.inReplay = true; u.replayName = "2026-11-10.22.41 Coop Ranked Doubles Win";
+		if (Has(scene, "scan")) { u.scanning = true; u.frame = 4210; u.frames = 10980; u.captured = 4208; u.rate = 30.0f; u.status = "Scanning: the replay plays through once"; }
+		if (Has(scene, "saved")) { u.savedFile = "2026-11-10_22_41_Coop_Ranked_Doubles_Win.csv"; u.status = "Read 10978 of 10980 frames in 366 s (2 skipped). Saved to matches\\2026-11-10_22_41_Coop_Ranked_Doubles_Win.csv"; }
+		u.players = { "Blue: Coop", "Blue: teammate", "Orange: opponent one", "Orange: opponent two" };
+		if (Has(scene, "review"))
+		{
+			u = RLCoach::UiMatch{};
+			u.inReplay = true;
+			p.uiMatchFilesStale = true;
+			p.uiMatchOpenReplay = "clip 220";
+			p.uiMatchNowFrame = 2400;
+			p.MatchLoad("clip_220.csv");
+			for (int i = 0; i < 200 && p.matchLoadBusy; i++) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			p.uiMatchMeFor = "clip_220.csv"; p.uiMatchMe = 2; p.uiMatchSel = 24; p.uiMatchView0 = 0.0f;
+			if (Has(scene, "numbers")) p.uiMatchTab = 1;
+			if (Has(scene, "moments") || Has(scene, "shot") || Has(scene, "zoom") || Has(scene, "mine")) p.uiMatchTab = 0;
+			if (Has(scene, "stealth")) p.uiMatchMe = 1;
+			if (Has(scene, "nosel")) p.uiMatchSel = -1;
+			if (Has(scene, "shot")) p.uiMatchSel = 31;
+			if (Has(scene, "zoom")) { p.uiMatchZoom = 5.0f; p.uiMatchView0 = 95.0f; }
+			if (Has(scene, "mine")) p.uiMatchFilter = 1;
+			if (Has(scene, "plays")) { p.uiMatchTab = 0; p.uiMatchFilter = 7; }
+		}
 	}
 	if (Has(scene, "combine")) { p.uiCombineMode = true; p.CombineOpen(); p.uiCombineLevel = 5; }
 }
